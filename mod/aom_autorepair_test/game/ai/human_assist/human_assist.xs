@@ -1137,14 +1137,18 @@ void autoRepairPOC_watchdog()
    }
 }
 
-// Fast watchdog runs separately at 1Hz so we catch player overrides within
-// ~1 second instead of waiting for the main rule's 3-second cycle. This was
-// most visible on Berserkers, where short player commands (move-here, attack
-// one enemy) often complete in well under 3 s -- by the time the main rule
-// would have caught the override, the unit was already idle again and would
-// be re-claimed.
+// Watchdog runs every game update (highFrequency = minInterval/maxInterval
+// of 1 ms). This is necessary to beat the engine's plan-system re-task cycle:
+// each game update the script's rules run first, THEN the engine's internal
+// processing (including plan unit re-tasking) runs. By executing on every
+// frame with priority 80, we reliably remove player-redirected units from our
+// plan before the engine has a chance to re-issue the repair task.
+//
+// The watchdog body is cheap (KB queries only, no plan creation), so it fits
+// well within the per-AI ~5 ms script budget per game update.
 rule autoRepairPOC_watchdogRule
-minInterval 1
+highFrequency
+priority 80
 active
 {
    xsSetContextPlayer(cMyID);
