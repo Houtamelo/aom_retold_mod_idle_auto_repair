@@ -1038,7 +1038,15 @@ bool autoRepairPOC_tryAssign(int unitID = -1, int builderType = -1, string kind 
       }
       aiPlanSetVariableInt(planID, cRepairPlanTargetID, 0, buildingID);
       aiPlanSetPriority(planID, 70);
-      aiPlanSetBaseID(planID, kbUnitGetBaseID(buildingID));
+      // For human-player-assist, individual buildings don't get a baseID via
+      // chairon's discovery rules. Use the player's main base (which vanilla
+      // human_assist already initializes if available). Skip baseID entirely
+      // when the player has no main base.
+      int mainBaseID = kbBaseGetMainID(cMyID);
+      if (mainBaseID >= 0)
+      {
+         aiPlanSetBaseID(planID, mainBaseID);
+      }
       // Vanilla pattern: add a unit-TYPE slot, not a specific unit. Plan system
       // auto-assigns from the matching idle pool. Counts (1, 1, 1) = (min, max, ideal).
       aiPlanAddUnitType(planID, builderType, 1, 1, 1);
