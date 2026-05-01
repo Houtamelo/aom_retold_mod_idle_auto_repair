@@ -48,6 +48,8 @@ bool gAllowedToFarm = false;
 int gAutoRepairPOC_villagerQuery = -1;
 int gAutoRepairPOC_norseQuery = -1;
 int gAutoRepairPOC_buildingQuery = -1;
+// Max builders we'll have on a single building at once.
+const int cAutoRepairPOC_MaxBuilders = 5;
 // === MOD: aom_autorepair_test -- END ===
 
 const int cDistributionDelayUI = 1;
