@@ -19,12 +19,9 @@
 // Max simultaneous builders per damaged building.
 const int cAutoRepair_MaxBuilders = 5;
 
-// Search radius (tiles) within which a unit considers buildings for auto-repair.
-const float cAutoRepair_SearchRadius = 20.0;
-
 int gAutoRepair_villagerQuery  = -1;  // idle villagers (most civs)
 int gAutoRepair_norseQuery     = -1;  // idle Norse soldier-builders
-int gAutoRepair_buildingQuery  = -1;  // friendly buildings near a unit (set per call)
+int gAutoRepair_buildingQuery  = -1;  // friendly buildings near a unit (position + radius set per call)
 
 void autoRepair_setupQueries()
 {
@@ -49,11 +46,13 @@ void autoRepair_setupQueries()
    }
    if (gAutoRepair_buildingQuery == -1)
    {
+      // Position and maximum distance get set per call in autoRepair_tryAssign
+      // (distance = the calling unit's LOS, so the unit only repairs what it
+      // can actually see).
       gAutoRepair_buildingQuery = kbUnitQueryCreate("autoRepair_buildings");
       kbUnitQuerySetPlayerID(gAutoRepair_buildingQuery, cMyID, false);
       kbUnitQuerySetUnitType(gAutoRepair_buildingQuery, cUnitTypeBuilding);
       kbUnitQuerySetState(gAutoRepair_buildingQuery, cUnitStateAlive);
-      kbUnitQuerySetMaximumDistance(gAutoRepair_buildingQuery, cAutoRepair_SearchRadius);
       kbUnitQuerySetAscendingSort(gAutoRepair_buildingQuery, true);  // closest first
    }
 }
@@ -70,8 +69,13 @@ bool autoRepair_tryAssign(int unitID = -1, int builderType = -1, string kind = "
 {
    if (unitID < 0) { return(false); }
 
+   // Restrict candidates to what THIS unit can see. LOS in AoMR is a circular
+   // radius around the unit, so plugging the LOS stat directly into
+   // kbUnitQuerySetMaximumDistance gives us the exact "in line of sight" set.
    vector pos = kbUnitGetPosition(unitID);
+   float los = kbUnitGetStatFloat(unitID, cUnitStatLOS);
    kbUnitQuerySetPosition(gAutoRepair_buildingQuery, pos);
+   kbUnitQuerySetMaximumDistance(gAutoRepair_buildingQuery, los);
    kbUnitQueryResetResults(gAutoRepair_buildingQuery);
    int buildingCount = kbUnitQueryExecute(gAutoRepair_buildingQuery);
    if (buildingCount <= 0) { return(false); }
