@@ -10,7 +10,9 @@
         <protoaction>
             <name>AutoRepair</name>
             <type>AutoRepair</type>
-            <maxrange>0.2</maxrange>
+            <anim>Build</anim>
+            <persistent>1</persistent>
+            <maxrange>1.0</maxrange>
             <autocastdistance>20.0</autocastdistance>
             <rate type="Building">0.4</rate>
             <autocastbyself>1</autocastbyself>
@@ -28,7 +30,9 @@
         <protoaction>
             <name>AutoRepair</name>
             <type>Repair</type>
-            <maxrange>0.2</maxrange>
+            <anim>Build</anim>
+            <persistent>1</persistent>
+            <maxrange>1.0</maxrange>
             <autocastdistance>20.0</autocastdistance>
             <rate type="Building">0.4</rate>
             <autocastbyself>1</autocastbyself>
