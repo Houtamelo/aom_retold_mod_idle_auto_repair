@@ -14,7 +14,7 @@
             <autocastdistance>20.0</autocastdistance>
             <rate type="Building">0.4</rate>
             <autocastbyself>1</autocastbyself>
-            <active>0</active>
+            <active>1</active>
         </protoaction>
     </unit>
 </protomods>
