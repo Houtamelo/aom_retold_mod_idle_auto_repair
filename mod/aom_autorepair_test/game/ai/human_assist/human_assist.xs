@@ -946,8 +946,11 @@ void setDistributionNumbers(int food = 0, int wood = 0, int gold = 0)
 
 //==============================================================================
 // === MOD: aom_autorepair_test — POC RULE BEGIN ===
-// Tests whether aiTaskWorkUnit on a damaged friendly building results in a
-// real Repair work command (animation plays, HP recovers, wood is deducted).
+// Issues an explicit cPlanRepair plan (NOT aiTaskWorkUnit, which is right-click-
+// equivalent and would resolve to Pray/Sacrifice/Deliver-resource depending on
+// target type). cPlanRepair is what the vanilla AI's own building-repair logic
+// uses (see core/buildings/buildings.xs around line 1282) and triggers the
+// engine's regular Repair action with normal resource cost.
 // Active by default for POC; production version will gate on a player toggle.
 //==============================================================================
 void autoRepairPOC_setupQueries()
@@ -1012,14 +1015,26 @@ active
          float maxPower = kbUnitGetPower(buildingID, false);
          float curPower = kbUnitGetPower(buildingID, true);
 
-         if (maxPower > curPower + 0.001)
+         if (maxPower <= curPower + 0.001) { continue; }
+
+         // Don't stack plans on the same target.
+         int existingPlan = aiPlanGetIDByTypeAndVariableIntValue(cPlanRepair, cRepairPlanTargetID, buildingID);
+         if (existingPlan >= 0) { continue; }
+
+         aiEcho("autoRepairPOC: creating cPlanRepair villager=" + villagerID + " building=" + buildingID + " (power " + curPower + "/" + maxPower + ")");
+         int planID = aiPlanCreate("autoRepairPOC " + buildingID, cPlanRepair, -1, -1);
+         if (planID < 0)
          {
-            aiEcho("autoRepairPOC: tasking villager " + villagerID + " -> building " + buildingID + " (power " + curPower + "/" + maxPower + ")");
-            bool success = aiTaskWorkUnit(villagerID, buildingID, false);
-            aiEcho("autoRepairPOC: aiTaskWorkUnit returned " + success);
-            xsSetContextPlayer(-1);
-            return;
+            aiEcho("autoRepairPOC: aiPlanCreate FAILED");
+            continue;
          }
+         aiPlanSetVariableInt(planID, cRepairPlanTargetID, 0, buildingID);
+         aiPlanSetPriority(planID, 60);
+         aiPlanSetBaseID(planID, kbUnitGetBaseID(buildingID));
+         bool added = aiPlanAddUnit(planID, villagerID);
+         aiEcho("autoRepairPOC: aiPlanAddUnit returned " + added + " planID=" + planID);
+         xsSetContextPlayer(-1);
+         return;
       }
    }
 
