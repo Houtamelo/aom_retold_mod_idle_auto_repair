@@ -987,7 +987,13 @@ void autoRepairPOC_setupQueries()
 }
 
 // Returns true when a repair plan was created (caller stops iterating).
-bool autoRepairPOC_tryAssign(int unitID = -1, string kind = "Unknown")
+// builderType is the unit-type SLOT added to the plan -- not a specific unit ID.
+// Vanilla `addBuilderTypesToPlan` (core/buildings/utilities_buildings.xs) uses
+// the same primitive: `aiPlanAddUnitType` with the appropriate builder type per
+// culture. The plan system then auto-assigns from the player's matching idle
+// pool. Specific-unit assignment via `aiPlanAddUnit` is not how vanilla does
+// repair plans and appears to fail silently.
+bool autoRepairPOC_tryAssign(int unitID = -1, int builderType = -1, string kind = "Unknown")
 {
    if (unitID < 0) { return(false); }
 
@@ -1023,7 +1029,7 @@ bool autoRepairPOC_tryAssign(int unitID = -1, string kind = "Unknown")
          continue;
       }
 
-      aiEcho("autoRepairPOC: creating cPlanRepair unit=" + unitID + " kind=" + kind + " building=" + buildingID + " (hpRatio=" + hpRatio + ")");
+      aiEcho("autoRepairPOC: creating cPlanRepair kind=" + kind + " building=" + buildingID + " (hpRatio=" + hpRatio + ")");
       int planID = aiPlanCreate("autoRepairPOC " + buildingID, cPlanRepair, -1, -1);
       if (planID < 0)
       {
@@ -1033,8 +1039,10 @@ bool autoRepairPOC_tryAssign(int unitID = -1, string kind = "Unknown")
       aiPlanSetVariableInt(planID, cRepairPlanTargetID, 0, buildingID);
       aiPlanSetPriority(planID, 70);
       aiPlanSetBaseID(planID, kbUnitGetBaseID(buildingID));
-      bool added = aiPlanAddUnit(planID, unitID);
-      aiEcho("autoRepairPOC: aiPlanAddUnit returned " + added + " planID=" + planID);
+      // Vanilla pattern: add a unit-TYPE slot, not a specific unit. Plan system
+      // auto-assigns from the matching idle pool. Counts (1, 1, 1) = (min, max, ideal).
+      aiPlanAddUnitType(planID, builderType, 1, 1, 1);
+      aiEcho("autoRepairPOC: cPlanRepair created planID=" + planID + " builderType=" + builderType);
       return(true);
    }
    return(false);
@@ -1048,14 +1056,22 @@ active
    xsSetContextPlayer(cMyID);
    autoRepairPOC_setupQueries();
 
-   // Pool 1: villagers.
+   // Pool 1: villagers. Pick culture-appropriate builder type for the plan slot.
+   // Chinese villagers don't fit AbstractVillager cleanly per vanilla
+   // addBuilderTypesToPlan; rest of cultures use AbstractVillager.
+   int villagerBuilderType = cUnitTypeAbstractVillager;
+   if (cMyCulture == cCultureChinese)
+   {
+      villagerBuilderType = cUnitTypeVillagerChinese;
+   }
+
    kbUnitQueryResetResults(gAutoRepairPOC_villagerQuery);
    int villagerCount = kbUnitQueryExecute(gAutoRepairPOC_villagerQuery);
    aiEcho("autoRepairPOC: idleVillagerCount=" + villagerCount);
    for (int i = 0; i < villagerCount; i++)
    {
       int villagerID = kbUnitQueryGetResult(gAutoRepairPOC_villagerQuery, i);
-      if (autoRepairPOC_tryAssign(villagerID, "Villager") == true)
+      if (autoRepairPOC_tryAssign(villagerID, villagerBuilderType, "Villager") == true)
       {
          xsSetContextPlayer(-1);
          return;
@@ -1070,7 +1086,7 @@ active
    for (int n = 0; n < norseCount; n++)
    {
       int norseID = kbUnitQueryGetResult(gAutoRepairPOC_norseQuery, n);
-      if (autoRepairPOC_tryAssign(norseID, "NorseInfantry") == true)
+      if (autoRepairPOC_tryAssign(norseID, cUnitTypeLogicalTypeNorseSoldierThatBuilds, "NorseInfantry") == true)
       {
          xsSetContextPlayer(-1);
          return;
