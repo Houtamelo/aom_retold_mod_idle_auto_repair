@@ -1025,8 +1025,26 @@ bool autoRepairPOC_tryAssign(int unitID = -1, int builderType = -1, string kind 
       int existingPlan = aiPlanGetIDByTypeAndVariableIntValue(cPlanRepair, cRepairPlanTargetID, buildingID);
       if (existingPlan >= 0)
       {
-         aiEcho("autoRepairPOC:       skip -- existing plan " + existingPlan);
-         continue;
+         int existingUnits = aiPlanGetNumberUnits(existingPlan);
+         if (existingUnits == 0)
+         {
+            // Bug 1: orphaned plan (cancelled mid-repair). Destroy and recreate.
+            aiEcho("autoRepairPOC:       destroying orphaned plan " + existingPlan);
+            aiPlanDestroy(existingPlan);
+            existingPlan = -1;
+         }
+         else if (existingUnits >= cAutoRepairPOC_MaxBuilders)
+         {
+            aiEcho("autoRepairPOC:       skip -- plan " + existingPlan + " full (" + existingUnits + ")");
+            continue;
+         }
+         else
+         {
+            // Bug 3: room for more builders. Add this unit to the existing plan.
+            bool addedToExisting = aiPlanAddUnit(existingPlan, unitID);
+            aiEcho("autoRepairPOC:       adding to plan " + existingPlan + " aiPlanAddUnit=" + addedToExisting + " (now " + (existingUnits + 1) + " builders)");
+            return(true);
+         }
       }
 
       aiEcho("autoRepairPOC: creating cPlanRepair kind=" + kind + " building=" + buildingID + " (hpRatio=" + hpRatio + ")");
@@ -1049,8 +1067,8 @@ bool autoRepairPOC_tryAssign(int unitID = -1, int builderType = -1, string kind 
          aiPlanSetBaseID(planID, mainBaseID);
       }
       // Per aiPlanAddUnitType doc: MUST be called before aiPlanAddUnit, or the
-      // plan will reject the unit. Counts: (numberNeed=1, numberWant=1, numberMax=1).
-      aiPlanAddUnitType(planID, builderType, 1, 1, 1);
+      // plan will reject the unit. Counts: (numberNeed=1, numberWant=max, numberMax=max).
+      aiPlanAddUnitType(planID, builderType, 1, cAutoRepairPOC_MaxBuilders, cAutoRepairPOC_MaxBuilders);
       // Per aiPlanAddUnit doc: if the unit is in the parent plan (gReservePlan
       // for villagers), it gets auto-loaned to this plan. For Norse infantry
       // (not in reserve), it's a direct assignment.
@@ -1061,6 +1079,42 @@ bool autoRepairPOC_tryAssign(int unitID = -1, int builderType = -1, string kind 
    return(false);
 }
 
+// Watchdog: walk every cPlanRepair plan we own, drop units that aren't
+// actively pursuing a repair (the player or engine put them on something else).
+// Destroys plans that end up empty so the next tick's main loop can re-evaluate
+// from a clean slate. The "active" set is tight: Repair, Move (heading to
+// target), Build, Work, plus brief Idle for transitional ticks. Anything else
+// (Attack, Gather, Hunting, Trade, etc.) means the unit has been redirected.
+void autoRepairPOC_watchdog()
+{
+   int planCount = aiPlanGetNumberByType(cPlanRepair);
+   for (int p = 0; p < planCount; p++)
+   {
+      int planID = aiPlanGetIDByTypeIndex(cPlanRepair, p);
+      if (planID < 0) { continue; }
+
+      int[] units = aiPlanGetUnits(planID);
+      for (int u = 0; u < units.size(); u++)
+      {
+         int unitID = units[u];
+         int action = kbUnitGetActionType(unitID);
+         if (action == cActionTypeRepair) { continue; }
+         if (action == cActionTypeMove)   { continue; }
+         if (action == cActionTypeBuild)  { continue; }
+         if (action == cActionTypeWork)   { continue; }
+         if (action == cActionTypeIdle)   { continue; }
+         aiEcho("autoRepairPOC: watchdog removing unit " + unitID + " from plan " + planID + " (action=" + action + ")");
+         aiPlanRemoveUnit(planID, unitID);
+      }
+
+      if (aiPlanGetNumberUnits(planID) == 0)
+      {
+         aiEcho("autoRepairPOC: watchdog destroying empty plan " + planID);
+         aiPlanDestroy(planID);
+      }
+   }
+}
+
 rule autoRepairPOC
 minInterval 3
 active
@@ -1068,6 +1122,7 @@ active
    aiEcho("autoRepairPOC: rule tick");
    xsSetContextPlayer(cMyID);
    autoRepairPOC_setupQueries();
+   autoRepairPOC_watchdog();
 
    // Pool 1: villagers. Pick culture-appropriate builder type for the plan slot.
    // Chinese villagers don't fit AbstractVillager cleanly per vanilla
