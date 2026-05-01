@@ -4,19 +4,14 @@
         <maxhitpoints>1500</maxhitpoints>
         <initialhitpoints>1500</initialhitpoints>
 
-        <flag>CastAbilitySelf</flag>
-        <flag>AutoCommandStartDisabled</flag>
+        <flag>CanAutoHeal</flag>
 
         <protoaction>
             <name>AutoRepair</name>
-            <type>AutoRepair</type>
-            <anim>Build</anim>
-            <persistent>1</persistent>
-            <maxrange>5.0</maxrange>
-            <autocastdistance>20.0</autocastdistance>
-            <rate type="Building">0.4</rate>
-            <autocastbyself>1</autocastbyself>
-            <active>1</active>
+            <type>Heal</type>
+            <maxrange>0.5</maxrange>
+            <rate type="Berserk">15.0</rate>
+            <slowhealmultiplier>0.50</slowhealmultiplier>
         </protoaction>
     </unit>
 
@@ -24,19 +19,14 @@
         <maxhitpoints>1500</maxhitpoints>
         <initialhitpoints>1500</initialhitpoints>
 
-        <flag>CastAbilitySelf</flag>
-        <flag>AutoCommandStartDisabled</flag>
+        <flag>CanAutoHeal</flag>
 
         <protoaction>
             <name>AutoRepair</name>
-            <type>Repair</type>
-            <anim>Build</anim>
-            <persistent>1</persistent>
-            <maxrange>5.0</maxrange>
-            <autocastdistance>20.0</autocastdistance>
-            <rate type="Building">0.4</rate>
-            <autocastbyself>1</autocastbyself>
-            <active>1</active>
+            <type>Heal</type>
+            <maxrange>0.5</maxrange>
+            <rate type="Building">15.0</rate>
+            <slowhealmultiplier>0.50</slowhealmultiplier>
         </protoaction>
     </unit>
 </protomods>
