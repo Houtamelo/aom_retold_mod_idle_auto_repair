@@ -44,11 +44,11 @@ int gLastDistributionTime = -1;
 bool gEnabled = false;
 bool gAllowedToFarm = false;
 
-// === MOD: aom_autorepair_test — POC globals ===
+// === MOD: aom_autorepair_test -- POC globals ===
 int gAutoRepairPOC_villagerQuery = -1;
 int gAutoRepairPOC_norseQuery = -1;
 int gAutoRepairPOC_buildingQuery = -1;
-// === MOD: aom_autorepair_test — END ===
+// === MOD: aom_autorepair_test -- END ===
 
 const int cDistributionDelayUI = 1;
 const int cDistributionDelayUser = 60;
@@ -946,7 +946,7 @@ void setDistributionNumbers(int food = 0, int wood = 0, int gold = 0)
 }
 
 //==============================================================================
-// === MOD: aom_autorepair_test — POC RULE BEGIN ===
+// === MOD: aom_autorepair_test -- POC RULE BEGIN ===
 // Issues an explicit cPlanRepair plan (NOT aiTaskWorkUnit, which is right-click-
 // equivalent and would resolve to Pray/Sacrifice/Deliver-resource depending on
 // target type). cPlanRepair is what the vanilla AI's own building-repair logic
@@ -968,7 +968,7 @@ void autoRepairPOC_setupQueries()
    {
       // Same logical type the vanilla AI uses for Norse soldiers that build (see
       // core/buildings/buildings.xs Titan-Gate repair logic). Returns 0 results
-      // for non-Norse civs since no unit has the type then — harmless.
+      // for non-Norse civs since no unit has the type then -- harmless.
       gAutoRepairPOC_norseQuery = kbUnitQueryCreate("autoRepairPOC_norseInfantry");
       kbUnitQuerySetPlayerID(gAutoRepairPOC_norseQuery, cMyID, false);
       kbUnitQuerySetUnitType(gAutoRepairPOC_norseQuery, cUnitTypeLogicalTypeNorseSoldierThatBuilds);
@@ -1019,7 +1019,7 @@ bool autoRepairPOC_tryAssign(int unitID, string kind = "")
       int existingPlan = aiPlanGetIDByTypeAndVariableIntValue(cPlanRepair, cRepairPlanTargetID, buildingID);
       if (existingPlan >= 0)
       {
-         aiEcho("autoRepairPOC:       skip — existing plan " + existingPlan);
+         aiEcho("autoRepairPOC:       skip -- existing plan " + existingPlan);
          continue;
       }
 
@@ -1080,7 +1080,7 @@ active
    xsSetContextPlayer(-1);
 }
 //==============================================================================
-// === MOD: aom_autorepair_test — POC RULE END ===
+// === MOD: aom_autorepair_test -- POC RULE END ===
 //==============================================================================
 
 //==============================================================================
