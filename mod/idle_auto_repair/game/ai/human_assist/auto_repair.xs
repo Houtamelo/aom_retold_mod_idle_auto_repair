@@ -65,36 +65,48 @@ void autoRepair_setupQueries()
    }
 }
 
-// Returns true if the unit can actually be tasked to perform a useful repair.
-// Note: just having a Repair *protoaction* isn't sufficient -- Norse villagers
-// have one too, but its <rate> list only references the Greek House proto, so
-// in a Norse-vs-Norse game it never matches any actual building (Norse Manor
-// doesn't carry the "House" unittype). Freyr adds the missing rates via god
-// tech, but we can't enumerate per-target-type rates from the AI API. So:
+// Returns true if the unit's proto has a Repair action available.
 //
-//   - Non-Norse civs: trust the kbProtoUnitGetActionIDs check (catches any
-//     hypothetical villager-typed unit whose proto lacks Repair entirely).
-//   - Norse civs: exclude AbstractVillager units entirely from auto-repair.
-//     Norse infantry (LogicalTypeNorseSoldierThatBuilds) covers all repair
-//     for Norse civs anyway. Suboptimal for Freyr players (their villagers
-//     CAN repair after the relevant tech) but reliably correct.
+// This catches a future-proofing edge case: a hypothetical AbstractVillager-
+// typed unit whose proto lacks Repair entirely. (Per-civ-and-target-type
+// restrictions like "Norse villagers can only repair Houses" are NOT detected
+// here -- those need a per-building filter, see autoRepair_unitCanRepairTarget.)
 bool autoRepair_unitCanRepair(int unitID = -1)
 {
    if (unitID < 0) { return(false); }
    int protoID = kbUnitGetProtoUnitID(unitID);
-
-   if (cMyCulture == cCultureNorse &&
-       kbProtoUnitIsType(protoID, cUnitTypeAbstractVillager) == true)
-   {
-      return(false);
-   }
-
    int[] actionIDs = kbProtoUnitGetActionIDs(cMyID, protoID);
    for (int a = 0; a < actionIDs.size(); a++)
    {
       if (actionIDs[a] == cActionTypeRepair) { return(true); }
    }
    return(false);
+}
+
+// Returns true if the unit can perform a useful Repair on the given building.
+//
+// The AI API doesn't let us enumerate the <rate type="X"> entries on a unit's
+// Repair protoaction, so we encode known per-civ restrictions explicitly:
+//
+//   - Norse villagers' Repair has only <rate type="House"> in stock data.
+//     They can repair any "House"-typed building (which is most civs' house
+//     proto -- Atlantean is the exception, using Manor instead). Freyr adds
+//     more types via god tech, but we can't read those additions from the AI
+//     API, so the conservative rule is: Norse villager -> House targets only.
+//   - All other civs' villagers have <rate type="Building"> (catch-all).
+//   - Norse soldier-builders (LogicalTypeNorseSoldierThatBuilds) have a full
+//     repair action and can target any building.
+bool autoRepair_unitCanRepairTarget(int unitID = -1, int buildingProtoID = -1)
+{
+   if (cMyCulture == cCultureNorse)
+   {
+      int unitProtoID = kbUnitGetProtoUnitID(unitID);
+      if (kbProtoUnitIsType(unitProtoID, cUnitTypeAbstractVillager) == true)
+      {
+         return(kbProtoUnitIsType(buildingProtoID, cUnitTypeHouse));
+      }
+   }
+   return(true);
 }
 
 // Tries to assign one idle unit to a nearby damaged building, either by joining
@@ -152,6 +164,11 @@ bool autoRepair_tryAssign(int unitID = -1, int builderType = -1, string kind = "
       // check before creating a repair plan.
       int buildingProtoID = kbUnitGetProtoUnitID(buildingID);
       if (kbPlayerGetProtoStatFlag(cMyID, buildingProtoID, cProtoUnitFlagRepairable) == false) { continue; }
+
+      // Skip buildings the unit can't actually perform Repair on (e.g. Norse
+      // villagers can only repair Houses, not Town Centers/Storehouses/etc.
+      // by default).
+      if (autoRepair_unitCanRepairTarget(unitID, buildingProtoID) == false) { continue; }
 
       // Skip warzones: don't suicide-march workers into hot areas. Vanilla
       // `core/buildings/buildings.xs` line 1274 uses the same threshold.
