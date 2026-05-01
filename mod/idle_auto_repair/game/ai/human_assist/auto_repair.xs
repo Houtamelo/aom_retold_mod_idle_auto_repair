@@ -17,7 +17,7 @@
 //==============================================================================
 
 // Max simultaneous builders per damaged building.
-const int cAutoRepair_MaxBuilders = 5;
+const int cAutoRepair_MaxBuilders = 10;
 
 // Buffer added to LOS in the coarse building-query radius. The query filters
 // by center-to-center distance, but we want LOS to cover the building's edge.
