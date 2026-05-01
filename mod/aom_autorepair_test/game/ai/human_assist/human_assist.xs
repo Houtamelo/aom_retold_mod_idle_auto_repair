@@ -1023,7 +1023,7 @@ bool autoRepairPOC_tryAssign(int unitID = -1, string kind = "Unknown")
          continue;
       }
 
-      aiEcho("autoRepairPOC: creating cPlanRepair unit=" + unitID + " kind=" + kind + " building=" + buildingID + " (power " + curPower + "/" + maxPower + ")");
+      aiEcho("autoRepairPOC: creating cPlanRepair unit=" + unitID + " kind=" + kind + " building=" + buildingID + " (hpRatio=" + hpRatio + ")");
       int planID = aiPlanCreate("autoRepairPOC " + buildingID, cPlanRepair, -1, -1);
       if (planID < 0)
       {
