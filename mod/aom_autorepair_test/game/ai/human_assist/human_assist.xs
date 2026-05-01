@@ -978,11 +978,13 @@ rule autoRepairPOC
 minInterval 3
 active
 {
+   aiEcho("autoRepairPOC: rule tick");
    xsSetContextPlayer(cMyID);
    autoRepairPOC_setupQueries();
 
    kbUnitQueryResetResults(gAutoRepairPOC_villagerQuery);
    int villagerCount = kbUnitQueryExecute(gAutoRepairPOC_villagerQuery);
+   aiEcho("autoRepairPOC: villagerCount=" + villagerCount);
 
    if (villagerCount <= 0)
    {
@@ -1049,7 +1051,7 @@ active
 //==============================================================================
 void main()
 {
-   aiEcho("Villager Priority startup.");
+   aiEcho("Villager Priority startup. [aom_autorepair_test MOD ACTIVE]");
    aiEcho("Game type is " + cGameTypeCurrent + ", 0 = Scenario, 1 = Save Game, 2 = Random Map, 3 = Campaign, 4 = Recorded Game.");
    aiEcho("Map name is " + cRandomMapName);
 
