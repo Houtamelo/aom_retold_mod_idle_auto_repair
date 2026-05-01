@@ -65,15 +65,30 @@ void autoRepair_setupQueries()
    }
 }
 
-// Returns true if the unit's proto has a Repair action available for the
-// player. Filters out cases where the unit has the AbstractVillager unittype
-// (matching our query) but actually can't repair -- e.g. Norse villagers
-// playing as anyone other than Freyr (only Freyr-Norse villagers have the
-// Repair action; other Norse gods give villagers gather-only behavior).
+// Returns true if the unit can actually be tasked to perform a useful repair.
+// Note: just having a Repair *protoaction* isn't sufficient -- Norse villagers
+// have one too, but its <rate> list only references the Greek House proto, so
+// in a Norse-vs-Norse game it never matches any actual building (Norse Manor
+// doesn't carry the "House" unittype). Freyr adds the missing rates via god
+// tech, but we can't enumerate per-target-type rates from the AI API. So:
+//
+//   - Non-Norse civs: trust the kbProtoUnitGetActionIDs check (catches any
+//     hypothetical villager-typed unit whose proto lacks Repair entirely).
+//   - Norse civs: exclude AbstractVillager units entirely from auto-repair.
+//     Norse infantry (LogicalTypeNorseSoldierThatBuilds) covers all repair
+//     for Norse civs anyway. Suboptimal for Freyr players (their villagers
+//     CAN repair after the relevant tech) but reliably correct.
 bool autoRepair_unitCanRepair(int unitID = -1)
 {
    if (unitID < 0) { return(false); }
    int protoID = kbUnitGetProtoUnitID(unitID);
+
+   if (cMyCulture == cCultureNorse &&
+       kbProtoUnitIsType(protoID, cUnitTypeAbstractVillager) == true)
+   {
+      return(false);
+   }
+
    int[] actionIDs = kbProtoUnitGetActionIDs(cMyID, protoID);
    for (int a = 0; a < actionIDs.size(); a++)
    {
