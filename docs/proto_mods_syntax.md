@@ -56,11 +56,7 @@ The default `mergeMode` is `modify`: replaces a child element if one with the sa
 
 The `mergeMode` attribute on the `<unit>` element itself is only used when **removing** a unit (`mergeMode="remove"`). For both adding new units and modifying existing ones, omit the `mergeMode` on `<unit>`.
 
-Child elements inside a unit use `mergeMode` to control granular behavior:
-- `mergeMode="modify"` (default) — replace matching child if it exists, otherwise add it
-- `mergeMode="replace"` — replace an existing child element
-- `mergeMode="remove"` — remove a specific child element
-- `mergeMode="add"` — force-add as a new element (even if one with same identity exists)
+Child elements inside a unit use `mergeMode` to control granular behavior (modify, replace, remove, add) — see CryBarEditor Modding.md for detailed semantics.
 
 ---
 
@@ -128,29 +124,6 @@ To remove a specific flag without touching others:
 ```
 
 **Flags append, not replace.** The `modify` default adds each flag as a new entry if that text value isn't already present.
-
----
-
-## Combined Example for Task 3
-
-This is the pattern Task 3 should use to add one `<protoaction>` and two `<flag>` entries to `VillagerGreek`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<protomods>
-    <unit name="VillagerGreek">
-        <flag>FlagOne</flag>
-        <flag>FlagTwo</flag>
-        <protoaction>
-            <name>NewActionName</name>
-            <type>AutoRepair</type>
-            <!-- ... action-specific child elements ... -->
-        </protoaction>
-    </unit>
-</protomods>
-```
-
-No `mergeMode` on `<unit>` (VillagerGreek already exists). No `mergeMode` on `<flag>` (default `modify` appends new flags). No `mergeMode` needed on `<protoaction>` unless overriding an existing one with the same name.
 
 ---
 
