@@ -1,0 +1,10 @@
+# Extracted vanilla game data — reference only, not part of the mod.
+# Re-extract from Data.bar with CryBar.Cli when needed.
+extracted/
+
+# CryBar tools (download, not source).
+tools/
+
+# OS / editor noise
+.DS_Store
+*.swp
