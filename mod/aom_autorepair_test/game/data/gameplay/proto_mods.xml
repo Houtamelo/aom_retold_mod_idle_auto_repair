@@ -1,0 +1,16 @@
+<protomods>
+    <unit name="VillagerGreek">
+        <flag>CastAbilitySelf</flag>
+        <flag>AutoCommandStartDisabled</flag>
+
+        <protoaction>
+            <name>AutoRepair</name>
+            <type>AutoRepair</type>
+            <maxrange>0.2</maxrange>
+            <autocastdistance>20.0</autocastdistance>
+            <rate type="Building">0.5</rate>
+            <flag>AutoCastBySelf</flag>
+            <active>0</active>
+        </protoaction>
+    </unit>
+</protomods>
