@@ -987,7 +987,7 @@ void autoRepairPOC_setupQueries()
 }
 
 // Returns true when a repair plan was created (caller stops iterating).
-bool autoRepairPOC_tryAssign(int unitID, string kind = "")
+bool autoRepairPOC_tryAssign(int unitID, string kind)
 {
    if (unitID < 0) { return(false); }
 
