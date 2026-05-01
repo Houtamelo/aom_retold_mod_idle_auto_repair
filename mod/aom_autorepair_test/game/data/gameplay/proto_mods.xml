@@ -17,4 +17,22 @@
             <active>1</active>
         </protoaction>
     </unit>
+
+    <unit name="ThrowingAxeman">
+        <maxhitpoints>1500</maxhitpoints>
+        <initialhitpoints>1500</initialhitpoints>
+
+        <flag>CastAbilitySelf</flag>
+        <flag>AutoCommandStartDisabled</flag>
+
+        <protoaction>
+            <name>AutoRepair</name>
+            <type>Repair</type>
+            <maxrange>0.2</maxrange>
+            <autocastdistance>20.0</autocastdistance>
+            <rate type="Building">0.4</rate>
+            <autocastbyself>1</autocastbyself>
+            <active>1</active>
+        </protoaction>
+    </unit>
 </protomods>
