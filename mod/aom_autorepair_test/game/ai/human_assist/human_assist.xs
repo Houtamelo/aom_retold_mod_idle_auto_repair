@@ -996,14 +996,15 @@ active
    {
       int villagerID = kbUnitQueryGetResult(gAutoRepairPOC_villagerQuery, i);
       if (villagerID < 0) { continue; }
-      // Skip very-briefly idle units to avoid interrupting transitions.
-      if (kbUnitGetIdleTime(villagerID) < 2000) { continue; }
 
+      int idleTime = kbUnitGetIdleTime(villagerID);
       vector pos = kbUnitGetPosition(villagerID);
+      aiEcho("autoRepairPOC:   villager=" + villagerID + " idleTime=" + idleTime);
 
       kbUnitQuerySetPosition(gAutoRepairPOC_buildingQuery, pos);
       kbUnitQueryResetResults(gAutoRepairPOC_buildingQuery);
       int buildingCount = kbUnitQueryExecute(gAutoRepairPOC_buildingQuery);
+      aiEcho("autoRepairPOC:     buildingCount=" + buildingCount);
 
       if (buildingCount <= 0) { continue; }
 
@@ -1016,12 +1017,18 @@ active
          // Damaged when curPower < maxPower; epsilon avoids false positives from float noise.
          float maxPower = kbUnitGetPower(buildingID, false);
          float curPower = kbUnitGetPower(buildingID, true);
+         bool damaged = (maxPower > curPower + 0.001);
+         aiEcho("autoRepairPOC:       building=" + buildingID + " power=" + curPower + "/" + maxPower + " damaged=" + damaged);
 
-         if (maxPower <= curPower + 0.001) { continue; }
+         if (damaged == false) { continue; }
 
          // Don't stack plans on the same target.
          int existingPlan = aiPlanGetIDByTypeAndVariableIntValue(cPlanRepair, cRepairPlanTargetID, buildingID);
-         if (existingPlan >= 0) { continue; }
+         if (existingPlan >= 0)
+         {
+            aiEcho("autoRepairPOC:       skip — existing plan " + existingPlan);
+            continue;
+         }
 
          aiEcho("autoRepairPOC: creating cPlanRepair villager=" + villagerID + " building=" + buildingID + " (power " + curPower + "/" + maxPower + ")");
          int planID = aiPlanCreate("autoRepairPOC " + buildingID, cPlanRepair, -1, -1);
