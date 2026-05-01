@@ -46,6 +46,7 @@ bool gAllowedToFarm = false;
 
 // === MOD: aom_autorepair_test — POC globals ===
 int gAutoRepairPOC_villagerQuery = -1;
+int gAutoRepairPOC_norseQuery = -1;
 int gAutoRepairPOC_buildingQuery = -1;
 // === MOD: aom_autorepair_test — END ===
 
@@ -963,6 +964,17 @@ void autoRepairPOC_setupQueries()
       kbUnitQuerySetState(gAutoRepairPOC_villagerQuery, cUnitStateAlive);
       kbUnitQuerySetActionType(gAutoRepairPOC_villagerQuery, cActionTypeIdle);
    }
+   if (gAutoRepairPOC_norseQuery == -1)
+   {
+      // Same logical type the vanilla AI uses for Norse soldiers that build (see
+      // core/buildings/buildings.xs Titan-Gate repair logic). Returns 0 results
+      // for non-Norse civs since no unit has the type then — harmless.
+      gAutoRepairPOC_norseQuery = kbUnitQueryCreate("autoRepairPOC_norseInfantry");
+      kbUnitQuerySetPlayerID(gAutoRepairPOC_norseQuery, cMyID, false);
+      kbUnitQuerySetUnitType(gAutoRepairPOC_norseQuery, cUnitTypeLogicalTypeNorseSoldierThatBuilds);
+      kbUnitQuerySetState(gAutoRepairPOC_norseQuery, cUnitStateAlive);
+      kbUnitQuerySetActionType(gAutoRepairPOC_norseQuery, cActionTypeIdle);
+   }
    if (gAutoRepairPOC_buildingQuery == -1)
    {
       gAutoRepairPOC_buildingQuery = kbUnitQueryCreate("autoRepairPOC_buildings");
@@ -974,6 +986,60 @@ void autoRepairPOC_setupQueries()
    }
 }
 
+// Returns true when a repair plan was created (caller stops iterating).
+bool autoRepairPOC_tryAssign(int unitID, string kind = "")
+{
+   if (unitID < 0) { return(false); }
+
+   int idleTime = kbUnitGetIdleTime(unitID);
+   vector pos = kbUnitGetPosition(unitID);
+   aiEcho("autoRepairPOC:   unit=" + unitID + " kind=" + kind + " idleTime=" + idleTime);
+
+   kbUnitQuerySetPosition(gAutoRepairPOC_buildingQuery, pos);
+   kbUnitQueryResetResults(gAutoRepairPOC_buildingQuery);
+   int buildingCount = kbUnitQueryExecute(gAutoRepairPOC_buildingQuery);
+   aiEcho("autoRepairPOC:     buildingCount=" + buildingCount);
+
+   if (buildingCount <= 0) { return(false); }
+
+   for (int j = 0; j < buildingCount; j++)
+   {
+      int buildingID = kbUnitQueryGetResult(gAutoRepairPOC_buildingQuery, j);
+      if (buildingID < 0) { continue; }
+
+      // Damage detection via kbUnitGetPower (false=ignore health, true=apply health).
+      // Damaged when curPower < maxPower; epsilon avoids false positives from float noise.
+      float maxPower = kbUnitGetPower(buildingID, false);
+      float curPower = kbUnitGetPower(buildingID, true);
+      bool damaged = (maxPower > curPower + 0.001);
+      aiEcho("autoRepairPOC:       building=" + buildingID + " power=" + curPower + "/" + maxPower + " damaged=" + damaged);
+
+      if (damaged == false) { continue; }
+
+      int existingPlan = aiPlanGetIDByTypeAndVariableIntValue(cPlanRepair, cRepairPlanTargetID, buildingID);
+      if (existingPlan >= 0)
+      {
+         aiEcho("autoRepairPOC:       skip — existing plan " + existingPlan);
+         continue;
+      }
+
+      aiEcho("autoRepairPOC: creating cPlanRepair unit=" + unitID + " kind=" + kind + " building=" + buildingID + " (power " + curPower + "/" + maxPower + ")");
+      int planID = aiPlanCreate("autoRepairPOC " + buildingID, cPlanRepair, -1, -1);
+      if (planID < 0)
+      {
+         aiEcho("autoRepairPOC: aiPlanCreate FAILED");
+         continue;
+      }
+      aiPlanSetVariableInt(planID, cRepairPlanTargetID, 0, buildingID);
+      aiPlanSetPriority(planID, 70);
+      aiPlanSetBaseID(planID, kbUnitGetBaseID(buildingID));
+      bool added = aiPlanAddUnit(planID, unitID);
+      aiEcho("autoRepairPOC: aiPlanAddUnit returned " + added + " planID=" + planID);
+      return(true);
+   }
+   return(false);
+}
+
 rule autoRepairPOC
 minInterval 3
 active
@@ -982,66 +1048,30 @@ active
    xsSetContextPlayer(cMyID);
    autoRepairPOC_setupQueries();
 
+   // Pool 1: villagers.
    kbUnitQueryResetResults(gAutoRepairPOC_villagerQuery);
    int villagerCount = kbUnitQueryExecute(gAutoRepairPOC_villagerQuery);
-   aiEcho("autoRepairPOC: villagerCount=" + villagerCount);
-
-   if (villagerCount <= 0)
-   {
-      xsSetContextPlayer(-1);
-      return;
-   }
-
+   aiEcho("autoRepairPOC: idleVillagerCount=" + villagerCount);
    for (int i = 0; i < villagerCount; i++)
    {
       int villagerID = kbUnitQueryGetResult(gAutoRepairPOC_villagerQuery, i);
-      if (villagerID < 0) { continue; }
-
-      int idleTime = kbUnitGetIdleTime(villagerID);
-      vector pos = kbUnitGetPosition(villagerID);
-      aiEcho("autoRepairPOC:   villager=" + villagerID + " idleTime=" + idleTime);
-
-      kbUnitQuerySetPosition(gAutoRepairPOC_buildingQuery, pos);
-      kbUnitQueryResetResults(gAutoRepairPOC_buildingQuery);
-      int buildingCount = kbUnitQueryExecute(gAutoRepairPOC_buildingQuery);
-      aiEcho("autoRepairPOC:     buildingCount=" + buildingCount);
-
-      if (buildingCount <= 0) { continue; }
-
-      for (int j = 0; j < buildingCount; j++)
+      if (autoRepairPOC_tryAssign(villagerID, "Villager") == true)
       {
-         int buildingID = kbUnitQueryGetResult(gAutoRepairPOC_buildingQuery, j);
-         if (buildingID < 0) { continue; }
+         xsSetContextPlayer(-1);
+         return;
+      }
+   }
 
-         // Damage detection via kbUnitGetPower (false=ignore health, true=apply health).
-         // Damaged when curPower < maxPower; epsilon avoids false positives from float noise.
-         float maxPower = kbUnitGetPower(buildingID, false);
-         float curPower = kbUnitGetPower(buildingID, true);
-         bool damaged = (maxPower > curPower + 0.001);
-         aiEcho("autoRepairPOC:       building=" + buildingID + " power=" + curPower + "/" + maxPower + " damaged=" + damaged);
-
-         if (damaged == false) { continue; }
-
-         // Don't stack plans on the same target.
-         int existingPlan = aiPlanGetIDByTypeAndVariableIntValue(cPlanRepair, cRepairPlanTargetID, buildingID);
-         if (existingPlan >= 0)
-         {
-            aiEcho("autoRepairPOC:       skip — existing plan " + existingPlan);
-            continue;
-         }
-
-         aiEcho("autoRepairPOC: creating cPlanRepair villager=" + villagerID + " building=" + buildingID + " (power " + curPower + "/" + maxPower + ")");
-         int planID = aiPlanCreate("autoRepairPOC " + buildingID, cPlanRepair, -1, -1);
-         if (planID < 0)
-         {
-            aiEcho("autoRepairPOC: aiPlanCreate FAILED");
-            continue;
-         }
-         aiPlanSetVariableInt(planID, cRepairPlanTargetID, 0, buildingID);
-         aiPlanSetPriority(planID, 60);
-         aiPlanSetBaseID(planID, kbUnitGetBaseID(buildingID));
-         bool added = aiPlanAddUnit(planID, villagerID);
-         aiEcho("autoRepairPOC: aiPlanAddUnit returned " + added + " planID=" + planID);
+   // Pool 2: Norse soldier-builders (Berserk, Hersir, Throwing Axeman, Jarl, etc.).
+   // Returns 0 for non-Norse civs.
+   kbUnitQueryResetResults(gAutoRepairPOC_norseQuery);
+   int norseCount = kbUnitQueryExecute(gAutoRepairPOC_norseQuery);
+   aiEcho("autoRepairPOC: idleNorseInfantryCount=" + norseCount);
+   for (int n = 0; n < norseCount; n++)
+   {
+      int norseID = kbUnitQueryGetResult(gAutoRepairPOC_norseQuery, n);
+      if (autoRepairPOC_tryAssign(norseID, "NorseInfantry") == true)
+      {
          xsSetContextPlayer(-1);
          return;
       }
