@@ -65,48 +65,28 @@ void autoRepair_setupQueries()
    }
 }
 
-// Returns true if the unit's proto has a Repair action available.
+// Returns true if the unit can perform useful work on the given building's
+// damaged state. Uses the engine's Build-rate table because that's what the
+// engine actually consults for under-max-HP buildings -- vanilla chairon's
+// `addBuilderTypesToPlan` (core/buildings/utilities_buildings.xs:635) confirms
+// this by routing repair plans for House/Farm/OxCartBuilding to Norse
+// villagers and everything else to NorseSoldierThatBuilds, even though the
+// villagers' Repair protoaction's <rate> list only contains House. The Build
+// protoaction's <rate> list is the load-bearing one for damaged-building work.
 //
-// This catches a future-proofing edge case: a hypothetical AbstractVillager-
-// typed unit whose proto lacks Repair entirely. (Per-civ-and-target-type
-// restrictions like "Norse villagers can only repair Houses" are NOT detected
-// here -- those need a per-building filter, see autoRepair_unitCanRepairTarget.)
-bool autoRepair_unitCanRepair(int unitID = -1)
-{
-   if (unitID < 0) { return(false); }
-   int protoID = kbUnitGetProtoUnitID(unitID);
-   int[] actionIDs = kbProtoUnitGetActionIDs(cMyID, protoID);
-   for (int a = 0; a < actionIDs.size(); a++)
-   {
-      if (actionIDs[a] == cActionTypeRepair) { return(true); }
-   }
-   return(false);
-}
-
-// Returns true if the unit can perform a useful Repair on the given building.
-//
-// The AI API doesn't let us enumerate the <rate type="X"> entries on a unit's
-// Repair protoaction, so we encode known per-civ restrictions explicitly:
-//
-//   - Norse villagers' Repair has only <rate type="House"> in stock data.
-//     They can repair any "House"-typed building (which is most civs' house
-//     proto -- Atlantean is the exception, using Manor instead). Freyr adds
-//     more types via god tech, but we can't read those additions from the AI
-//     API, so the conservative rule is: Norse villager -> House targets only.
-//   - All other civs' villagers have <rate type="Building"> (catch-all).
-//   - Norse soldier-builders (LogicalTypeNorseSoldierThatBuilds) have a full
-//     repair action and can target any building.
+//   - Greek/Egyptian/Atlantean/Chinese/Aztec/Japanese villagers: Build rate
+//     against <Building> (catch-all) -> > 0 for any building.
+//   - Norse villagers: Build rate against Farm, House, OxCartBuilding -> > 0
+//     for those, 0 for TC/Storehouse/Temple/etc.
+//   - Norse soldier-builders: Build rate against <Building> -> > 0 for any.
+//   - Freyr Norse villagers (if tech extends rates at runtime): the API
+//     reflects current player state, so Freyr-specific additions are auto-
+//     included.
 bool autoRepair_unitCanRepairTarget(int unitID = -1, int buildingProtoID = -1)
 {
-   if (cMyCulture == cCultureNorse)
-   {
-      int unitProtoID = kbUnitGetProtoUnitID(unitID);
-      if (kbProtoUnitIsType(unitProtoID, cUnitTypeAbstractVillager) == true)
-      {
-         return(kbProtoUnitIsType(buildingProtoID, cUnitTypeHouse));
-      }
-   }
-   return(true);
+   if (unitID < 0 || buildingProtoID < 0) { return(false); }
+   int unitProtoID = kbUnitGetProtoUnitID(unitID);
+   return(kbProtoUnitGetBuildRate(cMyID, unitProtoID, buildingProtoID) > 0.0);
 }
 
 // Tries to assign one idle unit to a nearby damaged building, either by joining
@@ -120,11 +100,6 @@ bool autoRepair_unitCanRepairTarget(int unitID = -1, int buildingProtoID = -1)
 bool autoRepair_tryAssign(int unitID = -1, int builderType = -1, string kind = "Unknown")
 {
    if (unitID < 0) { return(false); }
-
-   // Skip units whose proto doesn't have a Repair action (e.g. non-Freyr
-   // Norse villagers). The query filter only knows about unit *types*, not
-   // about which actions a proto actually has.
-   if (autoRepair_unitCanRepair(unitID) == false) { return(false); }
 
    // Restrict candidates to what THIS unit can see. LOS in AoMR is a circular
    // radius around the unit. The query's maxDistance filter is center-to-
