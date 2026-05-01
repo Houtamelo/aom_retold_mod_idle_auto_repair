@@ -1030,7 +1030,12 @@ bool autoRepairPOC_tryAssign(int unitID = -1, int builderType = -1, string kind 
       }
 
       aiEcho("autoRepairPOC: creating cPlanRepair kind=" + kind + " building=" + buildingID + " (hpRatio=" + hpRatio + ")");
-      int planID = aiPlanCreate("autoRepairPOC " + buildingID, cPlanRepair, -1, -1);
+      // Set gReservePlan as the parent so that villagers (which vanilla
+      // human_assist parks in the reserve at game start with priority 100) get
+      // automatically loaned from reserve to our repair plan via aiPlanAddUnit.
+      // For Norse infantry (not in reserve), the parent relationship is benign
+      // -- the unit just gets directly assigned with no loaning.
+      int planID = aiPlanCreate("autoRepairPOC " + buildingID, cPlanRepair, gReservePlan, -1);
       if (planID < 0)
       {
          aiEcho("autoRepairPOC: aiPlanCreate FAILED");
@@ -1038,19 +1043,19 @@ bool autoRepairPOC_tryAssign(int unitID = -1, int builderType = -1, string kind 
       }
       aiPlanSetVariableInt(planID, cRepairPlanTargetID, 0, buildingID);
       aiPlanSetPriority(planID, 70);
-      // For human-player-assist, individual buildings don't get a baseID via
-      // chairon's discovery rules. Use the player's main base (which vanilla
-      // human_assist already initializes if available). Skip baseID entirely
-      // when the player has no main base.
       int mainBaseID = kbBaseGetMainID(cMyID);
       if (mainBaseID >= 0)
       {
          aiPlanSetBaseID(planID, mainBaseID);
       }
-      // Vanilla pattern: add a unit-TYPE slot, not a specific unit. Plan system
-      // auto-assigns from the matching idle pool. Counts (1, 1, 1) = (min, max, ideal).
+      // Per aiPlanAddUnitType doc: MUST be called before aiPlanAddUnit, or the
+      // plan will reject the unit. Counts: (numberNeed=1, numberWant=1, numberMax=1).
       aiPlanAddUnitType(planID, builderType, 1, 1, 1);
-      aiEcho("autoRepairPOC: cPlanRepair created planID=" + planID + " builderType=" + builderType);
+      // Per aiPlanAddUnit doc: if the unit is in the parent plan (gReservePlan
+      // for villagers), it gets auto-loaned to this plan. For Norse infantry
+      // (not in reserve), it's a direct assignment.
+      bool added = aiPlanAddUnit(planID, unitID);
+      aiEcho("autoRepairPOC: cPlanRepair created planID=" + planID + " builderType=" + builderType + " aiPlanAddUnit=" + added);
       return(true);
    }
    return(false);
