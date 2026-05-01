@@ -19,6 +19,14 @@
 // Max simultaneous builders per damaged building.
 const int cAutoRepair_MaxBuilders = 5;
 
+// Buffer added to LOS in the coarse building-query radius. The query filters
+// by center-to-center distance, but we want LOS to cover the building's edge.
+// A buffer larger than the biggest building's obstruction radius (e.g. Wonder
+// at ~6 tiles) ensures we don't miss visible big buildings in the pre-filter.
+// The exact LOS gate is done per-candidate via kbUnitGetDistanceToUnit, which
+// returns edge-to-edge distance.
+const float cAutoRepair_LOSQueryBuffer = 10.0;
+
 int gAutoRepair_villagerQuery  = -1;  // idle villagers (most civs)
 int gAutoRepair_norseQuery     = -1;  // idle Norse soldier-builders
 int gAutoRepair_buildingQuery  = -1;  // friendly buildings near a unit (position + radius set per call)
@@ -70,12 +78,16 @@ bool autoRepair_tryAssign(int unitID = -1, int builderType = -1, string kind = "
    if (unitID < 0) { return(false); }
 
    // Restrict candidates to what THIS unit can see. LOS in AoMR is a circular
-   // radius around the unit, so plugging the LOS stat directly into
-   // kbUnitQuerySetMaximumDistance gives us the exact "in line of sight" set.
+   // radius around the unit. The query's maxDistance filter is center-to-
+   // center, so we use LOS + buffer here to make sure big buildings (TC,
+   // Wonder, Fortress) whose centers are several tiles inside the footprint
+   // aren't excluded just because their CENTER is past LOS while their EDGE
+   // is within LOS. The precise LOS gate is the per-building edge-distance
+   // check below via kbUnitGetDistanceToUnit (which returns edge-to-edge).
    vector pos = kbUnitGetPosition(unitID);
    float los = kbUnitGetStatFloat(unitID, cUnitStatLOS);
    kbUnitQuerySetPosition(gAutoRepair_buildingQuery, pos);
-   kbUnitQuerySetMaximumDistance(gAutoRepair_buildingQuery, los);
+   kbUnitQuerySetMaximumDistance(gAutoRepair_buildingQuery, los + cAutoRepair_LOSQueryBuffer);
    kbUnitQueryResetResults(gAutoRepair_buildingQuery);
    int buildingCount = kbUnitQueryExecute(gAutoRepair_buildingQuery);
    if (buildingCount <= 0) { return(false); }
@@ -84,6 +96,13 @@ bool autoRepair_tryAssign(int unitID = -1, int builderType = -1, string kind = "
    {
       int buildingID = kbUnitQueryGetResult(gAutoRepair_buildingQuery, j);
       if (buildingID < 0) { continue; }
+
+      // Precise LOS gate: kbUnitGetDistanceToUnit returns EDGE-to-edge
+      // distance (includes both units' obstruction radii), so a unit standing
+      // adjacent to a Town Center sees distance ~= 0 even though the TC's
+      // center is several tiles into the footprint.
+      float edgeDistance = kbUnitGetDistanceToUnit(unitID, buildingID);
+      if (edgeDistance > los) { continue; }
 
       // Damage detection: same pattern vanilla AI uses for fortress repair in
       // core/buildings/buildings.xs (kbUnitGetStatFloat(unitID, cUnitStatHPRatio) < 1.0).
