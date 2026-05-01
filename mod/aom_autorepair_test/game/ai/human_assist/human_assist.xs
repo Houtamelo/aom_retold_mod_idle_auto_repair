@@ -1043,9 +1043,25 @@ bool autoRepairPOC_tryAssign(int unitID = -1, int builderType = -1, string kind 
          else
          {
             // Bug 3: room for more builders. Add this unit to the existing plan.
+            // The plan was created with a single builder-type slot matching the
+            // unit that created it (e.g. AbstractVillager). When a different
+            // builder type tries to join (e.g. Norse Berserker after a villager
+            // started the plan), aiPlanAddUnit returns false because no slot
+            // fits. We then add the missing type slot and retry.
             bool addedToExisting = aiPlanAddUnit(existingPlan, unitID);
-            aiEcho("autoRepairPOC:       adding to plan " + existingPlan + " aiPlanAddUnit=" + addedToExisting + " (now " + (existingUnits + 1) + " builders)");
-            return(true);
+            if (addedToExisting == false)
+            {
+               aiPlanAddUnitType(existingPlan, builderType, 1, cAutoRepairPOC_MaxBuilders, cAutoRepairPOC_MaxBuilders);
+               addedToExisting = aiPlanAddUnit(existingPlan, unitID);
+               aiEcho("autoRepairPOC:       added missing type slot " + builderType + " to plan " + existingPlan + ", retry aiPlanAddUnit=" + addedToExisting);
+            }
+            if (addedToExisting == true)
+            {
+               aiEcho("autoRepairPOC:       added to plan " + existingPlan + " (now " + (existingUnits + 1) + " builders)");
+               return(true);
+            }
+            aiEcho("autoRepairPOC:       FAILED to add unit " + unitID + " to plan " + existingPlan);
+            continue;
          }
       }
 
