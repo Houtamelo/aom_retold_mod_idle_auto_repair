@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <protomods>
-    <unit name="VillagerGreek">
-        <maxhitpoints>500</maxhitpoints>
-        <initialhitpoints>500</initialhitpoints>
+    <unit name="Berserk">
+        <maxhitpoints>1500</maxhitpoints>
+        <initialhitpoints>1500</initialhitpoints>
 
         <flag>CastAbilitySelf</flag>
         <flag>AutoCommandStartDisabled</flag>
