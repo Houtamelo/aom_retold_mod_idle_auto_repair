@@ -1063,6 +1063,10 @@ bool autoRepairPOC_tryAssign(int unitID = -1, int builderType = -1, string kind 
       }
       aiPlanSetVariableInt(planID, cRepairPlanTargetID, 0, buildingID);
       aiPlanSetPriority(planID, 70);
+      // Engine auto-destroys the plan when its last unit is removed (so we
+      // don't need to manually clean up after the watchdog yanks the last
+      // unit out, e.g., on player override).
+      aiPlanSetFlag(planID, cPlanFlagDestroyWhenNoUnitsLeft, true);
       int mainBaseID = kbBaseGetMainID(cMyID);
       if (mainBaseID >= 0)
       {
@@ -1081,12 +1085,14 @@ bool autoRepairPOC_tryAssign(int unitID = -1, int builderType = -1, string kind 
    return(false);
 }
 
-// Watchdog: walk every cPlanRepair plan we own, drop units that aren't
-// actively pursuing a repair (the player or engine put them on something else).
-// Destroys plans that end up empty so the next tick's main loop can re-evaluate
-// from a clean slate. The "active" set is tight: Repair, Move (heading to
-// target), Build, Work, plus brief Idle for transitional ticks. Anything else
-// (Attack, Gather, Hunting, Trade, etc.) means the unit has been redirected.
+// Watchdog: walk every cPlanRepair plan we own; drop units whose current
+// action isn't directed at the plan's target (the building we're repairing).
+// Brief Idle is allowed -- the unit may be transitioning between Move and
+// Repair frames. For repair-like actions (Repair/Move/Build/Work) we also
+// require kbUnitGetTargetUnitID to match the plan's target, so a Move to
+// some other point (player override) gets caught. Empty plans get destroyed
+// (also auto-handled by the cPlanFlagDestroyWhenNoUnitsLeft flag we set on
+// creation, but we destroy here to clean up any plans that pre-date the flag).
 void autoRepairPOC_watchdog()
 {
    int planCount = aiPlanGetNumberByType(cPlanRepair);
@@ -1095,17 +1101,31 @@ void autoRepairPOC_watchdog()
       int planID = aiPlanGetIDByTypeIndex(cPlanRepair, p);
       if (planID < 0) { continue; }
 
+      int planTarget = aiPlanGetVariableInt(planID, cRepairPlanTargetID, 0);
+
       int[] units = aiPlanGetUnits(planID);
       for (int u = 0; u < units.size(); u++)
       {
          int unitID = units[u];
          int action = kbUnitGetActionType(unitID);
-         if (action == cActionTypeRepair) { continue; }
-         if (action == cActionTypeMove)   { continue; }
-         if (action == cActionTypeBuild)  { continue; }
-         if (action == cActionTypeWork)   { continue; }
-         if (action == cActionTypeIdle)   { continue; }
-         aiEcho("autoRepairPOC: watchdog removing unit " + unitID + " from plan " + planID + " (action=" + action + ")");
+
+         // Brief Idle: transitional, leave alone.
+         if (action == cActionTypeIdle) { continue; }
+
+         // Repair-like actions are only allowed when the unit's target IS the
+         // plan's target. A Move with a different target = player override.
+         bool repairLikeAction = (action == cActionTypeRepair) ||
+                                 (action == cActionTypeMove)   ||
+                                 (action == cActionTypeBuild)  ||
+                                 (action == cActionTypeWork);
+         int unitTarget = kbUnitGetTargetUnitID(unitID);
+         bool aimedAtPlanTarget = (unitTarget == planTarget);
+
+         if (repairLikeAction == true && aimedAtPlanTarget == true) { continue; }
+
+         aiEcho("autoRepairPOC: watchdog removing unit " + unitID +
+                " from plan " + planID + " (action=" + action +
+                " unitTarget=" + unitTarget + " planTarget=" + planTarget + ")");
          aiPlanRemoveUnit(planID, unitID);
       }
 
