@@ -12,7 +12,7 @@
             <type>AutoRepair</type>
             <anim>Build</anim>
             <persistent>1</persistent>
-            <maxrange>1.0</maxrange>
+            <maxrange>5.0</maxrange>
             <autocastdistance>20.0</autocastdistance>
             <rate type="Building">0.4</rate>
             <autocastbyself>1</autocastbyself>
@@ -32,7 +32,7 @@
             <type>Repair</type>
             <anim>Build</anim>
             <persistent>1</persistent>
-            <maxrange>1.0</maxrange>
+            <maxrange>5.0</maxrange>
             <autocastdistance>20.0</autocastdistance>
             <rate type="Building">0.4</rate>
             <autocastbyself>1</autocastbyself>
