@@ -1007,12 +1007,12 @@ bool autoRepairPOC_tryAssign(int unitID = -1, string kind = "Unknown")
       int buildingID = kbUnitQueryGetResult(gAutoRepairPOC_buildingQuery, j);
       if (buildingID < 0) { continue; }
 
-      // Damage detection via kbUnitGetPower (false=ignore health, true=apply health).
-      // Damaged when curPower < maxPower; epsilon avoids false positives from float noise.
-      float maxPower = kbUnitGetPower(buildingID, false);
-      float curPower = kbUnitGetPower(buildingID, true);
-      bool damaged = (maxPower > curPower + 0.001);
-      aiEcho("autoRepairPOC:       building=" + buildingID + " power=" + curPower + "/" + maxPower + " damaged=" + damaged);
+      // Damage detection: same pattern vanilla AI uses for fortress repair in
+      // core/buildings/buildings.xs (kbUnitGetStatFloat(unitID, cUnitStatHPRatio) < 1.0).
+      // HPRatio is current/max HP, range 0.0..1.0. Below 1.0 means damaged.
+      float hpRatio = kbUnitGetStatFloat(buildingID, cUnitStatHPRatio);
+      bool damaged = (hpRatio < 0.999);
+      aiEcho("autoRepairPOC:       building=" + buildingID + " hpRatio=" + hpRatio + " damaged=" + damaged);
 
       if (damaged == false) { continue; }
 
