@@ -1137,6 +1137,21 @@ void autoRepairPOC_watchdog()
    }
 }
 
+// Fast watchdog runs separately at 1Hz so we catch player overrides within
+// ~1 second instead of waiting for the main rule's 3-second cycle. This was
+// most visible on Berserkers, where short player commands (move-here, attack
+// one enemy) often complete in well under 3 s -- by the time the main rule
+// would have caught the override, the unit was already idle again and would
+// be re-claimed.
+rule autoRepairPOC_watchdogRule
+minInterval 1
+active
+{
+   xsSetContextPlayer(cMyID);
+   autoRepairPOC_watchdog();
+   xsSetContextPlayer(-1);
+}
+
 rule autoRepairPOC
 minInterval 3
 active
@@ -1144,7 +1159,6 @@ active
    aiEcho("autoRepairPOC: rule tick");
    xsSetContextPlayer(cMyID);
    autoRepairPOC_setupQueries();
-   autoRepairPOC_watchdog();
 
    // Pool 1: villagers. Pick culture-appropriate builder type for the plan slot.
    // Chinese villagers don't fit AbstractVillager cleanly per vanilla
@@ -1155,17 +1169,17 @@ active
       villagerBuilderType = cUnitTypeVillagerChinese;
    }
 
+   // Process EVERY idle unit in this tick, not just the first one. Each call
+   // to autoRepairPOC_tryAssign internally picks the closest damaged building
+   // for that unit (kbUnitQuerySetAscendingSort = closest-first), so multiple
+   // idle units distribute themselves to the closest-to-each-of-them target.
    kbUnitQueryResetResults(gAutoRepairPOC_villagerQuery);
    int villagerCount = kbUnitQueryExecute(gAutoRepairPOC_villagerQuery);
    aiEcho("autoRepairPOC: idleVillagerCount=" + villagerCount);
    for (int i = 0; i < villagerCount; i++)
    {
       int villagerID = kbUnitQueryGetResult(gAutoRepairPOC_villagerQuery, i);
-      if (autoRepairPOC_tryAssign(villagerID, villagerBuilderType, "Villager") == true)
-      {
-         xsSetContextPlayer(-1);
-         return;
-      }
+      autoRepairPOC_tryAssign(villagerID, villagerBuilderType, "Villager");
    }
 
    // Pool 2: Norse soldier-builders (Berserk, Hersir, Throwing Axeman, Jarl, etc.).
@@ -1176,11 +1190,7 @@ active
    for (int n = 0; n < norseCount; n++)
    {
       int norseID = kbUnitQueryGetResult(gAutoRepairPOC_norseQuery, n);
-      if (autoRepairPOC_tryAssign(norseID, cUnitTypeLogicalTypeNorseSoldierThatBuilds, "NorseInfantry") == true)
-      {
-         xsSetContextPlayer(-1);
-         return;
-      }
+      autoRepairPOC_tryAssign(norseID, cUnitTypeLogicalTypeNorseSoldierThatBuilds, "NorseInfantry");
    }
 
    xsSetContextPlayer(-1);
