@@ -65,6 +65,23 @@ void autoRepair_setupQueries()
    }
 }
 
+// Returns true if the unit's proto has a Repair action available for the
+// player. Filters out cases where the unit has the AbstractVillager unittype
+// (matching our query) but actually can't repair -- e.g. Norse villagers
+// playing as anyone other than Freyr (only Freyr-Norse villagers have the
+// Repair action; other Norse gods give villagers gather-only behavior).
+bool autoRepair_unitCanRepair(int unitID = -1)
+{
+   if (unitID < 0) { return(false); }
+   int protoID = kbUnitGetProtoUnitID(unitID);
+   int[] actionIDs = kbProtoUnitGetActionIDs(cMyID, protoID);
+   for (int a = 0; a < actionIDs.size(); a++)
+   {
+      if (actionIDs[a] == cActionTypeRepair) { return(true); }
+   }
+   return(false);
+}
+
 // Tries to assign one idle unit to a nearby damaged building, either by joining
 // an existing repair plan or creating a new one. Returns true if assigned.
 //
@@ -76,6 +93,11 @@ void autoRepair_setupQueries()
 bool autoRepair_tryAssign(int unitID = -1, int builderType = -1, string kind = "Unknown")
 {
    if (unitID < 0) { return(false); }
+
+   // Skip units whose proto doesn't have a Repair action (e.g. non-Freyr
+   // Norse villagers). The query filter only knows about unit *types*, not
+   // about which actions a proto actually has.
+   if (autoRepair_unitCanRepair(unitID) == false) { return(false); }
 
    // Restrict candidates to what THIS unit can see. LOS in AoMR is a circular
    // radius around the unit. The query's maxDistance filter is center-to-
@@ -109,6 +131,17 @@ bool autoRepair_tryAssign(int unitID = -1, int builderType = -1, string kind = "
       // HPRatio is current/max HP, range 0.0..1.0; below 1.0 means damaged.
       float hpRatio = kbUnitGetStatFloat(buildingID, cUnitStatHPRatio);
       if (hpRatio >= 0.999) { continue; }
+
+      // Skip buildings flagged non-repairable (e.g. some special-case unit
+      // types). Vanilla `core/buildings/buildings.xs` line 1345 uses this same
+      // check before creating a repair plan.
+      int buildingProtoID = kbUnitGetProtoUnitID(buildingID);
+      if (kbPlayerGetProtoStatFlag(cMyID, buildingProtoID, cProtoUnitFlagRepairable) == false) { continue; }
+
+      // Skip warzones: don't suicide-march workers into hot areas. Vanilla
+      // `core/buildings/buildings.xs` line 1274 uses the same threshold.
+      int areaID = kbUnitGetAreaID(buildingID);
+      if (kbAreaGetDangerLevel(areaID, false) >= 100.0) { continue; }
 
       int existingPlan = aiPlanGetIDByTypeAndVariableIntValue(cPlanRepair, cRepairPlanTargetID, buildingID);
       if (existingPlan >= 0)
