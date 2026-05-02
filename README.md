@@ -12,10 +12,6 @@ There is no per-unit toggle; the behavior is on for every idle repair-capable un
 
 The mod adds a single include line to `game/ai/human_assist/human_assist.xs` and ships an `auto_repair.xs` file alongside it; that is the entire footprint.
 
-## Known issues
-
-1. Repairers will endlessly attempt to path to damaged buildings that can't be reached (common for towers surrounded by houses). I plan to address this in a future release. For now, you must identify such cases yourself and manually give the unit another order.
-
 ## Repository layout
 
 - `mod/idle_auto_repair/game/ai/human_assist/human_assist.xs` — copy of vanilla `human_assist.xs` with one extra line added (an `include` of `auto_repair.xs`).
