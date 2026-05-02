@@ -145,6 +145,15 @@ bool autoRepair_tryAssign(int unitID = -1, int builderType = -1, string kind = "
       // by default).
       if (autoRepair_unitCanRepairTarget(unitID, buildingProtoID) == false) { continue; }
 
+      // Skip buildings the unit can't path to. Without this, units endlessly
+      // attempt to reach unreachable targets -- common for towers surrounded
+      // by houses, or buildings on isolated terrain. kbCanPath only checks
+      // structural pathing (ignores moveable obstructions like units), so
+      // transient blockers don't cause false negatives.
+      vector buildingPos = kbUnitGetPosition(buildingID);
+      int unitProto = kbUnitGetProtoUnitID(unitID);
+      if (kbCanPath(pos, buildingPos, unitProto, 1.0, buildingID) == false) { continue; }
+
       // Skip warzones: don't suicide-march workers into hot areas. Vanilla
       // `core/buildings/buildings.xs` line 1274 uses the same threshold.
       int areaID = kbUnitGetAreaID(buildingID);
