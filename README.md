@@ -4,7 +4,7 @@ Idle units capable of repairing automatically walk to nearby damaged friendly bu
 
 When a unit capable of repairing is idle and a damaged friendly building is within its line of sight, the unit walks to the building and repairs it. The repair uses the engine's normal Repair action, so the same resources you would have spent on a manual repair are deducted from your stockpile as the building heals. Up to ten builders can converge on a single damaged building, and each idle unit targets the closest visible damaged building first.
 
-The behavior applies to villagers for Greek, Egyptian, Atlantean, Chinese, Japanese, and Aztec civilizations. For Norse it applies to soldier-builders for any building type: Berserk, Throwing Axeman, Hersir, Hirdman, Huskarl, Godi, and the Heroes of Ragnarok. Norse villagers also participate, but only for the building types they can repair under your current major god — Houses and Farms under Thor, Odin, and Loki, and any building type under Freyr.
+The behavior applies to villagers for Greek, Egyptian, Atlantean, Chinese, Japanese, and Aztec civilizations. For Norse it applies to soldier-builders for any building type: Berserk, Throwing Axeman, Hersir, Hirdman, Huskarl, Godi, and the Heroes of Ragnarok. Norse villagers also participate, but only for the building types they can repair under your current major god — Houses only under Thor, Odin, and Loki, and any building type under Freyr.
 
 Player commands always take priority. As soon as you give a unit any other order, the script removes it from its auto-repair plan immediately, and the unit follows your command without interference. The unit becomes eligible again only when it next returns to idle.
 

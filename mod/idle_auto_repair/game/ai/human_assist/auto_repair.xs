@@ -65,27 +65,33 @@ void autoRepair_setupQueries()
    }
 }
 
-// Returns true if the unit can perform useful work on the given building's
-// damaged state. Uses the engine's Build-rate table because that's what the
-// engine actually consults for under-max-HP buildings -- vanilla chairon's
-// `addBuilderTypesToPlan` (core/buildings/utilities_buildings.xs:635) confirms
-// this by routing repair plans for House/Farm/OxCartBuilding to Norse
-// villagers and everything else to NorseSoldierThatBuilds, even though the
-// villagers' Repair protoaction's <rate> list only contains House. The Build
-// protoaction's <rate> list is the load-bearing one for damaged-building work.
+// Returns true if the unit can perform useful repair work on the given
+// building. The engine's Build-rate table is used as a proxy for repair
+// eligibility because XS exposes no per-(unit, target) Repair-rate lookup
+// (only kbProtoUnitGetBuildRate exists). For all repair-capable protos
+// EXCEPT VillagerNorse under non-Freyr gods, the Build and Repair <rate>
+// lists both contain a catch-all <rate type="Building">, so Build rate is
+// a sound proxy.
 //
-//   - Greek/Egyptian/Atlantean/Chinese/Aztec/Japanese villagers: Build rate
-//     against <Building> (catch-all) -> > 0 for any building.
-//   - Norse villagers: Build rate against Farm, House, OxCartBuilding -> > 0
-//     for those, 0 for TC/Storehouse/Temple/etc.
-//   - Norse soldier-builders: Build rate against <Building> -> > 0 for any.
-//   - Freyr Norse villagers (if tech extends rates at runtime): the API
-//     reflects current player state, so Freyr-specific additions are auto-
-//     included.
+// VillagerNorse is the lone exception: its Build <rate> list covers Farm,
+// House, and OxCartBuilding, but its Repair <rate> list contains ONLY
+// <rate type="House">. Without a special case, this function would return
+// true for (Norse villager, Farm) -- the bug we're fixing here.
+//
+// Freyr extends Norse villager Repair via ArchaicAgeFreyr, which adds a
+// Repair <rate type="Building"> entry targeting <ProtoUnit>EconomicUpgraded</ProtoUnit>
+// (a logical type VillagerNorse carries). Under Freyr, the Build-rate proxy
+// is again sound because the Repair list also becomes catch-all.
 bool autoRepair_unitCanRepairTarget(int unitID = -1, int buildingProtoID = -1)
 {
    if (unitID < 0 || buildingProtoID < 0) { return(false); }
    int unitProtoID = kbUnitGetProtoUnitID(unitID);
+
+   if (unitProtoID == cUnitTypeVillagerNorse && cMyCiv != cCivFreyr)
+   {
+      return(buildingProtoID == cUnitTypeHouse);
+   }
+
    return(kbProtoUnitGetBuildRate(cMyID, unitProtoID, buildingProtoID) > 0.0);
 }
 
