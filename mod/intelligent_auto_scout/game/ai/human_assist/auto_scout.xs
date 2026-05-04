@@ -637,6 +637,8 @@ bool autoScout_tickUnit(int slot = -1)
 
    if (state == cAutoScoutState_Walking)
    {
+      if (autoScout_tryDivert(slot, unitID, los) == true) { return(true); }
+
       vector waypoint = gAutoScout_targetWaypoint[slot];
       int areaID = gAutoScout_targetAreaID[slot];
 
@@ -719,6 +721,8 @@ bool autoScout_tickUnit(int slot = -1)
 
    if (state == cAutoScoutState_Working)
    {
+      if (autoScout_tryDivert(slot, unitID, los) == true) { return(true); }
+
       vector waypoint = gAutoScout_targetWaypoint[slot];
       int areaID = gAutoScout_targetAreaID[slot];
 
@@ -774,6 +778,38 @@ bool autoScout_tickUnit(int slot = -1)
          return(true);
       }
       aiTaskMoveUnit(unitID, waypoint, false, false);
+      return(false);
+   }
+
+   if (state == cAutoScoutState_Diverting)
+   {
+      int herdID = gAutoScout_targetHerdID[slot];
+      bool herdInvalid = (kbUnitGetIsIDValid(herdID) == false);
+      bool herdOurs = false;
+      if (herdInvalid == false) { herdOurs = (kbUnitGetPlayerID(herdID) == cMyID); }
+
+      bool arrived = false;
+      if (herdInvalid == false && herdOurs == false)
+      {
+         arrived = autoScout_arrived(unitID, gAutoScout_targetWaypoint[slot], gAutoScout_stuckTicks[slot]);
+      }
+
+      bool stuck = (gAutoScout_stuckTicks[slot] >= cAutoScout_StuckTickLimit);
+
+      if (herdInvalid == true || herdOurs == true || arrived == true || stuck == true)
+      {
+         aiEcho("autoScout: DIVERT done unit " + unitID + " herd " + herdID
+            + " (invalid=" + herdInvalid + " ours=" + herdOurs
+            + " arrived=" + arrived + " stuck=" + stuck + ")");
+         autoScout_releaseClaim(slot);
+         autoScout_setStateIdle(slot);
+         gAutoScout_targetHerdID[slot] = -1;
+         return(true);
+      }
+
+      gAutoScout_stuckTicks[slot] = gAutoScout_stuckTicks[slot] + 1;
+      gAutoScout_targetWaypoint[slot] = kbUnitGetPosition(herdID);
+      aiTaskMoveUnit(unitID, gAutoScout_targetWaypoint[slot], false, false);
       return(false);
    }
 
