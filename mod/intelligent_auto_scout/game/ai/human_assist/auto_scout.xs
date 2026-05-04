@@ -12,9 +12,10 @@
 // for the full design.
 //==============================================================================
 
-const int cAutoScoutState_Idle    = 0;
-const int cAutoScoutState_Walking = 1;
-const int cAutoScoutState_Working = 2;
+const int cAutoScoutState_Idle      = 0;
+const int cAutoScoutState_Walking   = 1;
+const int cAutoScoutState_Working   = 2;
+const int cAutoScoutState_Diverting = 3;
 
 // Skip areas where less than this percent of tiles are still black (unexplored).
 const int cAutoScout_BlackTilesPercentMin = 10;
@@ -90,6 +91,26 @@ extern int[] gAutoScout_areaSelfScouted   = default;
 
 extern bool  gAutoScout_areaArraysInited  = false;
 
+// Per-scout: herd currently being diverted to in DIVERTING state. -1 when not diverting.
+extern int[] gAutoScout_targetHerdID = default;
+
+// Per-herd, append-only, never unmarked. Any herd ever selected by any scout for divert.
+// Filters subsequent divert candidates so each herd is attempted at most once globally.
+extern int[] gAutoScout_attemptedHerdIDs = default;
+
+// Per-herd, append-only, never unmarked. Any herd we've already issued a home-move for.
+// Single-issue guarantee — prevents fighting subsequent player command overrides.
+extern int[] gAutoScout_redirectedHerdIDs = default;
+
+// Cached unit-query handles, lazily initialized.
+extern int gAutoScout_herdQuery      = -1;
+extern int gAutoScout_ownedHerdQuery = -1;
+
+// Cached unit-type ID for "LogicalTypeConvertsHerds". Resolved lazily via
+// kbGetUnitTypeID — the named constant cUnitTypeLogicalTypeConvertsHerds is
+// not exposed in the stock AI scripts, so we look it up by string instead.
+extern int gAutoScout_typeConvertsHerds = -1;
+
 //------------------------------------------------------------------------------
 // Pool management
 //------------------------------------------------------------------------------
@@ -128,6 +149,7 @@ void autoScout_dropFromPool(int slot = -1)
    gAutoScout_targetWaypoint.removeIndex(slot);
    gAutoScout_workSteps.removeIndex(slot);
    gAutoScout_stuckTicks.removeIndex(slot);
+   gAutoScout_targetHerdID.removeIndex(slot);
 }
 
 //------------------------------------------------------------------------------
@@ -643,6 +665,7 @@ void autoScout_register(int planID = -1, int unitID = -1)
    gAutoScout_targetWaypoint.add(cInvalidVector);
    gAutoScout_workSteps.add(0);
    gAutoScout_stuckTicks.add(0);
+   gAutoScout_targetHerdID.add(-1);
 
    // Immediate first-tick: BFS + initial move now, instead of waiting up to
    // a full rule interval. Without this, the scout starts moving in whatever
