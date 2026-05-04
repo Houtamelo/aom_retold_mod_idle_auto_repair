@@ -848,6 +848,36 @@ void autoScout_register(int planID = -1, int unitID = -1)
 }
 
 //------------------------------------------------------------------------------
+// Home-move scan: route newly-converted herdables to the nearest TC, once.
+//------------------------------------------------------------------------------
+
+// Scans all herdables we own (regardless of how the conversion happened —
+// intentional divert OR organic walk-past during scouting) and issues a
+// single move-to-nearest-TC for each one we haven't yet redirected. The
+// per-herd redirected mark is permanent for the game so subsequent player
+// command overrides aren't fought.
+void autoScout_homeMoveScan()
+{
+   autoScout_initOwnedHerdQuery();
+   kbUnitQueryResetResults(gAutoScout_ownedHerdQuery);
+   int n = kbUnitQueryExecute(gAutoScout_ownedHerdQuery);
+   for (int i = 0; i < n; i = i + 1)
+   {
+      int herdID = kbUnitQueryGetResult(gAutoScout_ownedHerdQuery, i);
+      if (herdID < 0) { continue; }
+      if (autoScout_isHerdRedirected(herdID) == true) { continue; }
+
+      vector herdPos = kbUnitGetPosition(herdID);
+      vector tcPos = autoScout_findNearestTC(herdPos);
+      if (tcPos == cInvalidVector) { continue; }
+
+      aiEcho("autoScout: home-move herd " + herdID + " -> TC at " + tcPos);
+      aiTaskMoveUnit(herdID, tcPos, false, false);
+      gAutoScout_redirectedHerdIDs.add(herdID);
+   }
+}
+
+//------------------------------------------------------------------------------
 // Tick rule
 //------------------------------------------------------------------------------
 
@@ -871,5 +901,6 @@ active
          iter = iter + 1;
       }
    }
+   autoScout_homeMoveScan();
    xsSetContextPlayer(-1);
 }
