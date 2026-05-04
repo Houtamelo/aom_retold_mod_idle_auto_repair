@@ -180,6 +180,92 @@ vector autoScout_clampToMap(vector pos = cInvalidVector)
 }
 
 //------------------------------------------------------------------------------
+// Herd diversion helpers
+//------------------------------------------------------------------------------
+
+bool autoScout_isHerdAttempted(int herdID = -1)
+{
+   if (herdID < 0) { return(false); }
+   int n = gAutoScout_attemptedHerdIDs.size();
+   for (int i = 0; i < n; i = i + 1)
+   {
+      if (gAutoScout_attemptedHerdIDs[i] == herdID) { return(true); }
+   }
+   return(false);
+}
+
+bool autoScout_isHerdRedirected(int herdID = -1)
+{
+   if (herdID < 0) { return(false); }
+   int n = gAutoScout_redirectedHerdIDs.size();
+   for (int i = 0; i < n; i = i + 1)
+   {
+      if (gAutoScout_redirectedHerdIDs[i] == herdID) { return(true); }
+   }
+   return(false);
+}
+
+// Lazily resolves "LogicalTypeConvertsHerds" -> unit-type ID. AoMR's stock AI
+// scripts don't reference a cUnitTypeLogicalTypeConvertsHerds named constant,
+// so we look up the type ID by its proto.xml string name.
+int autoScout_getConvertsHerdsType()
+{
+   if (gAutoScout_typeConvertsHerds < 0)
+   {
+      gAutoScout_typeConvertsHerds = kbGetUnitTypeID("LogicalTypeConvertsHerds");
+   }
+   return(gAutoScout_typeConvertsHerds);
+}
+
+void autoScout_initHerdQuery()
+{
+   if (gAutoScout_herdQuery >= 0) { return; }
+   gAutoScout_herdQuery = kbUnitQueryCreate("autoScout_herds");
+   // cPlayerRelationEnemy includes Gaia (cPlayerRelationEnemyNotGaia exists as
+   // the explicit-exclude variant), so this covers the "Gaia + enemies" target
+   // set we want for divert candidates.
+   kbUnitQuerySetPlayerRelation(gAutoScout_herdQuery, cPlayerRelationEnemy, false);
+   kbUnitQuerySetUnitType(gAutoScout_herdQuery, cUnitTypeHerdable);
+   kbUnitQuerySetState(gAutoScout_herdQuery, cUnitStateAlive);
+   kbUnitQuerySetAscendingSort(gAutoScout_herdQuery, true);
+}
+
+void autoScout_initOwnedHerdQuery()
+{
+   if (gAutoScout_ownedHerdQuery >= 0) { return; }
+   gAutoScout_ownedHerdQuery = kbUnitQueryCreate("autoScout_ownedHerds");
+   kbUnitQuerySetPlayerID(gAutoScout_ownedHerdQuery, cMyID, false);
+   kbUnitQuerySetUnitType(gAutoScout_ownedHerdQuery, cUnitTypeHerdable);
+   kbUnitQuerySetState(gAutoScout_ownedHerdQuery, cUnitStateAlive);
+}
+
+// Returns the position of our nearest alive TC to refPos, or cInvalidVector
+// if we own no TC. Uses a fresh per-call query (cheap; called at most once
+// per converted herd over the course of a game).
+vector autoScout_findNearestTC(vector refPos = cInvalidVector)
+{
+   int q = kbUnitQueryCreate("autoScout_nearestTC");
+   kbUnitQuerySetPlayerID(q, cMyID, false);
+   kbUnitQuerySetUnitType(q, cUnitTypeTownCenter);
+   kbUnitQuerySetState(q, cUnitStateAlive);
+   kbUnitQueryResetResults(q);
+   int n = kbUnitQueryExecute(q);
+   if (n <= 0) { return(cInvalidVector); }
+
+   vector best = cInvalidVector;
+   float bestDist = 1.0e18;
+   for (int i = 0; i < n; i = i + 1)
+   {
+      int tcID = kbUnitQueryGetResult(q, i);
+      if (tcID < 0) { continue; }
+      vector tcPos = kbUnitGetPosition(tcID);
+      float d = xsVectorDistanceXZ(tcPos, refPos);
+      if (d < bestDist) { bestDist = d; best = tcPos; }
+   }
+   return(best);
+}
+
+//------------------------------------------------------------------------------
 // Candidate area criteria + BFS (closest-to-TC selection)
 //------------------------------------------------------------------------------
 
