@@ -265,6 +265,31 @@ vector autoScout_findNearestTC(vector refPos = cInvalidVector)
    return(best);
 }
 
+// Returns ID of the closest reachable, not-yet-attempted, eligible herd
+// within `los` of the scout, or -1 if none. Caller is responsible for
+// checking the scout's LogicalTypeConvertsHerds eligibility before calling.
+int autoScout_findVisibleHerd(int scoutUnitID = -1, float los = 18.0)
+{
+   if (scoutUnitID < 0 || los < 1.0) { return(-1); }
+   autoScout_initHerdQuery();
+   vector pos = kbUnitGetPosition(scoutUnitID);
+   kbUnitQuerySetPosition(gAutoScout_herdQuery, pos);
+   kbUnitQuerySetMaximumDistance(gAutoScout_herdQuery, los);
+   kbUnitQueryResetResults(gAutoScout_herdQuery);
+   int n = kbUnitQueryExecute(gAutoScout_herdQuery);
+   int unitProto = kbUnitGetProtoUnitID(scoutUnitID);
+   for (int i = 0; i < n; i = i + 1)
+   {
+      int herdID = kbUnitQueryGetResult(gAutoScout_herdQuery, i);
+      if (herdID < 0) { continue; }
+      if (autoScout_isHerdAttempted(herdID) == true) { continue; }
+      vector herdPos = kbUnitGetPosition(herdID);
+      if (kbCanPath(pos, herdPos, unitProto, 1.0, herdID) == false) { continue; }
+      return(herdID);
+   }
+   return(-1);
+}
+
 //------------------------------------------------------------------------------
 // Candidate area criteria + BFS (closest-to-TC selection)
 //------------------------------------------------------------------------------
