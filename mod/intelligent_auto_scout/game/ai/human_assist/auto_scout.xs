@@ -290,6 +290,31 @@ int autoScout_findVisibleHerd(int scoutUnitID = -1, float los = 18.0)
    return(-1);
 }
 
+// Tries to enter Diverting state for slot. Returns true if the scout transitioned to
+// Diverting (caller should `return(true)` to short-circuit normal handler logic
+// for this tick).
+bool autoScout_tryDivert(int slot = -1, int unitID = -1, float los = 18.0)
+{
+   int unitProto = kbUnitGetProtoUnitID(unitID);
+   int convertType = autoScout_getConvertsHerdsType();
+   if (convertType < 0) { return(false); }
+   if (kbProtoUnitIsType(unitProto, convertType) == false) { return(false); }
+
+   int herdID = autoScout_findVisibleHerd(unitID, los);
+   if (herdID < 0) { return(false); }
+   if (kbUnitGetIsIDValid(herdID) == false) { return(false); }
+
+   gAutoScout_attemptedHerdIDs.add(herdID);
+   gAutoScout_targetHerdID[slot]   = herdID;
+   gAutoScout_state[slot]          = cAutoScoutState_Diverting;
+   gAutoScout_targetWaypoint[slot] = kbUnitGetPosition(herdID);
+   gAutoScout_stuckTicks[slot]     = 0;
+
+   aiEcho("autoScout: DIVERTING unit " + unitID + " to herd " + herdID);
+   aiTaskMoveUnit(unitID, gAutoScout_targetWaypoint[slot], false, false);
+   return(true);
+}
+
 //------------------------------------------------------------------------------
 // Candidate area criteria + BFS (closest-to-TC selection)
 //------------------------------------------------------------------------------
