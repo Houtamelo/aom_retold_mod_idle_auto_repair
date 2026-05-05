@@ -24,7 +24,7 @@ const int cAutoScoutState_Diverting = 3;
 const float cAutoScout_HerdLOSBuffer = 12.0;
 
 // Skip areas where less than this percent of tiles are still black (unexplored).
-const int cAutoScout_BlackTilesPercentMin = 5;
+const int cAutoScout_BlackTilesPercentMin = 10;
 
 // Arrival = within this distance of target waypoint (kbUnitGetDistanceToPoint
 // is edge-to-point, so 1.5 tiles ~= unit center is ~2 tiles from target).
@@ -117,6 +117,13 @@ extern int gAutoScout_nearestTCQuery  = -1;
 // kbGetUnitTypeID — the named constant cUnitTypeLogicalTypeConvertsHerds is
 // not exposed in the stock AI scripts, so we look it up by string instead.
 extern int gAutoScout_typeConvertsHerds = -1;
+
+// Cached unit-type ID for "AbstractTownCenter". Resolved lazily — covers
+// TownCenter, CitadelCenter (created by the Egyptian Citadel god-power on a
+// TC), VillageCenter, and TownCenterAbandoned. cUnitTypeTownCenter only
+// matches the "TownCenter" proto, missing the post-godpower CitadelCenter
+// proto and other variants.
+extern int gAutoScout_typeAbstractTC = -1;
 
 //------------------------------------------------------------------------------
 // Pool management
@@ -224,6 +231,15 @@ int autoScout_getConvertsHerdsType()
    return(gAutoScout_typeConvertsHerds);
 }
 
+int autoScout_getAbstractTCType()
+{
+   if (gAutoScout_typeAbstractTC < 0)
+   {
+      gAutoScout_typeAbstractTC = kbGetUnitTypeID("AbstractTownCenter");
+   }
+   return(gAutoScout_typeAbstractTC);
+}
+
 void autoScout_initHerdQuery()
 {
    if (gAutoScout_herdQuery >= 0) { return; }
@@ -249,9 +265,11 @@ void autoScout_initOwnedHerdQuery()
 void autoScout_initNearestTCQuery()
 {
    if (gAutoScout_nearestTCQuery >= 0) { return; }
+   int tcType = autoScout_getAbstractTCType();
+   if (tcType < 0) { return; }
    gAutoScout_nearestTCQuery = kbUnitQueryCreate("autoScout_nearestTC");
    kbUnitQuerySetPlayerID(gAutoScout_nearestTCQuery, cMyID, false);
-   kbUnitQuerySetUnitType(gAutoScout_nearestTCQuery, cUnitTypeTownCenter);
+   kbUnitQuerySetUnitType(gAutoScout_nearestTCQuery, tcType);
    kbUnitQuerySetState(gAutoScout_nearestTCQuery, cUnitStateAlive);
 }
 
@@ -260,6 +278,7 @@ void autoScout_initNearestTCQuery()
 bool autoScout_anyTCAlive()
 {
    autoScout_initNearestTCQuery();
+   if (gAutoScout_nearestTCQuery < 0) { return(false); }
    kbUnitQueryResetResults(gAutoScout_nearestTCQuery);
    return(kbUnitQueryExecute(gAutoScout_nearestTCQuery) > 0);
 }
@@ -268,6 +287,7 @@ bool autoScout_anyTCAlive()
 int autoScout_findNearestTCID(vector refPos = cInvalidVector)
 {
    autoScout_initNearestTCQuery();
+   if (gAutoScout_nearestTCQuery < 0) { return(-1); }
    kbUnitQueryResetResults(gAutoScout_nearestTCQuery);
    int n = kbUnitQueryExecute(gAutoScout_nearestTCQuery);
    if (n <= 0) { return(-1); }
