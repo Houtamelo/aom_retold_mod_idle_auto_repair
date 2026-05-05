@@ -246,18 +246,28 @@ void autoScout_initOwnedHerdQuery()
    kbUnitQuerySetState(gAutoScout_ownedHerdQuery, cUnitStateAlive);
 }
 
+void autoScout_initNearestTCQuery()
+{
+   if (gAutoScout_nearestTCQuery >= 0) { return; }
+   gAutoScout_nearestTCQuery = kbUnitQueryCreate("autoScout_nearestTC");
+   kbUnitQuerySetPlayerID(gAutoScout_nearestTCQuery, cMyID, false);
+   kbUnitQuerySetUnitType(gAutoScout_nearestTCQuery, cUnitTypeTownCenter);
+   kbUnitQuerySetState(gAutoScout_nearestTCQuery, cUnitStateAlive);
+}
+
+// Cheap existence check using the cached TC query. Used by homeMoveScan to
+// short-circuit when we own no TC, avoiding the per-tick owned-herd query.
+bool autoScout_anyTCAlive()
+{
+   autoScout_initNearestTCQuery();
+   kbUnitQueryResetResults(gAutoScout_nearestTCQuery);
+   return(kbUnitQueryExecute(gAutoScout_nearestTCQuery) > 0);
+}
+
 // Returns the unit ID of our nearest alive TC to refPos, or -1 if we own no TC.
-// Lazy-cached query handle so we don't trip the engine's "duplicate query name"
-// warning every call.
 int autoScout_findNearestTCID(vector refPos = cInvalidVector)
 {
-   if (gAutoScout_nearestTCQuery < 0)
-   {
-      gAutoScout_nearestTCQuery = kbUnitQueryCreate("autoScout_nearestTC");
-      kbUnitQuerySetPlayerID(gAutoScout_nearestTCQuery, cMyID, false);
-      kbUnitQuerySetUnitType(gAutoScout_nearestTCQuery, cUnitTypeTownCenter);
-      kbUnitQuerySetState(gAutoScout_nearestTCQuery, cUnitStateAlive);
-   }
+   autoScout_initNearestTCQuery();
    kbUnitQueryResetResults(gAutoScout_nearestTCQuery);
    int n = kbUnitQueryExecute(gAutoScout_nearestTCQuery);
    if (n <= 0) { return(-1); }
@@ -876,6 +886,11 @@ void autoScout_register(int planID = -1, int unitID = -1)
 // command overrides aren't fought.
 void autoScout_homeMoveScan()
 {
+   // Short-circuit: with no TC there's nowhere to deliver herds. Skips the
+   // owned-herd query entirely until we have a TC, at which point pending
+   // herdables get redirected on the next tick.
+   if (autoScout_anyTCAlive() == false) { return; }
+
    autoScout_initOwnedHerdQuery();
    kbUnitQueryResetResults(gAutoScout_ownedHerdQuery);
    int n = kbUnitQueryExecute(gAutoScout_ownedHerdQuery);
