@@ -24,7 +24,7 @@ const int cAutoScoutState_Diverting = 3;
 const float cAutoScout_HerdLOSBuffer = 12.0;
 
 // Skip areas where less than this percent of tiles are still black (unexplored).
-const int cAutoScout_BlackTilesPercentMin = 10;
+const int cAutoScout_BlackTilesPercentMin = 5;
 
 // Arrival = within this distance of target waypoint (kbUnitGetDistanceToPoint
 // is edge-to-point, so 1.5 tiles ~= unit center is ~2 tiles from target).
