@@ -1,40 +1,20 @@
-# Idle Auto-Repair (Age of Mythology: Retold mod)
+# houtamelo's Age of Mythology: Retold mods
 
-Idle units capable of repairing automatically walk to nearby damaged friendly buildings and repair them at normal resource cost.
+Source for the AoM:R mods I publish on the Age of Mythology Retold mod platform, plus their development history.
 
-When a unit capable of repairing is idle and a damaged friendly building is within its line of sight, the unit walks to the building and repairs it. The repair uses the engine's normal Repair action, so the same resources you would have spent on a manual repair are deducted from your stockpile as the building heals. Up to ten builders can converge on a single damaged building, and each idle unit targets the closest visible damaged building first.
+## Mods
 
-The behavior applies to villagers for Greek, Egyptian, Atlantean, Chinese, Japanese, and Aztec civilizations. For Norse it applies to soldier-builders for any building type: Berserk, Throwing Axeman, Hersir, Hirdman, Huskarl, Godi, and the Heroes of Ragnarok. Norse villagers also participate, but only for the building types they can repair under your current major god — Houses only under Thor, Odin, and Loki, and any building type under Freyr.
+- [`mod/idle_auto_repair/`](mod/idle_auto_repair/) — **Idle Auto-Repair**. Idle units capable of repairing automatically walk to nearby damaged friendly buildings and repair them at normal resource cost. Covers villagers for all civs and Norse soldier-builders. Player commands always take priority. See the mod's [README](mod/idle_auto_repair/README.md) for full details.
 
-Player commands always take priority. As soon as you give a unit any other order, the script removes it from its auto-repair plan immediately, and the unit follows your command without interference. The unit becomes eligible again only when it next returns to idle.
+- [`mod/intelligent_auto_scout/`](mod/intelligent_auto_scout/) — **Intelligent Auto-Scout**. Replaces the engine's auto-scout button on land scouts with a frontier-based exploration system that prioritizes coverage near your town center, coordinates across multiple scouts, and routes any herdable a scout passes near to your nearest town center. Oracles keep their vanilla auto-scout behavior. See the mod's [README](mod/intelligent_auto_scout/README.md) for full details.
 
-There is no per-unit toggle; the behavior is on for every idle repair-capable unit you own. Units do not interrupt repair to defend themselves when attacked, so a villager mid-repair will continue repairing through hostile fire rather than running away, and a military unit will not switch to fighting back. Buildings inside warzones (areas the engine flags as high-danger) are skipped so workers are not sent into combat. Buildings flagged non-repairable in the game's data are also skipped.
+- [`mod/intelligent_auto_repair_and_scout/`](mod/intelligent_auto_repair_and_scout/) — Combined-deploy variant of the two mods above. Both mods overlay the same `game/ai/human_assist/human_assist.xs` and so cannot be installed as separate local mods at the same time; this folder ships a single unified overlay so you can run both features together.
 
-The mod adds a single include line to `game/ai/human_assist/human_assist.xs` and ships an `auto_repair.xs` file alongside it; that is the entire footprint.
+## Other contents
 
-## Repository layout
-
-- `mod/idle_auto_repair/game/ai/human_assist/human_assist.xs` — copy of vanilla `human_assist.xs` with one extra line added (an `include` of `auto_repair.xs`).
-- `mod/idle_auto_repair/game/ai/human_assist/auto_repair.xs` — all of the mod's logic, in a self-contained file. Read this first.
-- `mod/aom_autorepair_test/` — historical proof-of-concept iterations. Kept for reference; not deployed.
-- `docs/` — development notes: a `proto_mods.xml` syntax reference, AI-script-hook viability research, and the implementation plan that drove the work.
-
-## Local testing
-
-Place the contents of `mod/idle_auto_repair/` under `mods/local/idle_auto_repair/` in your Age of Mythology Retold user data directory. The portable way to find that directory: launch the game, open `Mods → Mod Manager`, select any installed mod, and click `Open Directory`; navigate up one level to the `local/` folder.
-
-## Patch maintenance
-
-The mod overlays vanilla `human_assist.xs`. After any Age of Mythology Retold patch that touches that file:
-
-1. Replace `mod/idle_auto_repair/game/ai/human_assist/human_assist.xs` with a fresh copy of the new vanilla file.
-2. Re-add the include line right after the existing `include` directives:
-   ```xs
-   include "human_assist/auto_repair.xs"; // Idle Auto-Repair mod
-   ```
-3. Re-upload to the Age of Mythology Retold mod platform.
-
-`auto_repair.xs` itself is independent of vanilla and is generally unaffected by game patches.
+- `mod/aom_autorepair_test/` — historical proof-of-concept iterations from the auto-repair research; kept for reference, not deployed.
+- `docs/` — development notes (proto_mods.xml syntax reference, AI-script-hook viability research) and the design specs / implementation plans that drove each mod under `docs/superpowers/`.
+- `extracted/` — extracted reference files from the game install (proto.xml, doxygen, etc.) used during research.
 
 ## License
 
