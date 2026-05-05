@@ -21,7 +21,7 @@ const int cAutoScoutState_Diverting = 3;
 // briefly flicker at the LOS boundary between ticks. Per-result we still
 // require the herd's tile to be visible OR fogged (i.e. not pure black /
 // never-explored), which keeps the AI from "cheating" toward unseen herds.
-const float cAutoScout_HerdLOSBuffer = 6.0;
+const float cAutoScout_HerdLOSBuffer = 12.0;
 
 // Skip areas where less than this percent of tiles are still black (unexplored).
 const int cAutoScout_BlackTilesPercentMin = 10;
@@ -884,12 +884,34 @@ void autoScout_register(int planID = -1, int unitID = -1)
 // single move-to-nearest-TC for each one we haven't yet redirected. The
 // per-herd redirected mark is permanent for the game so subsequent player
 // command overrides aren't fought.
+// Drops redirectedHerdIDs entries for herds that are dead or no longer ours.
+// When a herd flips back to us (e.g. an enemy stole it, then our scout
+// walks past and proximity-converts it again), this lets homeMoveScan
+// re-issue the move-to-TC on the re-acquired herd instead of leaving it
+// stranded with a stale redirected mark.
+void autoScout_pruneRedirectedHerds()
+{
+   for (int i = gAutoScout_redirectedHerdIDs.size() - 1; i >= 0; i = i - 1)
+   {
+      int herdID = gAutoScout_redirectedHerdIDs[i];
+      bool valid = kbUnitGetIsIDValid(herdID);
+      bool ours = false;
+      if (valid == true) { ours = (kbUnitGetPlayerID(herdID) == cMyID); }
+      if (valid == false || ours == false)
+      {
+         gAutoScout_redirectedHerdIDs.removeIndex(i);
+      }
+   }
+}
+
 void autoScout_homeMoveScan()
 {
    // Short-circuit: with no TC there's nowhere to deliver herds. Skips the
    // owned-herd query entirely until we have a TC, at which point pending
    // herdables get redirected on the next tick.
    if (autoScout_anyTCAlive() == false) { return; }
+
+   autoScout_pruneRedirectedHerds();
 
    autoScout_initOwnedHerdQuery();
    kbUnitQueryResetResults(gAutoScout_ownedHerdQuery);
