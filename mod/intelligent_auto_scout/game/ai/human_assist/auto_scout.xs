@@ -17,6 +17,12 @@ const int cAutoScoutState_Walking   = 1;
 const int cAutoScoutState_Working   = 2;
 const int cAutoScoutState_Diverting = 3;
 
+// Extra detection radius beyond the scout's LOS, in tiles. Catches herds that
+// briefly flicker at the LOS boundary between ticks. Per-result we still
+// require the herd's tile to be visible OR fogged (i.e. not pure black /
+// never-explored), which keeps the AI from "cheating" toward unseen herds.
+const float cAutoScout_HerdLOSBuffer = 6.0;
+
 // Skip areas where less than this percent of tiles are still black (unexplored).
 const int cAutoScout_BlackTilesPercentMin = 10;
 
@@ -103,8 +109,9 @@ extern int[] gAutoScout_attemptedHerdIDs = default;
 extern int[] gAutoScout_redirectedHerdIDs = default;
 
 // Cached unit-query handles, lazily initialized.
-extern int gAutoScout_herdQuery      = -1;
-extern int gAutoScout_ownedHerdQuery = -1;
+extern int gAutoScout_herdQuery       = -1;
+extern int gAutoScout_ownedHerdQuery  = -1;
+extern int gAutoScout_nearestTCQuery  = -1;
 
 // Cached unit-type ID for "LogicalTypeConvertsHerds". Resolved lazily via
 // kbGetUnitTypeID — the named constant cUnitTypeLogicalTypeConvertsHerds is
@@ -239,42 +246,51 @@ void autoScout_initOwnedHerdQuery()
    kbUnitQuerySetState(gAutoScout_ownedHerdQuery, cUnitStateAlive);
 }
 
-// Returns the position of our nearest alive TC to refPos, or cInvalidVector
-// if we own no TC. Uses a fresh per-call query (cheap; called at most once
-// per converted herd over the course of a game).
-vector autoScout_findNearestTC(vector refPos = cInvalidVector)
+// Returns the unit ID of our nearest alive TC to refPos, or -1 if we own no TC.
+// Lazy-cached query handle so we don't trip the engine's "duplicate query name"
+// warning every call.
+int autoScout_findNearestTCID(vector refPos = cInvalidVector)
 {
-   int q = kbUnitQueryCreate("autoScout_nearestTC");
-   kbUnitQuerySetPlayerID(q, cMyID, false);
-   kbUnitQuerySetUnitType(q, cUnitTypeTownCenter);
-   kbUnitQuerySetState(q, cUnitStateAlive);
-   kbUnitQueryResetResults(q);
-   int n = kbUnitQueryExecute(q);
-   if (n <= 0) { return(cInvalidVector); }
+   if (gAutoScout_nearestTCQuery < 0)
+   {
+      gAutoScout_nearestTCQuery = kbUnitQueryCreate("autoScout_nearestTC");
+      kbUnitQuerySetPlayerID(gAutoScout_nearestTCQuery, cMyID, false);
+      kbUnitQuerySetUnitType(gAutoScout_nearestTCQuery, cUnitTypeTownCenter);
+      kbUnitQuerySetState(gAutoScout_nearestTCQuery, cUnitStateAlive);
+   }
+   kbUnitQueryResetResults(gAutoScout_nearestTCQuery);
+   int n = kbUnitQueryExecute(gAutoScout_nearestTCQuery);
+   if (n <= 0) { return(-1); }
 
-   vector best = cInvalidVector;
+   int bestID = -1;
    float bestDist = 1.0e18;
    for (int i = 0; i < n; i = i + 1)
    {
-      int tcID = kbUnitQueryGetResult(q, i);
+      int tcID = kbUnitQueryGetResult(gAutoScout_nearestTCQuery, i);
       if (tcID < 0) { continue; }
       vector tcPos = kbUnitGetPosition(tcID);
       float d = xsVectorDistanceXZ(tcPos, refPos);
-      if (d < bestDist) { bestDist = d; best = tcPos; }
+      if (d < bestDist) { bestDist = d; bestID = tcID; }
    }
-   return(best);
+   return(bestID);
 }
 
 // Returns ID of the closest reachable, not-yet-attempted, eligible herd
-// within `los` of the scout, or -1 if none. Caller is responsible for
-// checking the scout's LogicalTypeConvertsHerds eligibility before calling.
+// within (los + cAutoScout_HerdLOSBuffer) of the scout, or -1 if none.
+// The buffer catches herds that flicker at the LOS edge between ticks; we
+// then per-result drop herds whose tile is pure black (never explored) so
+// we don't divert toward unseen positions. Fogged tiles (explored, currently
+// dark) are accepted — those are herds we previously saw and remember.
+//
+// Caller is responsible for checking the scout's LogicalTypeConvertsHerds
+// eligibility before calling.
 int autoScout_findVisibleHerd(int scoutUnitID = -1, float los = 18.0)
 {
    if (scoutUnitID < 0 || los < 1.0) { return(-1); }
    autoScout_initHerdQuery();
    vector pos = kbUnitGetPosition(scoutUnitID);
    kbUnitQuerySetPosition(gAutoScout_herdQuery, pos);
-   kbUnitQuerySetMaximumDistance(gAutoScout_herdQuery, los);
+   kbUnitQuerySetMaximumDistance(gAutoScout_herdQuery, los + cAutoScout_HerdLOSBuffer);
    kbUnitQueryResetResults(gAutoScout_herdQuery);
    int n = kbUnitQueryExecute(gAutoScout_herdQuery);
    int unitProto = kbUnitGetProtoUnitID(scoutUnitID);
@@ -284,6 +300,8 @@ int autoScout_findVisibleHerd(int scoutUnitID = -1, float los = 18.0)
       if (herdID < 0) { continue; }
       if (autoScout_isHerdAttempted(herdID) == true) { continue; }
       vector herdPos = kbUnitGetPosition(herdID);
+      bool seen = (kbLocationVisible(herdPos) == true || kbLocationFogged(herdPos) == true);
+      if (seen == false) { continue; }
       if (kbCanPath(pos, herdPos, unitProto, 1.0, herdID) == false) { continue; }
       return(herdID);
    }
@@ -868,11 +886,15 @@ void autoScout_homeMoveScan()
       if (autoScout_isHerdRedirected(herdID) == true) { continue; }
 
       vector herdPos = kbUnitGetPosition(herdID);
-      vector tcPos = autoScout_findNearestTC(herdPos);
-      if (tcPos == cInvalidVector) { continue; }
+      int tcID = autoScout_findNearestTCID(herdPos);
+      if (tcID < 0) { continue; }
 
-      aiEcho("autoScout: home-move herd " + herdID + " -> TC at " + tcPos);
-      aiTaskMoveUnit(herdID, tcPos, false, false);
+      // aiTaskWorkUnit on a TC delivers the herd via the engine's herd-on-TC
+      // command — herdables surround the TC instead of stacking on a point,
+      // matching the right-click-herd-on-TC player UX.
+      aiEcho("autoScout: home-move herd " + herdID + " -> TC " + tcID
+         + " at " + kbUnitGetPosition(tcID));
+      aiTaskWorkUnit(herdID, tcID, false);
       gAutoScout_redirectedHerdIDs.add(herdID);
    }
 }
