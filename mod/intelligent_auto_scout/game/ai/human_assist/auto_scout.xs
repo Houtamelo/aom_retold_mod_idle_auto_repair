@@ -409,6 +409,94 @@ bool autoScout_tryDivert(int slot = -1, int unitID = -1, float los = 18.0)
 }
 
 //------------------------------------------------------------------------------
+// Oracle helpers — identification, query setup, MaxOracleLOS cache update,
+// overlap predicates used by the BFS heuristic.
+//------------------------------------------------------------------------------
+
+bool autoScout_isOracle(int unitID = -1)
+{
+   if (unitID < 0) { return(false); }
+   return(kbUnitIsType(unitID, cUnitTypeAbstractOracle));
+}
+
+void autoScout_initOracleQuery()
+{
+   if (gAutoScout_oracleQuery >= 0) { return; }
+   gAutoScout_oracleQuery = kbUnitQueryCreate("autoScout_oracles");
+   kbUnitQuerySetPlayerID(gAutoScout_oracleQuery, cMyID, false);
+   kbUnitQuerySetUnitType(gAutoScout_oracleQuery, cUnitTypeAbstractOracle);
+   kbUnitQuerySetState(gAutoScout_oracleQuery, cUnitStateAlive);
+}
+
+// Updates gAutoScout_maxOracleLOS only if the given oracle is currently
+// saturated AND its current LOS exceeds the cached value. Saturation gating
+// prevents mid-growth readings from polluting the cache.
+void autoScout_updateMaxOracleLOS(int unitID = -1)
+{
+   if (unitID < 0) { return; }
+   if (kbUnitGetActionType(unitID) != cAutoScout_OracleSaturatedActionType) { return; }
+   float current = kbUnitGetStatFloat(unitID, cUnitStatLOS);
+   if (current > gAutoScout_maxOracleLOS) { gAutoScout_maxOracleLOS = current; }
+}
+
+// Returns true if areaPos lies within (radiusFactor * gAutoScout_maxOracleLOS)
+// of ANY of cMyID's alive oracles, excluding excludeUnitID. Used for the
+// oracle-vs-oracle hard-skip in autoScout_areaIsCandidate (radiusFactor=0.8).
+bool autoScout_anyOracleNear(
+   vector areaPos = cInvalidVector, int excludeUnitID = -1, float radiusFactor = 0.8)
+{
+   autoScout_initOracleQuery();
+   kbUnitQueryResetResults(gAutoScout_oracleQuery);
+   int n = kbUnitQueryExecute(gAutoScout_oracleQuery);
+   if (n <= 0) { return(false); }
+   float threshold = radiusFactor * gAutoScout_maxOracleLOS;
+   for (int i = 0; i < n; i = i + 1)
+   {
+      int oracleID = kbUnitQueryGetResult(gAutoScout_oracleQuery, i);
+      if (oracleID < 0) { continue; }
+      if (oracleID == excludeUnitID) { continue; }
+      vector pos = kbUnitGetPosition(oracleID);
+      if (xsVectorDistanceXZ(pos, areaPos) < threshold) { return(true); }
+   }
+   return(false);
+}
+
+// Returns a [0, 1] penalty representing summed overlap of areaPos with all
+// our oracles' claim circles, excluding excludeUnitID. Penalty per oracle is
+// linear in distance: 1.0 at zero distance, 0.0 at >= claim radius. Sums then
+// clamps to 1.0. Used as a multiplicative discount in autoScout_areaScore for
+// non-oracle source units. Moving oracles use their current dynamic LOS as
+// the claim radius (small, transient) instead of MaxOracleLOS.
+float autoScout_oraclePenalty(vector areaPos = cInvalidVector, int excludeUnitID = -1)
+{
+   autoScout_initOracleQuery();
+   kbUnitQueryResetResults(gAutoScout_oracleQuery);
+   int n = kbUnitQueryExecute(gAutoScout_oracleQuery);
+   if (n <= 0) { return(0.0); }
+   float penalty = 0.0;
+   for (int i = 0; i < n; i = i + 1)
+   {
+      int oracleID = kbUnitQueryGetResult(gAutoScout_oracleQuery, i);
+      if (oracleID < 0) { continue; }
+      if (oracleID == excludeUnitID) { continue; }
+      vector pos = kbUnitGetPosition(oracleID);
+      float d = xsVectorDistanceXZ(pos, areaPos);
+      float radius = gAutoScout_maxOracleLOS;
+      if (kbUnitGetActionType(oracleID) == cActionTypeMove)
+      {
+         radius = kbUnitGetStatFloat(oracleID, cUnitStatLOS);
+      }
+      if (radius < 0.001) { continue; }
+      if (d < radius)
+      {
+         penalty = penalty + (radius - d) / radius;
+      }
+   }
+   if (penalty > 1.0) { penalty = 1.0; }
+   return(penalty);
+}
+
+//------------------------------------------------------------------------------
 // Candidate area criteria + BFS (closest-to-TC selection)
 //------------------------------------------------------------------------------
 
