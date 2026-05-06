@@ -836,6 +836,145 @@ bool autoScout_tickDivertingState(int slot = -1, int unitID = -1)
    return(false);
 }
 
+// Oracle-specific tick handler. State machine:
+//   Idle -> Walking (issue move to chosen area centroid)
+//   Walking -> Stationed (on arrival OR currentLOS/MaxOracleLOS < 0.5)
+//   Stationed -> Idle (on saturation: action == cAutoScout_OracleSaturatedActionType)
+//   Diverting -> handled by shared autoScout_tickDivertingState
+// tryDivert is called before any other state transition so herd claims always
+// preempt -- including suspending the 50% LOS floor.
+//
+// Returns true on a state transition this tick (caller may re-tick).
+bool autoScout_tickOracleUnit(int slot = -1)
+{
+   int unitID = gAutoScout_unitID[slot];
+   int planID = gAutoScout_planID[slot];
+
+   if (kbUnitGetIsIDValid(unitID) == false ||
+       kbUnitGetPlayerID(unitID) != cMyID ||
+       aiPlanGetIsIDValid(planID) == false)
+   {
+      autoScout_dropFromPool(slot);
+      return(true);
+   }
+
+   // Opportunistic cache update -- harmless if not saturated (the helper is
+   // gated). Done every tick so we capture the saturation moment regardless
+   // of which state branch we hit.
+   autoScout_updateMaxOracleLOS(unitID);
+
+   float los = kbUnitGetStatFloat(unitID, cUnitStatLOS);
+   int   state = gAutoScout_state[slot];
+
+   // Diverting: shared logic. No tryDivert call here since we are already
+   // committed to a herd target.
+   if (state == cAutoScoutState_Diverting)
+   {
+      return(autoScout_tickDivertingState(slot, unitID));
+   }
+
+   // tryDivert outranks all other state transitions (incl. the 50% LOS floor).
+   if (autoScout_tryDivert(slot, unitID, los) == true) { return(true); }
+
+   if (state == cAutoScoutState_Idle)
+   {
+      int nextArea = autoScout_findNextArea(unitID);
+      if (nextArea < 0)
+      {
+         // No candidate area. Drop from pool and let engine plan housekeeping
+         // revert the UI button (same as regular scouts when BFS is exhausted).
+         aiTaskStopUnit(unitID);
+         aiPlanDestroy(planID);
+         autoScout_dropFromPool(slot);
+         return(true);
+      }
+      gAutoScout_areaClaim[nextArea] = unitID;
+      gAutoScout_targetAreaID[slot] = nextArea;
+      gAutoScout_targetWaypoint[slot] = kbAreaGetCenter(nextArea);
+      gAutoScout_state[slot] = cAutoScoutState_Walking;
+      gAutoScout_stuckTicks[slot] = 0;
+      aiTaskMoveUnit(unitID, gAutoScout_targetWaypoint[slot], false, false);
+      return(true);
+   }
+
+   if (state == cAutoScoutState_Walking)
+   {
+      vector waypoint = gAutoScout_targetWaypoint[slot];
+      int areaID = gAutoScout_targetAreaID[slot];
+
+      // 50% LOS floor: if currentLOS bled below half MaxOracleLOS, commit to
+      // current position. Vanilla failure mode is letting LOS drain to base,
+      // where favor income (proportional to LOS area) is minimal.
+      bool floorTrigger = false;
+      if (gAutoScout_maxOracleLOS > 0.0001)
+      {
+         float pct = los / gAutoScout_maxOracleLOS;
+         if (pct < cAutoScout_OracleMovementLOSFloor) { floorTrigger = true; }
+      }
+      if (floorTrigger == true)
+      {
+         aiTaskStopUnit(unitID);
+         if (areaID >= 0 && areaID < gAutoScout_areaSelfScouted.size())
+         {
+            gAutoScout_areaSelfScouted[areaID] = 1;
+         }
+         aiEcho("autoScout: oracle " + unitID + " LOS-floor stop (los=" + los
+            + " maxLOS=" + gAutoScout_maxOracleLOS + ")");
+         gAutoScout_state[slot] = cAutoScoutState_Stationed;
+         gAutoScout_stuckTicks[slot] = 0;
+         return(true);
+      }
+
+      if (autoScout_arrived(unitID, waypoint, gAutoScout_stuckTicks[slot]) == true)
+      {
+         if (areaID >= 0 && areaID < gAutoScout_areaSelfScouted.size())
+         {
+            gAutoScout_areaSelfScouted[areaID] = 1;
+         }
+         aiEcho("autoScout: oracle " + unitID + " arrived; parking (los=" + los + ")");
+         gAutoScout_state[slot] = cAutoScoutState_Stationed;
+         gAutoScout_stuckTicks[slot] = 0;
+         return(true);
+      }
+
+      gAutoScout_stuckTicks[slot] = gAutoScout_stuckTicks[slot] + 1;
+      if (gAutoScout_stuckTicks[slot] >= cAutoScout_StuckTickLimit)
+      {
+         autoScout_releaseClaim(slot);
+         autoScout_setStateIdle(slot);
+         return(true);
+      }
+      aiTaskMoveUnit(unitID, waypoint, false, false);
+      return(false);
+   }
+
+   if (state == cAutoScoutState_Stationed)
+   {
+      // Saturation == LOS hit cap. Action 37 is the engine signal (the
+      // meditation animation plays at this point). Re-pick a new area.
+      if (kbUnitGetActionType(unitID) == cAutoScout_OracleSaturatedActionType)
+      {
+         aiEcho("autoScout: oracle " + unitID + " saturated at los=" + los
+            + " (maxLOS cache=" + gAutoScout_maxOracleLOS + "), repicking");
+         autoScout_releaseClaim(slot);
+         autoScout_setStateIdle(slot);
+         return(true);
+      }
+      // Still growing -- stay parked, no action.
+      return(false);
+   }
+
+   // Working state should not occur for oracles (they don't enter frontier-
+   // walk). Defensive: promote to Stationed.
+   if (state == cAutoScoutState_Working)
+   {
+      gAutoScout_state[slot] = cAutoScoutState_Stationed;
+      return(true);
+   }
+
+   return(false);
+}
+
 // Returns true if this tick caused a state transition (caller may want to
 // re-tick the scout in the same rule firing to avoid wasting a frame in
 // the new state).
