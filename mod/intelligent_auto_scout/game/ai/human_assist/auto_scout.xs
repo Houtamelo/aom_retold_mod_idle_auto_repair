@@ -519,6 +519,16 @@ bool autoScout_areaIsCandidate(int areaID = -1, int scoutUnitID = -1)
    int unitProto = kbUnitGetProtoUnitID(scoutUnitID);
    if (kbCanPath(unitPos, areaPos, unitProto, 1.0, -1) == false) { return(false); }
 
+   // Oracle source hard-skip: refuse candidates whose centroid lies within
+   // cAutoScout_OracleExclusionFactor * MaxOracleLOS of any OTHER oracle.
+   // Prevents oracle-on-oracle LOS overlap (which throttles favor income
+   // for the overlapped pair) and redundant coverage.
+   if (autoScout_isOracle(scoutUnitID) == true &&
+       autoScout_anyOracleNear(areaPos, scoutUnitID, cAutoScout_OracleExclusionFactor) == true)
+   {
+      return(false);
+   }
+
    return(true);
 }
 
@@ -587,9 +597,23 @@ float autoScout_areaScore(
    float densityScore = 1.0 - densityPenalty;
    if (densityScore < 0.0) { densityScore = 0.0; }
 
-   return(cAutoScout_WeightTC * tcScore
-        + cAutoScout_WeightScout * scoutScore
-        + cAutoScout_WeightDensity * densityScore);
+   float baseScore = cAutoScout_WeightTC * tcScore
+                   + cAutoScout_WeightScout * scoutScore
+                   + cAutoScout_WeightDensity * densityScore;
+
+   // Oracle-overlap discount applies only when the source scout is NOT an
+   // oracle. Oracle sources already use the hard-skip in
+   // autoScout_areaIsCandidate; double-applying a discount here would over-
+   // penalise oracle re-positioning. Multiplicative so areas deeply inside an
+   // oracle's claim approach zero score, while areas just barely touching the
+   // claim circle keep most of their score.
+   if (autoScout_isOracle(scoutUnitID) == false)
+   {
+      float oracleDiscount = 1.0 - autoScout_oraclePenalty(areaPos, scoutUnitID);
+      baseScore = baseScore * oracleDiscount;
+   }
+
+   return(baseScore);
 }
 
 // Layered BFS over the scout's reachable area subgraph. Candidates are
