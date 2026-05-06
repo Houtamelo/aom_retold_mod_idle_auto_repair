@@ -1187,11 +1187,14 @@ bool autoScout_tickUnit(int slot = -1)
 void autoScout_register(int planID = -1, int unitID = -1)
 {
    if (planID < 0 || unitID < 0) { return; }
-   if (kbUnitIsType(unitID, cUnitTypeAbstractOracle) == true) { return; }
 
    // Engine plan stays alive as the housekeeping marker (UI button state +
    // player-override / cancel detection); NumberOfLoops=0 makes its own
    // movement loop a no-op so it doesn't fight our aiTaskMoveUnit calls.
+   // Oracles share this scaffolding -- our autoScout_tickUnit dispatches
+   // them to autoScout_tickOracleUnit at runtime, while the engine's
+   // oracle-specific cExplorePlanStopLOSPercentage logic in human_assist.xs
+   // becomes inert because the loop count is zero.
    aiPlanSetVariableInt(planID, cExplorePlanNumberOfLoops, 0, 0);
 
    gAutoScout_unitID.add(unitID);
