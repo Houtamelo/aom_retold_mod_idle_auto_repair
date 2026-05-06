@@ -991,6 +991,14 @@ bool autoScout_tickUnit(int slot = -1)
       return(true);
    }
 
+   // Route oracles to their dedicated state machine. They share the pool and
+   // the Diverting handler with regular scouts but have their own
+   // Idle/Walking/Stationed flow (no Working / frontier-walk).
+   if (autoScout_isOracle(unitID) == true)
+   {
+      return(autoScout_tickOracleUnit(slot));
+   }
+
    float los = kbUnitGetStatFloat(unitID, cUnitStatLOS);
    if (los < 1.0) { los = 18.0; }
 
