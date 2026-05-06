@@ -797,6 +797,45 @@ bool autoScout_arrived(int unitID = -1, vector target = cInvalidVector, int tick
    return(false);
 }
 
+// Shared Diverting-state handler. Called from both autoScout_tickUnit (regular
+// scouts) and autoScout_tickOracleUnit (oracles). Identical semantics: re-target
+// the herd every tick (herds wander), complete on herd-invalid OR herd-flipped-
+// to-us OR arrived OR stuck-timeout. On completion, releases area claim, sets
+// Idle, clears targetHerdID. Returns true if the state transitioned.
+bool autoScout_tickDivertingState(int slot = -1, int unitID = -1)
+{
+   if (slot < 0 || unitID < 0) { return(false); }
+
+   int herdID = gAutoScout_targetHerdID[slot];
+   bool herdInvalid = (kbUnitGetIsIDValid(herdID) == false);
+   bool herdOurs = false;
+   if (herdInvalid == false) { herdOurs = (kbUnitGetPlayerID(herdID) == cMyID); }
+
+   bool arrived = false;
+   if (herdInvalid == false && herdOurs == false)
+   {
+      arrived = autoScout_arrived(unitID, gAutoScout_targetWaypoint[slot], gAutoScout_stuckTicks[slot]);
+   }
+
+   bool stuck = (gAutoScout_stuckTicks[slot] >= cAutoScout_StuckTickLimit);
+
+   if (herdInvalid == true || herdOurs == true || arrived == true || stuck == true)
+   {
+      aiEcho("autoScout: DIVERT done unit " + unitID + " herd " + herdID
+         + " (invalid=" + herdInvalid + " ours=" + herdOurs
+         + " arrived=" + arrived + " stuck=" + stuck + ")");
+      autoScout_releaseClaim(slot);
+      autoScout_setStateIdle(slot);
+      gAutoScout_targetHerdID[slot] = -1;
+      return(true);
+   }
+
+   gAutoScout_stuckTicks[slot] = gAutoScout_stuckTicks[slot] + 1;
+   gAutoScout_targetWaypoint[slot] = kbUnitGetPosition(herdID);
+   aiTaskMoveUnit(unitID, gAutoScout_targetWaypoint[slot], false, false);
+   return(false);
+}
+
 // Returns true if this tick caused a state transition (caller may want to
 // re-tick the scout in the same rule firing to avoid wasting a frame in
 // the new state).
@@ -988,34 +1027,7 @@ bool autoScout_tickUnit(int slot = -1)
 
    if (state == cAutoScoutState_Diverting)
    {
-      int herdID = gAutoScout_targetHerdID[slot];
-      bool herdInvalid = (kbUnitGetIsIDValid(herdID) == false);
-      bool herdOurs = false;
-      if (herdInvalid == false) { herdOurs = (kbUnitGetPlayerID(herdID) == cMyID); }
-
-      bool arrived = false;
-      if (herdInvalid == false && herdOurs == false)
-      {
-         arrived = autoScout_arrived(unitID, gAutoScout_targetWaypoint[slot], gAutoScout_stuckTicks[slot]);
-      }
-
-      bool stuck = (gAutoScout_stuckTicks[slot] >= cAutoScout_StuckTickLimit);
-
-      if (herdInvalid == true || herdOurs == true || arrived == true || stuck == true)
-      {
-         aiEcho("autoScout: DIVERT done unit " + unitID + " herd " + herdID
-            + " (invalid=" + herdInvalid + " ours=" + herdOurs
-            + " arrived=" + arrived + " stuck=" + stuck + ")");
-         autoScout_releaseClaim(slot);
-         autoScout_setStateIdle(slot);
-         gAutoScout_targetHerdID[slot] = -1;
-         return(true);
-      }
-
-      gAutoScout_stuckTicks[slot] = gAutoScout_stuckTicks[slot] + 1;
-      gAutoScout_targetWaypoint[slot] = kbUnitGetPosition(herdID);
-      aiTaskMoveUnit(unitID, gAutoScout_targetWaypoint[slot], false, false);
-      return(false);
+      return(autoScout_tickDivertingState(slot, unitID));
    }
 
    return(false);
