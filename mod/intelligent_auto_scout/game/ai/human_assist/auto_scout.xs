@@ -16,6 +16,7 @@ const int cAutoScoutState_Idle      = 0;
 const int cAutoScoutState_Walking   = 1;
 const int cAutoScoutState_Working   = 2;
 const int cAutoScoutState_Diverting = 3;
+const int cAutoScoutState_Stationed = 4;
 
 // Extra detection radius beyond the scout's LOS, in tiles. Catches herds that
 // briefly flicker at the LOS boundary between ticks. Per-result we still
@@ -47,6 +48,37 @@ const int cAutoScout_StuckTickLimit = 30;
 // Cap on chained state-machine iterations per scout per rule firing (defensive
 // against unexpected state cycles).
 const int cAutoScout_MaxChainPerTick = 4;
+
+// Action-type code reported by kbUnitGetActionType when an Oracle has reached
+// its peak AutoLOS bonus and switches to the meditation/glow animation.
+// Identified empirically from the OracleDiag run on 2026-05-06: the unit's
+// reported action transitioned 7 -> 37 the moment its current LOS hit the cap
+// and stayed at 37 thereafter. No documented cActionType* constant in the
+// extracted doxygen / shipped XS scripts / BANG docs maps to this value, so
+// we hardcode it. If a future patch surfaces a real constant (something like
+// cActionTypeIdleStatBonusFull), replace this magic number with that.
+const int cAutoScout_OracleSaturatedActionType = 37;
+
+// Cold-start value for the dynamic gAutoScout_maxOracleLOS cache. Used until
+// any oracle is observed in the saturated action state (action ==
+// cAutoScout_OracleSaturatedActionType) with a higher current LOS. 20.0 is
+// chosen so the 50% movement floor (cAutoScout_OracleMovementLOSFloor) has a
+// meaningful threshold from tick 1, even before any oracle reaches its real cap.
+const float cAutoScout_OracleColdCacheMaxLOS = 20.0;
+
+// Movement-state LOS floor for Oracles, expressed as a ratio of MaxOracleLOS.
+// While Walking, an Oracle whose currentLOS / MaxOracleLOS drops below this
+// ratio stops in place and becomes Stationed, avoiding the vanilla failure
+// mode of draining all the way to base LOS (where favor income is minimal).
+// Suspended during Diverting -- herd claim outranks LOS preservation.
+const float cAutoScout_OracleMovementLOSFloor = 0.5;
+
+// Oracle-vs-oracle exclusion factor used by autoScout_areaIsCandidate when
+// the source unit is an Oracle. Areas whose centroid lies within
+// cAutoScout_OracleExclusionFactor * gAutoScout_maxOracleLOS of any other
+// oracle (toggled-on or not) are skipped. 0.8 leaves a small buffer around
+// each oracle's claim so oracles park with adjacent (not overlapping) circles.
+const float cAutoScout_OracleExclusionFactor = 0.8;
 
 // Area-score weights (sum need not be exactly 1.0 since we only compare
 // scores, but normalized weights make tuning intuitive). Each subscore is
@@ -124,6 +156,19 @@ extern int gAutoScout_typeConvertsHerds = -1;
 // matches the "TownCenter" proto, missing the post-godpower CitadelCenter
 // proto and other variants.
 extern int gAutoScout_typeAbstractTC = -1;
+
+// Dynamic cache: highest currentLOS ever observed on any of our oracles while
+// in the saturated action state (action == cAutoScout_OracleSaturatedActionType).
+// Cold-started to cAutoScout_OracleColdCacheMaxLOS; climbs only on confirmed
+// saturation events (never decreases). Used as the denominator for the 50%
+// movement floor and as the claim radius for the oracle-overlap heuristic
+// checks. Keyed at the player level (techs that bump the cap apply equally).
+extern float gAutoScout_maxOracleLOS = cAutoScout_OracleColdCacheMaxLOS;
+
+// Cached query handle for "all of cMyID's alive AbstractOracle units". Used
+// by the heuristic to enumerate every oracle (toggled-on AND not), so player-
+// controlled oracles still influence target-area selection.
+extern int gAutoScout_oracleQuery = -1;
 
 //------------------------------------------------------------------------------
 // Pool management
@@ -981,5 +1026,99 @@ active
       }
    }
    autoScout_homeMoveScan();
+   xsSetContextPlayer(-1);
+}
+
+//------------------------------------------------------------------------------
+// Oracle diagnostic — read every named/integer-indexed stat we can think of
+// from each Oracle owned by cMyID. Once-per-game full dump (action stats brute
+// forced over enum 0..49 for AutoLOS / AutoGatherFavor / HandAttack) plus a
+// per-tick LOS sample so we can see whether kbUnitGetStatFloat(.., cUnitStatLOS)
+// actually moves over time.
+//
+// Flip cAutoScout_OracleDiag to false to disable.
+//------------------------------------------------------------------------------
+
+const bool cAutoScout_OracleDiag = false;
+
+extern int  gAutoScout_oracleDiagQuery     = -1;
+extern bool gAutoScout_oracleDiagFullDumped = false;
+
+void autoScout_oracleDiagInit()
+{
+   if (gAutoScout_oracleDiagQuery >= 0) { return; }
+   gAutoScout_oracleDiagQuery = kbUnitQueryCreate("autoScout_oracleDiag");
+   kbUnitQuerySetPlayerID(gAutoScout_oracleDiagQuery, cMyID, false);
+   kbUnitQuerySetUnitType(gAutoScout_oracleDiagQuery, cUnitTypeAbstractOracle);
+   kbUnitQuerySetState(gAutoScout_oracleDiagQuery, cUnitStateAlive);
+}
+
+// Brute-force every action-stat enum int 0..49 for both float and int stat
+// getters on the named protoaction. Logs only non-zero values to keep chat
+// readable. The numeric IDs map to whatever enum the engine uses; we match
+// known proto.xml values (modifyamount=1.0, modifyratecap=25/30, modifydecay
+// =0.3, modifytype=LOS-as-int, etc.) by inspection after the run.
+void autoScout_oracleDiagBruteForce(int proto = -1, string action = "")
+{
+   for (int s = 0; s < 50; s = s + 1)
+   {
+      float fv = kbProtoUnitGetActionStatFloat(cMyID, proto, action, s);
+      if (fv != 0.0)
+      {
+         aiEcho("[OracleDiag] " + action + " float[" + s + "]=" + fv);
+      }
+      int iv = kbProtoUnitGetActionStatInt(cMyID, proto, action, s);
+      if (iv != 0)
+      {
+         aiEcho("[OracleDiag] " + action + " int[" + s + "]=" + iv);
+      }
+   }
+   // kbProtoUnitGetActionMaximumRange takes a damage type, not a stat enum;
+   // pass -1 (any) and see what comes back. Useful as a separate signal.
+   float r = kbProtoUnitGetActionMaximumRange(cMyID, proto, action, -1);
+   aiEcho("[OracleDiag] " + action + " maxRange=" + r);
+}
+
+rule autoScout_oracleDiag
+minInterval 2
+active
+{
+   if (cAutoScout_OracleDiag == false) { return; }
+   xsSetContextPlayer(cMyID);
+   autoScout_oracleDiagInit();
+   kbUnitQueryResetResults(gAutoScout_oracleDiagQuery);
+   int n = kbUnitQueryExecute(gAutoScout_oracleDiagQuery);
+   if (n <= 0) { xsSetContextPlayer(-1); return; }
+
+   // Only dump the FIRST oracle in the result set — keeps chat readable when
+   // multiple oracles are alive. Query result order is stable enough for a
+   // diagnostic; we'll typically be tracking the same unit across ticks.
+   int unitID = kbUnitQueryGetResult(gAutoScout_oracleDiagQuery, 0);
+   if (unitID < 0) { xsSetContextPlayer(-1); return; }
+   int    proto      = kbUnitGetProtoUnitID(unitID);
+   float  curLOS     = kbUnitGetStatFloat(unitID, cUnitStatLOS);
+   int    actionType = kbUnitGetActionType(unitID);
+   vector pos        = kbUnitGetPosition(unitID);
+
+   // Per-tick sample — verifies cUnitStatLOS moves over time.
+   aiEcho("[OracleDiag] id=" + unitID + " proto=" + proto
+      + " curLOS=" + curLOS + " action=" + actionType + " pos=" + pos);
+
+   if (gAutoScout_oracleDiagFullDumped == false)
+   {
+      // Proto-level baselines — confirms whether base/player APIs differ.
+      float baseProtoLOS   = kbDefaultGetProtoStatFloat(proto, cUnitStatLOS);
+      float playerProtoLOS = kbPlayerGetProtoStatFloat(cMyID, proto, cUnitStatLOS);
+      int   numActions     = kbUnitGetNumberActions(unitID);
+      aiEcho("[OracleDiag] one-shot: baseProtoLOS=" + baseProtoLOS
+         + " playerProtoLOS=" + playerProtoLOS + " numActions=" + numActions);
+
+      // Action-stat brute force on the three named actions we care about.
+      autoScout_oracleDiagBruteForce(proto, "AutoLOS");
+      autoScout_oracleDiagBruteForce(proto, "AutoGatherFavor");
+      autoScout_oracleDiagBruteForce(proto, "HandAttack");
+
+      gAutoScout_oracleDiagFullDumped = true;
+   }
    xsSetContextPlayer(-1);
 }
