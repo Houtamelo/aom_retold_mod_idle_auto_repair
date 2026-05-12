@@ -100,6 +100,17 @@ const int cAutoScout_MaxFrontierSteps = 15;
 const int cAutoScout_FrontierRadii   = 5;
 const int cAutoScout_FrontierAngles  = 8;
 
+// Frontier candidates within this many tiles of ANY previously-visited
+// waypoint in the current WORKING session are rejected. Defeats the
+// deterministic A->B->A oscillation that the angle-sweep sampling otherwise
+// produces in elongated / awkwardly-shaped areas, where each of two positions
+// happens to be the other's first-qualifying frontier candidate.
+// 4.0 is comfortably larger than the arrival threshold (1.5) so "essentially
+// the same spot" is filtered, and comfortably smaller than the inter-angle
+// chord length at the smallest sampling radius (~0.76 * (LOS+2) >= 15 tiles
+// for typical scout LOS), so legitimate adjacent angular samples still pass.
+const float cAutoScout_VisitedRevisitDistance = 4.0;
+
 //------------------------------------------------------------------------------
 // Globals
 //------------------------------------------------------------------------------
@@ -131,6 +142,16 @@ extern bool  gAutoScout_areaArraysInited  = false;
 
 // Per-scout: herd currently being diverted to in DIVERTING state. -1 when not diverting.
 extern int[] gAutoScout_targetHerdID = default;
+
+// Visited-waypoint memory for the frontier-walk algorithm. Two parallel flat
+// arrays keyed by unitID (not by slot, so removeIndex-driven slot shifts don't
+// invalidate the bookkeeping). Each entry records a waypoint the scout has
+// already been issued to walk to during the current WORKING session. Cleared
+// on every IDLE transition (including pool eviction). Read by
+// autoScout_findFrontierWaypoint to reject candidates near any recorded
+// waypoint, breaking the no-history oscillation loop.
+extern vector[] gAutoScout_workVisitedPos  = default;
+extern int[]    gAutoScout_workVisitedUnit = default;
 
 // Per-herd, append-only, never unmarked. Any herd ever selected by any scout for divert.
 // Filters subsequent divert candidates so each herd is attempted at most once globally.
@@ -171,6 +192,54 @@ extern float gAutoScout_maxOracleLOS = cAutoScout_OracleColdCacheMaxLOS;
 extern int gAutoScout_oracleQuery = -1;
 
 //------------------------------------------------------------------------------
+// Visited-waypoint memory (used by frontier-walk to break A<->B oscillation).
+// Defined here -- ahead of pool management -- because autoScout_dropFromPool
+// and autoScout_setStateIdle both call autoScout_clearVisited, and XS resolves
+// function references at parse time (no forward refs).
+//
+// Storage is flat parallel arrays keyed by unitID rather than by slot, so
+// removeIndex-driven slot shifts in autoScout_dropFromPool don't invalidate
+// the bookkeeping.
+//------------------------------------------------------------------------------
+
+bool autoScout_hasVisitedNear(int unitID = -1, vector pos = cInvalidVector)
+{
+   if (unitID < 0) { return(false); }
+   int n = gAutoScout_workVisitedUnit.size();
+   for (int i = 0; i < n; i = i + 1)
+   {
+      if (gAutoScout_workVisitedUnit[i] != unitID) { continue; }
+      if (xsVectorDistanceXZ(gAutoScout_workVisitedPos[i], pos) < cAutoScout_VisitedRevisitDistance)
+      {
+         return(true);
+      }
+   }
+   return(false);
+}
+
+void autoScout_recordVisited(int unitID = -1, vector pos = cInvalidVector)
+{
+   if (unitID < 0) { return; }
+   gAutoScout_workVisitedPos.add(pos);
+   gAutoScout_workVisitedUnit.add(unitID);
+}
+
+// Drops every entry whose unit matches unitID. Backward iteration so
+// in-place removeIndex doesn't skip elements.
+void autoScout_clearVisited(int unitID = -1)
+{
+   if (unitID < 0) { return; }
+   for (int i = gAutoScout_workVisitedUnit.size() - 1; i >= 0; i = i - 1)
+   {
+      if (gAutoScout_workVisitedUnit[i] == unitID)
+      {
+         gAutoScout_workVisitedUnit.removeIndex(i);
+         gAutoScout_workVisitedPos.removeIndex(i);
+      }
+   }
+}
+
+//------------------------------------------------------------------------------
 // Pool management
 //------------------------------------------------------------------------------
 
@@ -200,6 +269,10 @@ void autoScout_releaseClaim(int slot = -1)
 void autoScout_dropFromPool(int slot = -1)
 {
    if (slot < 0) { return; }
+   if (slot < gAutoScout_unitID.size())
+   {
+      autoScout_clearVisited(gAutoScout_unitID[slot]);
+   }
    autoScout_releaseClaim(slot);
    gAutoScout_unitID.removeIndex(slot);
    gAutoScout_planID.removeIndex(slot);
@@ -758,6 +831,10 @@ vector autoScout_findFrontierWaypoint(int scoutUnitID = -1, int areaID = -1, flo
 
          if (kbCanPath(scoutPos, cand, unitProto, 1.0, -1) == false) { continue; }
 
+         // Skip candidates close to any waypoint we've already walked to in
+         // this WORKING session -- breaks the deterministic A<->B oscillation.
+         if (autoScout_hasVisitedNear(scoutUnitID, cand) == true) { continue; }
+
          return(cand);
       }
    }
@@ -770,6 +847,10 @@ vector autoScout_findFrontierWaypoint(int scoutUnitID = -1, int areaID = -1, flo
 
 void autoScout_setStateIdle(int slot = -1)
 {
+   if (slot >= 0 && slot < gAutoScout_unitID.size())
+   {
+      autoScout_clearVisited(gAutoScout_unitID[slot]);
+   }
    gAutoScout_state[slot] = cAutoScoutState_Idle;
    gAutoScout_targetWaypoint[slot] = cInvalidVector;
    gAutoScout_workSteps[slot] = 0;
@@ -1095,6 +1176,10 @@ bool autoScout_tickUnit(int slot = -1)
          gAutoScout_workSteps[slot] = 0;
          gAutoScout_stuckTicks[slot] = 0;
          gAutoScout_targetWaypoint[slot] = frontierWp;
+         // Clear any stale visited memory (defensive -- setStateIdle should
+         // have done it already) and seed the new session with this waypoint.
+         autoScout_clearVisited(unitID);
+         autoScout_recordVisited(unitID, frontierWp);
          aiTaskMoveUnit(unitID, frontierWp, false, false);
          return(true);
       }
@@ -1157,6 +1242,7 @@ bool autoScout_tickUnit(int slot = -1)
          }
 
          gAutoScout_targetWaypoint[slot] = nextWp;
+         autoScout_recordVisited(unitID, nextWp);
          aiTaskMoveUnit(unitID, nextWp, false, false);
          return(true);
       }
