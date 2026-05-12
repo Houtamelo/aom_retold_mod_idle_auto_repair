@@ -512,9 +512,28 @@ void autoScout_updateMaxOracleLOS(int unitID = -1)
    if (current > gAutoScout_maxOracleLOS) { gAutoScout_maxOracleLOS = current; }
 }
 
+// Returns the pool slot for unitID, or -1 if the unit isn't in the pool.
+// Used by the oracle overlap predicates so they can also consider each
+// pool-tracked oracle's currently-set target waypoint, not just its
+// current physical position.
+int autoScout_findSlotForUnit(int unitID = -1)
+{
+   if (unitID < 0) { return(-1); }
+   int n = gAutoScout_unitID.size();
+   for (int i = 0; i < n; i = i + 1)
+   {
+      if (gAutoScout_unitID[i] == unitID) { return(i); }
+   }
+   return(-1);
+}
+
 // Returns true if areaPos lies within (radiusFactor * gAutoScout_maxOracleLOS)
-// of ANY of cMyID's alive oracles, excluding excludeUnitID. Used for the
-// oracle-vs-oracle hard-skip in autoScout_areaIsCandidate (radiusFactor=0.8).
+// of ANY of cMyID's alive oracles, excluding excludeUnitID. Considers BOTH
+// each oracle's current position AND, for pool-tracked oracles with a valid
+// target, the target waypoint -- matching the min(pos, target) pattern the
+// regular-scout density penalty uses. Without the target-waypoint check,
+// oracles toggled in quick succession from the same Temple all see each other
+// as "still at the Temple" and pick identical destinations near the TC.
 bool autoScout_anyOracleNear(
    vector areaPos = cInvalidVector, int excludeUnitID = -1, float radiusFactor = 0.8)
 {
@@ -530,16 +549,25 @@ bool autoScout_anyOracleNear(
       if (oracleID == excludeUnitID) { continue; }
       vector pos = kbUnitGetPosition(oracleID);
       if (xsVectorDistanceXZ(pos, areaPos) < threshold) { return(true); }
+
+      int slot = autoScout_findSlotForUnit(oracleID);
+      if (slot >= 0 && gAutoScout_targetAreaID[slot] >= 0)
+      {
+         vector wp = gAutoScout_targetWaypoint[slot];
+         if (xsVectorDistanceXZ(wp, areaPos) < threshold) { return(true); }
+      }
    }
    return(false);
 }
 
 // Returns a [0, 1] penalty representing summed overlap of areaPos with all
-// our oracles' claim circles, excluding excludeUnitID. Penalty per oracle is
-// linear in distance: 1.0 at zero distance, 0.0 at >= claim radius. Sums then
+// our oracles' claim circles, excluding excludeUnitID. Per-oracle distance is
+// min(dCurrentPos, dTargetWaypoint) for pool-tracked oracles with a valid
+// target; just dCurrentPos otherwise. Per-oracle radius is MaxOracleLOS for
+// stationed/pool-tracked oracles and currentLOS for non-toggled oracles seen
+// in cActionTypeMove (small, transient claim during player micro). Sums then
 // clamps to 1.0. Used as a multiplicative discount in autoScout_areaScore for
-// non-oracle source units. Moving oracles use their current dynamic LOS as
-// the claim radius (small, transient) instead of MaxOracleLOS.
+// non-oracle source units.
 float autoScout_oraclePenalty(vector areaPos = cInvalidVector, int excludeUnitID = -1)
 {
    autoScout_initOracleQuery();
@@ -552,10 +580,23 @@ float autoScout_oraclePenalty(vector areaPos = cInvalidVector, int excludeUnitID
       int oracleID = kbUnitQueryGetResult(gAutoScout_oracleQuery, i);
       if (oracleID < 0) { continue; }
       if (oracleID == excludeUnitID) { continue; }
+
       vector pos = kbUnitGetPosition(oracleID);
       float d = xsVectorDistanceXZ(pos, areaPos);
+
+      int slot = autoScout_findSlotForUnit(oracleID);
+      if (slot >= 0 && gAutoScout_targetAreaID[slot] >= 0)
+      {
+         float dWp = xsVectorDistanceXZ(gAutoScout_targetWaypoint[slot], areaPos);
+         if (dWp < d) { d = dWp; }
+      }
+
       float radius = gAutoScout_maxOracleLOS;
-      if (kbUnitGetActionType(oracleID) == cActionTypeMove)
+      // Small transient claim ONLY for non-pool-tracked oracles caught
+      // mid-move. Pool-tracked moving oracles already have their future
+      // stationed location accounted for via the target-waypoint min above,
+      // so they deserve the full MaxOracleLOS claim there.
+      if (slot < 0 && kbUnitGetActionType(oracleID) == cActionTypeMove)
       {
          radius = kbUnitGetStatFloat(oracleID, cUnitStatLOS);
       }
