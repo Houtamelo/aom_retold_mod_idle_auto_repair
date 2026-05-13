@@ -1289,6 +1289,16 @@ bool autoScout_tickOracleUnit(int slot = -1)
       return(true);
    }
 
+   if (state == cAutoScoutState_Fleeing)
+   {
+      if (xsGetTimeMS() < gAutoScout_fleeUntilMs[slot]) { return(false); }
+      aiEcho("autoScout: oracle flee-hold expired slot=" + slot + " unit=" + unitID
+         + ", returning to Idle");
+      autoScout_setStateIdle(slot);
+      gAutoScout_fleeFromArea[slot] = -1;
+      return(true);
+   }
+
    return(false);
 }
 
@@ -1532,6 +1542,16 @@ bool autoScout_tickUnit(int slot = -1)
    if (state == cAutoScoutState_Diverting)
    {
       return(autoScout_tickDivertingState(slot, unitID));
+   }
+
+   if (state == cAutoScoutState_Fleeing)
+   {
+      if (xsGetTimeMS() < gAutoScout_fleeUntilMs[slot]) { return(false); }
+      aiEcho("autoScout: flee-hold expired slot=" + slot + " unit=" + unitID
+         + ", returning to Idle");
+      autoScout_setStateIdle(slot);
+      gAutoScout_fleeFromArea[slot] = -1;
+      return(true);
    }
 
    return(false);
