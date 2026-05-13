@@ -52,9 +52,9 @@ const int cAutoScout_MaxChainPerTick = 4;
 
 // Action-type code reported by kbUnitGetActionType when an Oracle has reached
 // its peak AutoLOS bonus and switches to the meditation/glow animation.
-// Identified empirically from the OracleDiag run on 2026-05-06: the unit's
-// reported action transitioned 7 -> 37 the moment its current LOS hit the cap
-// and stayed at 37 thereafter. No documented cActionType* constant in the
+// Identified empirically (2026-05-06): the unit's reported action transitioned
+// 7 -> 37 the moment its current LOS hit the cap and stayed at 37 thereafter.
+// No documented cActionType* constant in the
 // extracted doxygen / shipped XS scripts / BANG docs maps to this value, so
 // we hardcode it. If a future patch surfaces a real constant (something like
 // cActionTypeIdleStatBonusFull), replace this magic number with that.
@@ -64,7 +64,7 @@ const int cAutoScout_OracleSaturatedActionType = 37;
 // Setting this on a cPlanExplore at registration tells the engine "this
 // plan is parked, don't iterate" while keeping the plan alive as a UI
 // marker. The visible state for an active cPlanExplore is cPlanStateExplore
-// (value 6, also observed empirically via aiPlanGetState in heartbeat).
+// (value 6); cPlanStateIdle (value 23) is what we set after registration.
 const int cAutoScout_PlanStateIdle = 23;
 
 // Cold-start value for the dynamic gAutoScout_maxOracleLOS cache. Used until
@@ -256,18 +256,6 @@ extern float gAutoScout_maxOracleLOS = cAutoScout_OracleColdCacheMaxLOS;
 // by the heuristic to enumerate every oracle (toggled-on AND not), so player-
 // controlled oracles still influence target-area selection.
 extern int gAutoScout_oracleQuery = -1;
-
-// Diagnostic: tick counter for the heartbeat aiEcho. Resets each time it
-// crosses cAutoScout_HeartbeatPeriodTicks. Lets us see whether the rule is
-// firing at all and what pool/cache state it observes.
-extern int gAutoScout_heartbeatCounter = 0;
-const int cAutoScout_HeartbeatPeriodTicks = 10;
-
-// Diagnostic: one-shot flag-constant dump. The first heartbeat firing echoes
-// the integer values of every named cPlanFlag* constant we have access to,
-// so we can later brute-force unnamed flag/state ints by referencing known
-// numeric anchors.
-extern bool gAutoScout_constantsDumped = false;
 
 //------------------------------------------------------------------------------
 // Visited-waypoint memory (used by frontier-walk to break A<->B oscillation).
@@ -1971,44 +1959,6 @@ active
    xsSetContextPlayer(cMyID);
    autoScout_initAreaArrays();
 
-   gAutoScout_heartbeatCounter = gAutoScout_heartbeatCounter + 1;
-   if (gAutoScout_heartbeatCounter >= cAutoScout_HeartbeatPeriodTicks)
-   {
-      gAutoScout_heartbeatCounter = 0;
-      aiEcho("autoScout: heartbeat pool=" + gAutoScout_unitID.size()
-         + " maxOracleLOS=" + gAutoScout_maxOracleLOS);
-
-      // One-shot: dump every named cPlanFlag* integer value. Run once so we
-      // have numeric anchors to brute-force adjacent flag/state ints from.
-      if (gAutoScout_constantsDumped == false)
-      {
-         aiEcho("autoScout: cPlanFlagDestroyWhenNoUnitsLeft=" + cPlanFlagDestroyWhenNoUnitsLeft);
-         aiEcho("autoScout: cPlanFlagNoMoreUnits=" + cPlanFlagNoMoreUnits);
-         aiEcho("autoScout: cPlanFlagRequiresAllNeedUnits=" + cPlanFlagRequiresAllNeedUnits);
-         gAutoScout_constantsDumped = true;
-      }
-
-      // Per-oracle plan-state probe. aiPlanGetState returns the engine's
-      // current plan-state integer; sampling across the saturate/walk cycle
-      // tells us which int values correspond to which observed behaviour.
-      int psPoolSize = gAutoScout_unitID.size();
-      for (int psSlot = 0; psSlot < psPoolSize; psSlot = psSlot + 1)
-      {
-         int psUnit = gAutoScout_unitID[psSlot];
-         if (autoScout_isOracle(psUnit) == false) { continue; }
-         int psPlan = gAutoScout_planID[psSlot];
-         if (aiPlanGetIsIDValid(psPlan) == false) { continue; }
-         int psState = aiPlanGetState(psPlan);
-         int psPrio  = aiPlanGetPriority(psPlan);
-         int psAction = kbUnitGetActionType(psUnit);
-         float psLOS = kbUnitGetStatFloat(psUnit, cUnitStatLOS);
-         aiEcho("autoScout: oracle " + psUnit + " plan=" + psPlan
-            + " state=" + psState + " priority=" + psPrio
-            + " ourState=" + gAutoScout_state[psSlot]
-            + " action=" + psAction + " los=" + psLOS);
-      }
-   }
-
    for (int slot = gAutoScout_unitID.size() - 1; slot >= 0; slot = slot - 1)
    {
       // Chain state transitions in the same firing: e.g. WALKING -> arrived
@@ -2027,96 +1977,3 @@ active
    xsSetContextPlayer(-1);
 }
 
-//------------------------------------------------------------------------------
-// Oracle diagnostic — read every named/integer-indexed stat we can think of
-// from each Oracle owned by cMyID. Once-per-game full dump (action stats brute
-// forced over enum 0..49 for AutoLOS / AutoGatherFavor / HandAttack) plus a
-// per-tick LOS sample so we can see whether kbUnitGetStatFloat(.., cUnitStatLOS)
-// actually moves over time.
-//
-// Flip cAutoScout_OracleDiag to false to disable.
-//------------------------------------------------------------------------------
-
-const bool cAutoScout_OracleDiag = false;
-
-extern int  gAutoScout_oracleDiagQuery     = -1;
-extern bool gAutoScout_oracleDiagFullDumped = false;
-
-void autoScout_oracleDiagInit()
-{
-   if (gAutoScout_oracleDiagQuery >= 0) { return; }
-   gAutoScout_oracleDiagQuery = kbUnitQueryCreate("autoScout_oracleDiag");
-   kbUnitQuerySetPlayerID(gAutoScout_oracleDiagQuery, cMyID, false);
-   kbUnitQuerySetUnitType(gAutoScout_oracleDiagQuery, cUnitTypeAbstractOracle);
-   kbUnitQuerySetState(gAutoScout_oracleDiagQuery, cUnitStateAlive);
-}
-
-// Brute-force every action-stat enum int 0..49 for both float and int stat
-// getters on the named protoaction. Logs only non-zero values to keep chat
-// readable. The numeric IDs map to whatever enum the engine uses; we match
-// known proto.xml values (modifyamount=1.0, modifyratecap=25/30, modifydecay
-// =0.3, modifytype=LOS-as-int, etc.) by inspection after the run.
-void autoScout_oracleDiagBruteForce(int proto = -1, string action = "")
-{
-   for (int s = 0; s < 50; s = s + 1)
-   {
-      float fv = kbProtoUnitGetActionStatFloat(cMyID, proto, action, s);
-      if (fv != 0.0)
-      {
-         aiEcho("[OracleDiag] " + action + " float[" + s + "]=" + fv);
-      }
-      int iv = kbProtoUnitGetActionStatInt(cMyID, proto, action, s);
-      if (iv != 0)
-      {
-         aiEcho("[OracleDiag] " + action + " int[" + s + "]=" + iv);
-      }
-   }
-   // kbProtoUnitGetActionMaximumRange takes a damage type, not a stat enum;
-   // pass -1 (any) and see what comes back. Useful as a separate signal.
-   float r = kbProtoUnitGetActionMaximumRange(cMyID, proto, action, -1);
-   aiEcho("[OracleDiag] " + action + " maxRange=" + r);
-}
-
-rule autoScout_oracleDiag
-minInterval 2
-active
-{
-   if (cAutoScout_OracleDiag == false) { return; }
-   xsSetContextPlayer(cMyID);
-   autoScout_oracleDiagInit();
-   kbUnitQueryResetResults(gAutoScout_oracleDiagQuery);
-   int n = kbUnitQueryExecute(gAutoScout_oracleDiagQuery);
-   if (n <= 0) { xsSetContextPlayer(-1); return; }
-
-   // Only dump the FIRST oracle in the result set — keeps chat readable when
-   // multiple oracles are alive. Query result order is stable enough for a
-   // diagnostic; we'll typically be tracking the same unit across ticks.
-   int unitID = kbUnitQueryGetResult(gAutoScout_oracleDiagQuery, 0);
-   if (unitID < 0) { xsSetContextPlayer(-1); return; }
-   int    proto      = kbUnitGetProtoUnitID(unitID);
-   float  curLOS     = kbUnitGetStatFloat(unitID, cUnitStatLOS);
-   int    actionType = kbUnitGetActionType(unitID);
-   vector pos        = kbUnitGetPosition(unitID);
-
-   // Per-tick sample — verifies cUnitStatLOS moves over time.
-   aiEcho("[OracleDiag] id=" + unitID + " proto=" + proto
-      + " curLOS=" + curLOS + " action=" + actionType + " pos=" + pos);
-
-   if (gAutoScout_oracleDiagFullDumped == false)
-   {
-      // Proto-level baselines — confirms whether base/player APIs differ.
-      float baseProtoLOS   = kbDefaultGetProtoStatFloat(proto, cUnitStatLOS);
-      float playerProtoLOS = kbPlayerGetProtoStatFloat(cMyID, proto, cUnitStatLOS);
-      int   numActions     = kbUnitGetNumberActions(unitID);
-      aiEcho("[OracleDiag] one-shot: baseProtoLOS=" + baseProtoLOS
-         + " playerProtoLOS=" + playerProtoLOS + " numActions=" + numActions);
-
-      // Action-stat brute force on the three named actions we care about.
-      autoScout_oracleDiagBruteForce(proto, "AutoLOS");
-      autoScout_oracleDiagBruteForce(proto, "AutoGatherFavor");
-      autoScout_oracleDiagBruteForce(proto, "HandAttack");
-
-      gAutoScout_oracleDiagFullDumped = true;
-   }
-   xsSetContextPlayer(-1);
-}
