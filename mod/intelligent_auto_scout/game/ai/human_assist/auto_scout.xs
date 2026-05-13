@@ -1339,11 +1339,19 @@ void autoScout_register(int planID = -1, int unitID = -1)
    // Engine plan stays alive as the housekeeping marker (UI button state +
    // player-override / cancel detection); NumberOfLoops=0 makes its own
    // movement loop a no-op so it doesn't fight our aiTaskMoveUnit calls.
-   // Oracles share this scaffolding -- our autoScout_tickUnit dispatches
-   // them to autoScout_tickOracleUnit at runtime, while the engine's
-   // oracle-specific cExplorePlanStopLOSPercentage logic in human_assist.xs
-   // becomes inert because the loop count is zero.
    aiPlanSetVariableInt(planID, cExplorePlanNumberOfLoops, 0, 0);
+
+   // Oracle-specific suppression: NumberOfLoops=0 alone is enough for regular
+   // scouts because our state machine issues aiTaskMoveUnit every tick
+   // (overriding any engine-plan move attempts). For oracles in Stationed
+   // state we issue NO movement commands, so the engine's cPlanExplore takes
+   // over unless we additionally tell it not to loop. Empirically (playtest
+   // 2026-05-13), without DoLoops=false oracles wander the map vanilla-style
+   // while our state machine sits in Stationed thinking they're parked.
+   if (kbUnitIsType(unitID, cUnitTypeAbstractOracle) == true)
+   {
+      aiPlanSetVariableBool(planID, cExplorePlanDoLoops, 0, false);
+   }
 
    gAutoScout_unitID.add(unitID);
    gAutoScout_planID.add(planID);
