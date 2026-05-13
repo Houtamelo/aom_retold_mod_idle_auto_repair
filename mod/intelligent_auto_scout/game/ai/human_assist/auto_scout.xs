@@ -777,6 +777,8 @@ bool autoScout_areaIsCandidate(int areaID = -1, int scoutUnitID = -1)
    if (areaID >= gAutoScout_areaClaim.size()) { return(false); }
    if (gAutoScout_areaClaim[areaID] != 0) { return(false); }
    if (gAutoScout_areaSelfScouted[areaID] == 1) { return(false); }
+   if (autoScout_isAreaBlacklisted(areaID) == true) { return(false); }
+   if (autoScout_areaIsDangerous(areaID) == true) { return(false); }
 
    int totalTiles = kbAreaGetNumberTiles(areaID);
    if (totalTiles <= 0) { return(false); }
@@ -868,9 +870,19 @@ float autoScout_areaScore(
    float densityScore = 1.0 - densityPenalty;
    if (densityScore < 0.0) { densityScore = 0.0; }
 
+   // Danger subscore: zero-danger areas score 1.0; areas at the hard-skip
+   // threshold score 0.0. Areas above threshold are excluded by
+   // autoScout_areaIsCandidate so no overshoot is possible here.
+   float danger = kbAreaGetDangerLevel(areaID, true);
+   float dangerRatio = danger / cAutoScout_DangerHardSkip;
+   if (dangerRatio < 0.0) { dangerRatio = 0.0; }
+   if (dangerRatio > 1.0) { dangerRatio = 1.0; }
+   float dangerScore = 1.0 - dangerRatio;
+
    float baseScore = cAutoScout_WeightTC * tcScore
                    + cAutoScout_WeightScout * scoutScore
-                   + cAutoScout_WeightDensity * densityScore;
+                   + cAutoScout_WeightDensity * densityScore
+                   + cAutoScout_DangerWeight * dangerScore;
 
    // Oracle-overlap discount applies only when the source scout is NOT an
    // oracle. Oracle sources already use the hard-skip in
