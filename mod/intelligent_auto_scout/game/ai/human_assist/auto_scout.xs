@@ -153,6 +153,19 @@ extern bool  gAutoScout_areaArraysInited  = false;
 // Per-scout: herd currently being diverted to in DIVERTING state. -1 when not diverting.
 extern int[] gAutoScout_targetHerdID = default;
 
+// Per-scout danger-avoidance state.
+//   fleeUntilMs[slot]:  xsGetTime() value at which the FLEEING hold expires.
+//   fleeFromArea[slot]: area we fled from (-1 when not fleeing). Diagnostics only.
+extern int[] gAutoScout_fleeUntilMs   = default;
+extern int[] gAutoScout_fleeFromArea  = default;
+
+// Danger blacklist. Two parallel append-only arrays keyed by areaID. Areas
+// enter when a scout aborts because of them and remain excluded from BFS
+// picking until expiryMs < xsGetTime(). Linear scan on lookup; bounded by
+// the number of distinct dangerous areas seen, which is small in practice.
+extern int[] gAutoScout_blacklistedAreaIDs  = default;
+extern int[] gAutoScout_blacklistedExpiryMs = default;
+
 // Visited-waypoint memory for the frontier-walk algorithm. Two parallel flat
 // arrays keyed by unitID (not by slot, so removeIndex-driven slot shifts don't
 // invalidate the bookkeeping). Each entry records a waypoint the scout has
