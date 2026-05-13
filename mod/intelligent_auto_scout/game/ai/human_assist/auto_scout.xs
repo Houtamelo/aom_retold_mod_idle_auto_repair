@@ -191,6 +191,12 @@ extern float gAutoScout_maxOracleLOS = cAutoScout_OracleColdCacheMaxLOS;
 // controlled oracles still influence target-area selection.
 extern int gAutoScout_oracleQuery = -1;
 
+// Diagnostic: tick counter for the heartbeat aiEcho. Resets each time it
+// crosses cAutoScout_HeartbeatPeriodTicks. Lets us see whether the rule is
+// firing at all and what pool/cache state it observes.
+extern int gAutoScout_heartbeatCounter = 0;
+const int cAutoScout_HeartbeatPeriodTicks = 10;
+
 //------------------------------------------------------------------------------
 // Visited-waypoint memory (used by frontier-walk to break A<->B oscillation).
 // Defined here -- ahead of pool management -- because autoScout_dropFromPool
@@ -271,7 +277,11 @@ void autoScout_dropFromPool(int slot = -1)
    if (slot < 0) { return; }
    if (slot < gAutoScout_unitID.size())
    {
-      autoScout_clearVisited(gAutoScout_unitID[slot]);
+      int droppedUnit = gAutoScout_unitID[slot];
+      int droppedState = gAutoScout_state[slot];
+      aiEcho("autoScout: dropFromPool slot=" + slot + " unit=" + droppedUnit
+         + " state=" + droppedState);
+      autoScout_clearVisited(droppedUnit);
    }
    autoScout_releaseClaim(slot);
    gAutoScout_unitID.removeIndex(slot);
@@ -1423,6 +1433,15 @@ active
 {
    xsSetContextPlayer(cMyID);
    autoScout_initAreaArrays();
+
+   gAutoScout_heartbeatCounter = gAutoScout_heartbeatCounter + 1;
+   if (gAutoScout_heartbeatCounter >= cAutoScout_HeartbeatPeriodTicks)
+   {
+      gAutoScout_heartbeatCounter = 0;
+      aiEcho("autoScout: heartbeat pool=" + gAutoScout_unitID.size()
+         + " maxOracleLOS=" + gAutoScout_maxOracleLOS);
+   }
+
    for (int slot = gAutoScout_unitID.size() - 1; slot >= 0; slot = slot - 1)
    {
       // Chain state transitions in the same firing: e.g. WALKING -> arrived
