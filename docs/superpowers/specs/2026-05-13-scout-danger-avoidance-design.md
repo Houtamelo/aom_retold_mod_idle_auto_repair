@@ -159,14 +159,9 @@ void autoScout_enterFleeing(int slot = -1, int unitID = -1, int dangerAreaID = -
    // If dest is invalid/unreachable, skip the move; the 5s timer still holds
    // the scout in FLEEING in place. BFS will re-pick safely after.
 
-   // Release area claim inline (no shared helper exists; pattern from
-   // autoScout_dropFromPool).
-   int prevArea = gAutoScout_targetAreaID[slot];
-   if (prevArea >= 0 && prevArea < gAutoScout_areaClaim.size())
-   {
-      gAutoScout_areaClaim[prevArea] = 0;
-   }
-   gAutoScout_targetAreaID[slot]   = -1;
+   // autoScout_releaseClaim clears the area claim and resets
+   // gAutoScout_targetAreaID[slot] to -1.
+   autoScout_releaseClaim(slot);
    gAutoScout_state[slot]        = cAutoScoutState_Fleeing;
    gAutoScout_fleeFromArea[slot] = dangerAreaID;
    gAutoScout_fleeUntilMs[slot]  = xsGetTime() + cAutoScout_FleeMinDurationMs;
