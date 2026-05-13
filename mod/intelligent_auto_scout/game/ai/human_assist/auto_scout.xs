@@ -455,25 +455,29 @@ void autoScout_enterFleeing(int slot = -1, int unitID = -1, int dangerAreaID = -
    // polar offset on the XZ plane. XS has no vector*scalar operator, so we
    // go through polar form instead of normalize+scale.
    float angle = xsVectorAngleAroundY(scoutPos, dangerCenter);
-   vector dest = xsVectorTranslateXZ(scoutPos, cAutoScout_FleeDistance, angle);
+   vector rawDest = xsVectorTranslateXZ(scoutPos, cAutoScout_FleeDistance, angle);
+   // Clamp into map bounds so polar overshoot near a map edge doesn't drop
+   // destOK to false and freeze the scout in place. The engine will accept
+   // an unreachable move and silently stop the unit if pathing fails, which
+   // is no worse than standing still -- so we don't pre-gate on kbCanPath.
+   vector dest = autoScout_clampToMap(rawDest);
 
-   bool destOK = false;
+   int destArea = -1;
    if (autoScout_isOnMap(dest) == true)
    {
-      int destArea = kbAreaGetIDByPosition(dest);
-      if (destArea >= 0)
-      {
-         int unitProto = kbUnitGetProtoUnitID(unitID);
-         if (kbCanPath(scoutPos, dest, unitProto, 1.0, -1) == true)
-         {
-            destOK = true;
-         }
-      }
+      destArea = kbAreaGetIDByPosition(dest);
+   }
+   float destDanger = 0.0;
+   if (destArea >= 0)
+   {
+      destDanger = kbAreaGetDangerLevel(destArea, true);
    }
 
-   if (destOK == true)
+   bool issuedMove = false;
+   if (autoScout_isOnMap(dest) == true)
    {
       aiTaskMoveUnit(unitID, dest, false, false);
+      issuedMove = true;
    }
 
    autoScout_releaseClaim(slot);
@@ -483,8 +487,10 @@ void autoScout_enterFleeing(int slot = -1, int unitID = -1, int dangerAreaID = -
    gAutoScout_stuckTicks[slot]   = 0;
 
    aiEcho("autoScout: FLEE slot=" + slot + " unit=" + unitID
-      + " from area=" + dangerAreaID + " dest=" + dest
-      + " destOK=" + destOK);
+      + " from area=" + dangerAreaID
+      + " rawDest=" + rawDest + " dest=" + dest
+      + " destArea=" + destArea + " destDanger=" + destDanger
+      + " issuedMove=" + issuedMove);
 }
 
 //------------------------------------------------------------------------------
