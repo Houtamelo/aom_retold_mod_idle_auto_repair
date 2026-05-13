@@ -59,19 +59,19 @@ const int cAutoScout_MaxChainPerTick = 4;
 // cActionTypeIdleStatBonusFull), replace this magic number with that.
 const int cAutoScout_OracleSaturatedActionType = 37;
 
+// Plan-state integer for cPlanStateIdle (from docs/MythTRConstants.txt).
+// Setting this on a cPlanExplore at registration tells the engine "this
+// plan is parked, don't iterate" while keeping the plan alive as a UI
+// marker. The visible state for an active cPlanExplore is cPlanStateExplore
+// (value 6, also observed empirically via aiPlanGetState in heartbeat).
+const int cAutoScout_PlanStateIdle = 23;
+
 // Cold-start value for the dynamic gAutoScout_maxOracleLOS cache. Used until
 // any oracle is observed in the saturated action state (action ==
 // cAutoScout_OracleSaturatedActionType) with a higher current LOS. 20.0 is
-// chosen so the 50% movement floor (cAutoScout_OracleMovementLOSFloor) has a
-// meaningful threshold from tick 1, even before any oracle reaches its real cap.
+// a plausible default below the regular Oracle cap of 25 (so the cache will
+// climb on first observed saturation) and above any oracle's base LOS.
 const float cAutoScout_OracleColdCacheMaxLOS = 20.0;
-
-// Movement-state LOS floor for Oracles, expressed as a ratio of MaxOracleLOS.
-// While Walking, an Oracle whose currentLOS / MaxOracleLOS drops below this
-// ratio stops in place and becomes Stationed, avoiding the vanilla failure
-// mode of draining all the way to base LOS (where favor income is minimal).
-// Suspended during Diverting -- herd claim outranks LOS preservation.
-const float cAutoScout_OracleMovementLOSFloor = 0.5;
 
 // Oracle-vs-oracle exclusion factor used by autoScout_areaIsCandidate when
 // the source unit is an Oracle. Areas whose centroid lies within
@@ -196,6 +196,12 @@ extern int gAutoScout_oracleQuery = -1;
 // firing at all and what pool/cache state it observes.
 extern int gAutoScout_heartbeatCounter = 0;
 const int cAutoScout_HeartbeatPeriodTicks = 10;
+
+// Diagnostic: one-shot flag-constant dump. The first heartbeat firing echoes
+// the integer values of every named cPlanFlag* constant we have access to,
+// so we can later brute-force unnamed flag/state ints by referencing known
+// numeric anchors.
+extern bool gAutoScout_constantsDumped = false;
 
 //------------------------------------------------------------------------------
 // Visited-waypoint memory (used by frontier-walk to break A<->B oscillation).
@@ -619,7 +625,12 @@ float autoScout_oraclePenalty(vector areaPos = cInvalidVector, int excludeUnitID
       if (radius < 0.001) { continue; }
       if (d < radius)
       {
-         penalty = penalty + (radius - d) / radius;
+         // Doubled (2026-05-13) -- regular scouts were still picking areas
+         // partially inside an oracle's circle even with the original 1x
+         // formula. With 2x, even a slight overlap discounts the area more
+         // sharply; a single oracle fully overlapping gives penalty=2.0
+         // (clamped to 1.0 below), effectively zeroing out the area's score.
+         penalty = penalty + 2.0 * (radius - d) / radius;
       }
    }
    if (penalty > 1.0) { penalty = 1.0; }
@@ -751,8 +762,11 @@ float autoScout_areaScore(
 //   - Top priority (handled before the BFS): scout's current area (depth 0)
 //     if it's still a candidate. Scout in a partially-fogged area finishes
 //     scouting it before walking elsewhere.
-//   - First batch from BFS: depths 1 + 2 combined.
-//   - Subsequent batches: single depth each (3, then 4, then ...).
+//   - First batch from BFS: depths 1..N combined where N=2 for regular scouts
+//     and N=4 for oracles. Oracles have a far larger effective coverage radius
+//     (full MaxOracleLOS when parked), so a wider first-batch gives the
+//     anyOracleNear hard-skip more candidates to pick non-overlapping spots.
+//   - Subsequent batches: single depth each (N+1, then N+2, ...).
 // As soon as a batch contains at least one candidate, we pick the one with
 // the highest autoScout_areaScore and return.
 int autoScout_findNextArea(int scoutUnitID = -1)
@@ -764,9 +778,17 @@ int autoScout_findNextArea(int scoutUnitID = -1)
    if (startArea < 0) { return(-1); }
 
    // Top priority: scout's current area if it still has unexplored tiles.
-   if (autoScout_areaIsCandidate(startArea, scoutUnitID) == true)
+   // Skipped for oracles -- their huge LOS makes "finish the current area"
+   // an anti-pattern: once an oracle has parked here, areaSelfScouted is
+   // set and depth-0 fails anyway, but for oracles relocated by an outside
+   // force (engine wandering, player command) the BFS picks should be
+   // strictly score-based, not "stick to wherever you happen to be".
+   if (autoScout_isOracle(scoutUnitID) == false)
    {
-      return(startArea);
+      if (autoScout_areaIsCandidate(startArea, scoutUnitID) == true)
+      {
+         return(startArea);
+      }
    }
 
    // Reference TC position for the score function. If no main TC exists,
@@ -793,8 +815,11 @@ int autoScout_findNextArea(int scoutUnitID = -1)
    visited[startArea] = 1;
 
    // currentBatchMax: largest depth still in the current batch. First batch
-   // covers depths up to 2; later batches are single-depth.
+   // is wider for oracles so the hard-skip exclusion has more candidates to
+   // choose from -- avoids cases where the only depth-1/2 areas overlap an
+   // existing oracle and the algorithm has to pick the lesser-evil overlap.
    int currentBatchMax = 2;
+   if (autoScout_isOracle(scoutUnitID) == true) { currentBatchMax = 4; }
    int batchBest = -1;
    float batchBestScore = -1.0e18;
 
@@ -1043,29 +1068,6 @@ bool autoScout_tickOracleUnit(int slot = -1)
       vector waypoint = gAutoScout_targetWaypoint[slot];
       int areaID = gAutoScout_targetAreaID[slot];
 
-      // 50% LOS floor: if currentLOS bled below half MaxOracleLOS, commit to
-      // current position. Vanilla failure mode is letting LOS drain to base,
-      // where favor income (proportional to LOS area) is minimal.
-      bool floorTrigger = false;
-      if (gAutoScout_maxOracleLOS > 0.0001)
-      {
-         float pct = los / gAutoScout_maxOracleLOS;
-         if (pct < cAutoScout_OracleMovementLOSFloor) { floorTrigger = true; }
-      }
-      if (floorTrigger == true)
-      {
-         aiTaskStopUnit(unitID);
-         if (areaID >= 0 && areaID < gAutoScout_areaSelfScouted.size())
-         {
-            gAutoScout_areaSelfScouted[areaID] = 1;
-         }
-         aiEcho("autoScout: oracle " + unitID + " LOS-floor stop (los=" + los
-            + " maxLOS=" + gAutoScout_maxOracleLOS + ")");
-         gAutoScout_state[slot] = cAutoScoutState_Stationed;
-         gAutoScout_stuckTicks[slot] = 0;
-         return(true);
-      }
-
       if (autoScout_arrived(unitID, waypoint, gAutoScout_stuckTicks[slot]) == true)
       {
          if (areaID >= 0 && areaID < gAutoScout_areaSelfScouted.size())
@@ -1085,7 +1087,9 @@ bool autoScout_tickOracleUnit(int slot = -1)
          autoScout_setStateIdle(slot);
          return(true);
       }
-      aiTaskMoveUnit(unitID, waypoint, false, false);
+      // No per-tick aiTaskMoveUnit re-issue -- the engine cPlanExplore is
+      // parked in cPlanStateIdle so it can't override our initial move; the
+      // unit follows the command issued at state-entry until arrival.
       return(false);
    }
 
@@ -1101,7 +1105,9 @@ bool autoScout_tickOracleUnit(int slot = -1)
          autoScout_setStateIdle(slot);
          return(true);
       }
-      // Still growing -- stay parked, no action.
+      // Still growing -- stay parked, do nothing. The engine cPlanExplore
+      // plan is kept inert via the loop-radius trick set in
+      // autoScout_register; nothing to override here.
       return(false);
    }
 
@@ -1253,7 +1259,9 @@ bool autoScout_tickUnit(int slot = -1)
          autoScout_setStateIdle(slot);
          return(true);
       }
-      aiTaskMoveUnit(unitID, waypoint, false, false);
+      // No per-tick aiTaskMoveUnit re-issue -- the engine cPlanExplore is
+      // parked in cPlanStateIdle so it can't override our initial move; the
+      // unit follows the command issued at state-entry until arrival.
       return(false);
    }
 
@@ -1316,7 +1324,9 @@ bool autoScout_tickUnit(int slot = -1)
          autoScout_setStateIdle(slot);
          return(true);
       }
-      aiTaskMoveUnit(unitID, waypoint, false, false);
+      // No per-tick aiTaskMoveUnit re-issue -- the engine cPlanExplore is
+      // parked in cPlanStateIdle so it can't override our initial move; the
+      // unit follows the command issued at state-entry until arrival.
       return(false);
    }
 
@@ -1336,26 +1346,13 @@ void autoScout_register(int planID = -1, int unitID = -1)
 {
    if (planID < 0 || unitID < 0) { return; }
 
-   // Engine plan stays alive as the housekeeping marker (UI button state +
-   // player-override / cancel detection); NumberOfLoops=0 makes its own
-   // movement loop a no-op so it doesn't fight our aiTaskMoveUnit calls.
-   aiPlanSetVariableInt(planID, cExplorePlanNumberOfLoops, 0, 0);
-
-   // Oracle-specific suppression: NumberOfLoops=0 alone is enough for regular
-   // scouts because our state machine issues aiTaskMoveUnit every tick
-   // (overriding any engine-plan move attempts). For oracles in Stationed
-   // state we issue NO movement commands, so the engine's cPlanExplore takes
-   // over unless we additionally give it a stop-condition. Empirically
-   // (playtests 2026-05-13), with NumberOfLoops=0 alone OR with DoLoops=false
-   // added on top, oracles still wander the map vanilla-style. The third var
-   // (StopLOSPercentage) tells the engine "your current iteration is done
-   // when 20% of LOS area is unexplored" -- without it, the engine has no
-   // criterion to ever finish the iteration, so NumberOfLoops=0 never gets
-   // checked.
-   if (kbUnitIsType(unitID, cUnitTypeAbstractOracle) == true)
-   {
-      aiPlanSetVariableFloat(planID, cExplorePlanStopLOSPercentage, 0, 0.2);
-   }
+   // Park the cPlanExplore in cPlanStateIdle (23, from docs/MythTRConstants.txt).
+   // Verified empirically (2026-05-13) that the engine respects this state and
+   // does NOT drive the unit while leaving the plan alive as the UI marker.
+   // Applies to BOTH oracles and regular scouts so the state machine has full
+   // control without per-tick override. The cPlanStateIdle is not Done/Failed,
+   // so the plan is not auto-destroyed.
+   aiPlanSetState(planID, cAutoScout_PlanStateIdle);
 
    gAutoScout_unitID.add(unitID);
    gAutoScout_planID.add(planID);
@@ -1452,6 +1449,36 @@ active
       gAutoScout_heartbeatCounter = 0;
       aiEcho("autoScout: heartbeat pool=" + gAutoScout_unitID.size()
          + " maxOracleLOS=" + gAutoScout_maxOracleLOS);
+
+      // One-shot: dump every named cPlanFlag* integer value. Run once so we
+      // have numeric anchors to brute-force adjacent flag/state ints from.
+      if (gAutoScout_constantsDumped == false)
+      {
+         aiEcho("autoScout: cPlanFlagDestroyWhenNoUnitsLeft=" + cPlanFlagDestroyWhenNoUnitsLeft);
+         aiEcho("autoScout: cPlanFlagNoMoreUnits=" + cPlanFlagNoMoreUnits);
+         aiEcho("autoScout: cPlanFlagRequiresAllNeedUnits=" + cPlanFlagRequiresAllNeedUnits);
+         gAutoScout_constantsDumped = true;
+      }
+
+      // Per-oracle plan-state probe. aiPlanGetState returns the engine's
+      // current plan-state integer; sampling across the saturate/walk cycle
+      // tells us which int values correspond to which observed behaviour.
+      int psPoolSize = gAutoScout_unitID.size();
+      for (int psSlot = 0; psSlot < psPoolSize; psSlot = psSlot + 1)
+      {
+         int psUnit = gAutoScout_unitID[psSlot];
+         if (autoScout_isOracle(psUnit) == false) { continue; }
+         int psPlan = gAutoScout_planID[psSlot];
+         if (aiPlanGetIsIDValid(psPlan) == false) { continue; }
+         int psState = aiPlanGetState(psPlan);
+         int psPrio  = aiPlanGetPriority(psPlan);
+         int psAction = kbUnitGetActionType(psUnit);
+         float psLOS = kbUnitGetStatFloat(psUnit, cUnitStatLOS);
+         aiEcho("autoScout: oracle " + psUnit + " plan=" + psPlan
+            + " state=" + psState + " priority=" + psPrio
+            + " ourState=" + gAutoScout_state[psSlot]
+            + " action=" + psAction + " los=" + psLOS);
+      }
    }
 
    for (int slot = gAutoScout_unitID.size() - 1; slot >= 0; slot = slot - 1)
