@@ -22,7 +22,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_ROOT="$REPO_ROOT/mod"
 
-DEPLOY_ROOT="${AOMR_LOCAL_MODS:-$HOME/.steam/debian-installation/steamapps/compatdata/1934680/pfx/drive_c/users/steamuser/Games/Age of Mythology Retold/76561198001426736/mods/local}"
+DEPLOY_ROOT="${AOMR_LOCAL_MODS:-$HOME/.steam/steam/steamapps/compatdata/1934680/pfx/drive_c/users/steamuser/Games/Age of Mythology Retold/76561198001426736/mods/local}"
 
 # --- preflight ---------------------------------------------------------------
 
