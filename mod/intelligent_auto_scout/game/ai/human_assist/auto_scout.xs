@@ -961,7 +961,7 @@ int autoScout_findNextArea(int scoutUnitID = -1)
    // choose from -- avoids cases where the only depth-1/2 areas overlap an
    // existing oracle and the algorithm has to pick the lesser-evil overlap.
    int currentBatchMax = 2;
-   if (autoScout_isOracle(scoutUnitID) == true) { currentBatchMax = 4; }
+   if (autoScout_isOracle(scoutUnitID) == true) { currentBatchMax = 3; }
    int batchBest = -1;
    float batchBestScore = -1.0e18;
 
