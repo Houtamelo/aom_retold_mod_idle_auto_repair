@@ -99,7 +99,6 @@ const float cAutoScout_WeightDensity = 0.15;   // fewer other scouts nearby -> h
 // heuristic's behaviour during actual enemy contact.
 const float cAutoScout_DangerHardSkip      = 110.0;
 const float cAutoScout_DangerWeight        = 0.15;
-const float cAutoScout_FleeDistance        = 25.0;
 const int   cAutoScout_FleeMinDurationMs   = 5000;
 const int   cAutoScout_BlacklistDurationMs = 90000;
 
@@ -445,18 +444,24 @@ bool autoScout_isAreaBlacklisted(int areaID = -1)
 }
 
 // Picks a safe flee area for unitID fleeing dangerAreaID. Algorithm:
-//   1. Polar-project scoutPos along the away-from-dangerCenter direction by
-//      cAutoScout_FleeDistance. Clamp into map bounds.
-//   2. Look up the area containing that clamped seed position.
-//   3. Flood-fill BFS from seedArea up to cAutoScout_FleeBfsDepth (4) hops.
-//      Score every reachable area by safety (0.95) + distance-from-scout
-//      (0.05) -- safety is intentionally an order of magnitude more
-//      important than distance, so we always prefer the safest reachable
-//      area within the flee neighborhood and only use distance as a
-//      tiebreaker.
+//   1. Flood-fill BFS from the SCOUT's current area up to
+//      cAutoScout_FleeBfsDepth hops. (Earlier versions seeded BFS from a
+//      polar-projected "away from danger" point; that occasionally placed
+//      the seed inside another danger pocket and the BFS then picked an
+//      area whose path crossed it, killing the scout. Starting from the
+//      scout's own area eliminates that failure mode.)
+//   2. Path-aware: don't propagate BFS through dangerous areas, so the
+//      chosen target is reachable via a safe corridor. Blacklisted areas
+//      are NOT blocked (blacklisted != dangerous; blocking through them
+//      could trap the scout).
+//   3. Score every reachable area by:
+//        safety       (cAutoScout_FleeWeightSafety)     -- low danger
+//        away-danger  (cAutoScout_FleeWeightAwayDanger) -- far from dangerCenter
+//        near-scout   (cAutoScout_FleeWeightNearScout)  -- close to scoutPos
+//      Safety dominates; away-danger biases direction; near-scout discourages
+//      cross-map flee targets.
 //   4. Return the best-scoring area's ID, or -1 if no reachable area was
-//      found (caller will issue no move, scout holds in FLEEING for the
-//      timer).
+//      found (caller issues no move, scout holds in FLEEING for the timer).
 //
 // kbAreaGetDangerLevel is sampled with averageInBorderAreas=true so adjacent
 // dangerous areas leak into a flee candidate's score, biasing us away from
@@ -466,28 +471,25 @@ int autoScout_findFleeArea(int scoutUnitID = -1, int dangerAreaID = -1)
    if (scoutUnitID < 0) { return(-1); }
    if (dangerAreaID < 0) { return(-1); }
 
-   vector scoutPos     = kbUnitGetPosition(scoutUnitID);
-   vector dangerCenter = kbAreaGetCenter(dangerAreaID);
-   float angle         = xsVectorAngleAroundY(scoutPos, dangerCenter);
-   vector rawSeed      = xsVectorTranslateXZ(scoutPos, cAutoScout_FleeDistance, angle);
-   vector seedPos      = autoScout_clampToMap(rawSeed);
-   if (autoScout_isOnMap(seedPos) == false) { return(-1); }
-   int seedArea = kbAreaGetIDByPosition(seedPos);
-   if (seedArea < 0) { return(-1); }
+   vector scoutPos = kbUnitGetPosition(scoutUnitID);
+   if (autoScout_isOnMap(scoutPos) == false) { return(-1); }
+   int startArea = kbAreaGetIDByPosition(scoutPos);
+   if (startArea < 0) { return(-1); }
 
-   int unitProto  = kbUnitGetProtoUnitID(scoutUnitID);
-   float mapX     = kbGetMapXSize();
-   float mapZ     = kbGetMapZSize();
-   float mapDiag  = sqrt(mapX * mapX + mapZ * mapZ);
+   vector dangerCenter = kbAreaGetCenter(dangerAreaID);
+   int unitProto       = kbUnitGetProtoUnitID(scoutUnitID);
+   float mapX          = kbGetMapXSize();
+   float mapZ          = kbGetMapZSize();
+   float mapDiag       = sqrt(mapX * mapX + mapZ * mapZ);
    if (mapDiag < 1.0) { mapDiag = 1.0; }
 
    int areaCount = kbAreaGetNumber();
    int[] visited    = new int(areaCount, 0);
    int[] queue      = new int(0, 0);
    int[] queueDepth = new int(0, 0);
-   queue.add(seedArea);
+   queue.add(startArea);
    queueDepth.add(0);
-   visited[seedArea] = 1;
+   visited[startArea] = 1;
 
    int bestArea = -1;
    float bestScore = -1.0e18;
@@ -499,30 +501,38 @@ int autoScout_findFleeArea(int scoutUnitID = -1, int dangerAreaID = -1)
       int depth  = queueDepth[head];
       head = head + 1;
 
-      // Score the area if it's valid + reachable. No hard filter on danger
-      // or blacklist -- they enter the safety subscore instead. The danger
-      // area itself naturally scores 0 (or negative offset) on safety, so
-      // it's effectively excluded unless every alternative is worse.
-      if (kbAreaGetIsIDValid(areaID) == true)
+      // Score every reachable area beyond the start area. Skip depth==0
+      // because "stand still" is not a useful flee outcome -- if we have to
+      // pick our own area we should at least try to move within it.
+      if (depth >= 1 && kbAreaGetIsIDValid(areaID) == true)
       {
          vector areaPos = kbAreaGetCenter(areaID);
          if (autoScout_isOnMap(areaPos) == true)
          {
             if (kbCanPath(scoutPos, areaPos, unitProto, 1.0, -1) == true)
             {
+               // Safety: low danger = high score, dominant component.
                float danger = kbAreaGetDangerLevel(areaID, true);
                float dRatio = danger / cAutoScout_DangerHardSkip;
                if (dRatio < 0.0) { dRatio = 0.0; }
                if (dRatio > 1.0) { dRatio = 1.0; }
                float safetyScore = 1.0 - dRatio;
 
-               float distFromScout = xsVectorDistanceXZ(scoutPos, areaPos);
-               float distScore = distFromScout / mapDiag;
-               if (distScore < 0.0) { distScore = 0.0; }
-               if (distScore > 1.0) { distScore = 1.0; }
+               // Away from the area we fled from: far = high score.
+               float distFromDanger = xsVectorDistanceXZ(dangerCenter, areaPos);
+               float awayScore = distFromDanger / mapDiag;
+               if (awayScore < 0.0) { awayScore = 0.0; }
+               if (awayScore > 1.0) { awayScore = 1.0; }
 
-               float score = cAutoScout_FleeWeightSafety * safetyScore
-                           + cAutoScout_FleeWeightDistance * distScore;
+               // Near scout's current position: close = high score.
+               float distFromScout = xsVectorDistanceXZ(scoutPos, areaPos);
+               float nearScoutScore = 1.0 - distFromScout / mapDiag;
+               if (nearScoutScore < 0.0) { nearScoutScore = 0.0; }
+               if (nearScoutScore > 1.0) { nearScoutScore = 1.0; }
+
+               float score = cAutoScout_FleeWeightSafety     * safetyScore
+                           + cAutoScout_FleeWeightAwayDanger * awayScore
+                           + cAutoScout_FleeWeightNearScout  * nearScoutScore;
                if (score > bestScore)
                {
                   bestScore = score;
@@ -532,8 +542,21 @@ int autoScout_findFleeArea(int scoutUnitID = -1, int dangerAreaID = -1)
          }
       }
 
-      // Expand neighbors only while still under the depth cap.
-      if (depth < cAutoScout_FleeBfsDepth)
+      // Path-aware expansion (P1): don't propagate BFS through dangerous
+      // areas, so the chosen flee target is reachable via a safe corridor.
+      // Start area (depth 0) is the scout's current position -- always
+      // expand from there even if it's the area we're fleeing FROM, so
+      // we can find safe neighbors. Blacklisted areas are NOT blocked
+      // here: blacklisted != dangerous (a blacklisted area may be safe
+      // now), and blocking expansion through them could trap the scout.
+      bool blockExpand = false;
+      if (depth >= 1 && autoScout_areaIsDangerous(areaID) == true)
+      {
+         blockExpand = true;
+      }
+      if (depth >= cAutoScout_FleeBfsDepth) { blockExpand = true; }
+
+      if (blockExpand == false)
       {
          int n = kbAreaGetNumberBorderAreas(areaID);
          for (int j = 0; j < n; j = j + 1)
