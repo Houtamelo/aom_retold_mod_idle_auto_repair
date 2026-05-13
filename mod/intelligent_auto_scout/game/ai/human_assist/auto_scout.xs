@@ -193,6 +193,10 @@ extern int   gAutoScout_diag_rejTiles      = 0;
 extern int   gAutoScout_diag_rejPath       = 0;
 extern int   gAutoScout_diag_rejOracle     = 0;
 extern int   gAutoScout_diag_passed        = 0;
+// Counts of BFS propagation-blocks: how many times we refused to expand
+// neighbors from a dangerous or blacklisted area.
+extern int   gAutoScout_diag_blockDanger    = 0;
+extern int   gAutoScout_diag_blockBlacklist = 0;
 extern float gAutoScout_diag_dangerMin     = 0.0;
 extern float gAutoScout_diag_dangerMax     = 0.0;
 extern float gAutoScout_diag_dangerSum     = 0.0;
@@ -1130,6 +1134,8 @@ void autoScout_diag_reset()
    gAutoScout_diag_rejPath      = 0;
    gAutoScout_diag_rejOracle    = 0;
    gAutoScout_diag_passed       = 0;
+   gAutoScout_diag_blockDanger    = 0;
+   gAutoScout_diag_blockBlacklist = 0;
    gAutoScout_diag_dangerMin    = 0.0;
    gAutoScout_diag_dangerMax    = 0.0;
    gAutoScout_diag_dangerSum    = 0.0;
@@ -1159,7 +1165,9 @@ void autoScout_diag_log(int scoutUnitID = -1, int result = -1)
       + " danger=" + gAutoScout_diag_rejDanger
       + " tiles=" + gAutoScout_diag_rejTiles
       + " path=" + gAutoScout_diag_rejPath
-      + " oracle=" + gAutoScout_diag_rejOracle + "]");
+      + " oracle=" + gAutoScout_diag_rejOracle + "]"
+      + " block[danger=" + gAutoScout_diag_blockDanger
+      + " blacklist=" + gAutoScout_diag_blockBlacklist + "]");
    aiEcho("autoScout: BFS danger min=" + gAutoScout_diag_dangerMin
       + " max=" + gAutoScout_diag_dangerMax
       + " avg=" + avg
@@ -1260,15 +1268,41 @@ int autoScout_findNextArea(int scoutUnitID = -1)
          }
       }
 
-      int n = kbAreaGetNumberBorderAreas(areaID);
-      for (int j = 0; j < n; j++)
+      // Path-aware propagation: don't expand BFS through a dangerous or
+      // blacklisted area. The engine's pathfinder doesn't see our blacklist
+      // and may route the scout through a danger pocket on the way to a
+      // candidate on the far side; treating those areas as walls in our
+      // area-graph traversal means candidates reachable only via such a
+      // corridor are never visited and so can never be picked. Start area
+      // (depth 0) is the scout's current position -- always allow expansion
+      // from there so the scout can leave a temporarily-dangerous starting
+      // location.
+      bool blockExpand = false;
+      if (depth >= 1)
       {
-         int next = kbAreaGetBorderAreaID(areaID, j);
-         if (next < 0 || next >= areaCount) { continue; }
-         if (visited[next] == 1) { continue; }
-         visited[next] = 1;
-         queue.add(next);
-         queueDepth.add(depth + 1);
+         if (autoScout_areaIsDangerous(areaID) == true)
+         {
+            blockExpand = true;
+            gAutoScout_diag_blockDanger = gAutoScout_diag_blockDanger + 1;
+         }
+         else if (autoScout_isAreaBlacklisted(areaID) == true)
+         {
+            blockExpand = true;
+            gAutoScout_diag_blockBlacklist = gAutoScout_diag_blockBlacklist + 1;
+         }
+      }
+      if (blockExpand == false)
+      {
+         int n = kbAreaGetNumberBorderAreas(areaID);
+         for (int j = 0; j < n; j++)
+         {
+            int next = kbAreaGetBorderAreaID(areaID, j);
+            if (next < 0 || next >= areaCount) { continue; }
+            if (visited[next] == 1) { continue; }
+            visited[next] = 1;
+            queue.add(next);
+            queueDepth.add(depth + 1);
+         }
       }
    }
 
