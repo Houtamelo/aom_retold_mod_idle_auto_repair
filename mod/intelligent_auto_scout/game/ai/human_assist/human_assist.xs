@@ -100,12 +100,6 @@ void enableAutoScouting(int unitID = -1)
    int planID = aiPlanCreate("Autoscout with unit: " + unitID, cPlanExplore);
    aiPlanAddUnitType(planID, cUnitTypeUnit, 1,1,1);
    aiPlanAddUnit(planID, unitID);
-   if (kbUnitIsType(unitID, cUnitTypeAbstractOracle) == true)
-   {
-      aiPlanSetVariableBool(planID, cExplorePlanDoLoops, 0, false);
-      // Stand still if less or equal than 20% of our surrounding tiles are explored.
-      aiPlanSetVariableFloat(planID, cExplorePlanStopLOSPercentage, 0, 0.2);
-   }
    autoScout_register(planID, unitID); // Intelligent Auto-Scout mod
    aiPlanSetFlag(planID, cPlanFlagNoMoreUnits, true);
    aiPlanSetFlag(planID, cPlanFlagRequiresAllNeedUnits, true);
