@@ -88,10 +88,16 @@ const float cAutoScout_WeightTC      = 0.35;  // closer to main TC -> higher
 const float cAutoScout_WeightScout   = 0.35;  // closer to picking scout -> higher
 const float cAutoScout_WeightDensity = 0.15;  // fewer other scouts nearby -> higher
 
-// Danger avoidance (2026-05-13). Hard-skip threshold is a playtest-tune
-// placeholder; the engine's kbAreaGetDangerLevel range is undocumented and
-// the first playtest's aiEcho traces will surface the actual values seen.
-const float cAutoScout_DangerHardSkip      = 5.0;
+// Danger avoidance (2026-05-13). First-playtest calibration on map
+// "alfheim" at t=6s with no enemy contact: kbAreaGetDangerLevel returned
+// min=35.26, max=95.00, avg=88.56 across 96 areas. Baseline floor is ~35
+// and most of the map is near max even with no enemies in sight, so 5.0
+// rejected 96/96. Raised to 110 (above observed max) so hard-skip is
+// effectively off; the 0.15-weighted soft-discount still differentiates
+// safer-vs-less-safe within the [35..95] range (range/threshold => ~50%
+// differentiation across the danger weight). Re-tune after observing the
+// heuristic's behaviour during actual enemy contact.
+const float cAutoScout_DangerHardSkip      = 110.0;
 const float cAutoScout_DangerWeight        = 0.15;
 const float cAutoScout_FleeDistance        = 25.0;
 const int   cAutoScout_FleeMinDurationMs   = 5000;
