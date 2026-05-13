@@ -326,6 +326,33 @@ void autoScout_dropFromPool(int slot = -1)
 }
 
 //------------------------------------------------------------------------------
+// Position helpers
+//------------------------------------------------------------------------------
+
+bool autoScout_isOnMap(vector pos = cInvalidVector)
+{
+   return(kbGetIsLocationOnMap(pos));
+}
+
+// Clamp X/Z to [margin, mapSize - margin]. Used on computed ring waypoints
+// so far-out rings produce in-bounds destinations along the map edge instead
+// of being skipped, which would leave map-edge bands unexplored.
+vector autoScout_clampToMap(vector pos = cInvalidVector)
+{
+   float minX = cAutoScout_MapEdgeMargin;
+   float maxX = kbGetMapXSize() - cAutoScout_MapEdgeMargin;
+   float minZ = cAutoScout_MapEdgeMargin;
+   float maxZ = kbGetMapZSize() - cAutoScout_MapEdgeMargin;
+   float x = pos.x;
+   float z = pos.z;
+   if (x < minX) { x = minX; }
+   if (x > maxX) { x = maxX; }
+   if (z < minZ) { z = minZ; }
+   if (z > maxZ) { z = maxZ; }
+   return(xsVectorCreate(x, pos.y, z));
+}
+
+//------------------------------------------------------------------------------
 // Danger / blacklist helpers (2026-05-13)
 //------------------------------------------------------------------------------
 
@@ -428,33 +455,6 @@ void autoScout_enterFleeing(int slot = -1, int unitID = -1, int dangerAreaID = -
    aiEcho("autoScout: FLEE slot=" + slot + " unit=" + unitID
       + " from area=" + dangerAreaID + " dest=" + dest
       + " destOK=" + destOK);
-}
-
-//------------------------------------------------------------------------------
-// Position helpers
-//------------------------------------------------------------------------------
-
-bool autoScout_isOnMap(vector pos = cInvalidVector)
-{
-   return(kbGetIsLocationOnMap(pos));
-}
-
-// Clamp X/Z to [margin, mapSize - margin]. Used on computed ring waypoints
-// so far-out rings produce in-bounds destinations along the map edge instead
-// of being skipped, which would leave map-edge bands unexplored.
-vector autoScout_clampToMap(vector pos = cInvalidVector)
-{
-   float minX = cAutoScout_MapEdgeMargin;
-   float maxX = kbGetMapXSize() - cAutoScout_MapEdgeMargin;
-   float minZ = cAutoScout_MapEdgeMargin;
-   float maxZ = kbGetMapZSize() - cAutoScout_MapEdgeMargin;
-   float x = pos.x;
-   float z = pos.z;
-   if (x < minX) { x = minX; }
-   if (x > maxX) { x = maxX; }
-   if (z < minZ) { z = minZ; }
-   if (z > maxZ) { z = maxZ; }
-   return(xsVectorCreate(x, pos.y, z));
 }
 
 //------------------------------------------------------------------------------
