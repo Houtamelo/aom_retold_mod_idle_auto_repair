@@ -108,7 +108,7 @@ const int   cAutoScout_BlacklistDurationMs = 90000;
 // an order of magnitude heavier than distance: we'd rather flee to a slightly
 // closer area that's much safer than to a far area that's only marginally
 // safer.
-const int   cAutoScout_FleeBfsDepth         = 4;
+const int   cAutoScout_FleeBfsDepth         = 2;
 const float cAutoScout_FleeWeightSafety     = 0.95;
 const float cAutoScout_FleeWeightDistance   = 0.05;
 
