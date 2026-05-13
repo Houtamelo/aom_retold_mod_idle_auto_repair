@@ -166,6 +166,30 @@ extern int[] gAutoScout_fleeFromArea  = default;
 extern int[] gAutoScout_blacklistedAreaIDs  = default;
 extern int[] gAutoScout_blacklistedExpiryMs = default;
 
+// Diagnostic counters for one BFS pass (reset at top of findNextArea, echoed
+// at every return path). Used to triage "scout immediately untoggles" issues
+// where the candidate pool is being filtered out by an unexpected reason.
+extern int   gAutoScout_diag_considered    = 0;
+extern int   gAutoScout_diag_rejClaim      = 0;
+extern int   gAutoScout_diag_rejSelf       = 0;
+extern int   gAutoScout_diag_rejBlacklist  = 0;
+extern int   gAutoScout_diag_rejDanger     = 0;
+extern int   gAutoScout_diag_rejTiles      = 0;
+extern int   gAutoScout_diag_rejPath       = 0;
+extern int   gAutoScout_diag_rejOracle     = 0;
+extern int   gAutoScout_diag_passed        = 0;
+extern float gAutoScout_diag_dangerMin     = 0.0;
+extern float gAutoScout_diag_dangerMax     = 0.0;
+extern float gAutoScout_diag_dangerSum     = 0.0;
+extern int   gAutoScout_diag_dangerCount   = 0;
+// First three danger-rejected areas (areaID + danger value) for value sampling.
+extern int   gAutoScout_diag_rejID0        = -1;
+extern float gAutoScout_diag_rejDng0       = 0.0;
+extern int   gAutoScout_diag_rejID1        = -1;
+extern float gAutoScout_diag_rejDng1       = 0.0;
+extern int   gAutoScout_diag_rejID2        = -1;
+extern float gAutoScout_diag_rejDng2       = 0.0;
+
 // Visited-waypoint memory for the frontier-walk algorithm. Two parallel flat
 // arrays keyed by unitID (not by slot, so removeIndex-driven slot shifts don't
 // invalidate the bookkeeping). Each entry records a waypoint the scout has
@@ -775,22 +799,93 @@ bool autoScout_areaIsCandidate(int areaID = -1, int scoutUnitID = -1)
 {
    if (areaID < 0) { return(false); }
    if (areaID >= gAutoScout_areaClaim.size()) { return(false); }
-   if (gAutoScout_areaClaim[areaID] != 0) { return(false); }
-   if (gAutoScout_areaSelfScouted[areaID] == 1) { return(false); }
-   if (autoScout_isAreaBlacklisted(areaID) == true) { return(false); }
-   if (autoScout_areaIsDangerous(areaID) == true) { return(false); }
+   gAutoScout_diag_considered = gAutoScout_diag_considered + 1;
+
+   if (gAutoScout_areaClaim[areaID] != 0)
+   {
+      gAutoScout_diag_rejClaim = gAutoScout_diag_rejClaim + 1;
+      return(false);
+   }
+   if (gAutoScout_areaSelfScouted[areaID] == 1)
+   {
+      gAutoScout_diag_rejSelf = gAutoScout_diag_rejSelf + 1;
+      return(false);
+   }
+   if (autoScout_isAreaBlacklisted(areaID) == true)
+   {
+      gAutoScout_diag_rejBlacklist = gAutoScout_diag_rejBlacklist + 1;
+      return(false);
+   }
+
+   // Sample danger for stats regardless of pass/fail.
+   bool dangerValid = kbAreaGetIsIDValid(areaID);
+   float danger = 0.0;
+   if (dangerValid == true)
+   {
+      danger = kbAreaGetDangerLevel(areaID, true);
+      gAutoScout_diag_dangerSum   = gAutoScout_diag_dangerSum + danger;
+      gAutoScout_diag_dangerCount = gAutoScout_diag_dangerCount + 1;
+      if (gAutoScout_diag_dangerCount == 1)
+      {
+         gAutoScout_diag_dangerMin = danger;
+         gAutoScout_diag_dangerMax = danger;
+      }
+      else
+      {
+         if (danger < gAutoScout_diag_dangerMin) { gAutoScout_diag_dangerMin = danger; }
+         if (danger > gAutoScout_diag_dangerMax) { gAutoScout_diag_dangerMax = danger; }
+      }
+   }
+
+   if (danger > cAutoScout_DangerHardSkip)
+   {
+      // Record up to 3 areaID + danger value samples for the BFS-summary log.
+      if (gAutoScout_diag_rejID0 < 0)
+      {
+         gAutoScout_diag_rejID0  = areaID;
+         gAutoScout_diag_rejDng0 = danger;
+      }
+      else if (gAutoScout_diag_rejID1 < 0)
+      {
+         gAutoScout_diag_rejID1  = areaID;
+         gAutoScout_diag_rejDng1 = danger;
+      }
+      else if (gAutoScout_diag_rejID2 < 0)
+      {
+         gAutoScout_diag_rejID2  = areaID;
+         gAutoScout_diag_rejDng2 = danger;
+      }
+      gAutoScout_diag_rejDanger = gAutoScout_diag_rejDanger + 1;
+      return(false);
+   }
 
    int totalTiles = kbAreaGetNumberTiles(areaID);
-   if (totalTiles <= 0) { return(false); }
+   if (totalTiles <= 0)
+   {
+      gAutoScout_diag_rejTiles = gAutoScout_diag_rejTiles + 1;
+      return(false);
+   }
    int blackTiles = kbAreaGetNumberBlackTiles(areaID);
-   if (blackTiles * 100 / totalTiles < cAutoScout_BlackTilesPercentMin) { return(false); }
+   if (blackTiles * 100 / totalTiles < cAutoScout_BlackTilesPercentMin)
+   {
+      gAutoScout_diag_rejTiles = gAutoScout_diag_rejTiles + 1;
+      return(false);
+   }
 
    vector areaPos = kbAreaGetCenter(areaID);
-   if (autoScout_isOnMap(areaPos) == false) { return(false); }
+   if (autoScout_isOnMap(areaPos) == false)
+   {
+      gAutoScout_diag_rejPath = gAutoScout_diag_rejPath + 1;
+      return(false);
+   }
 
    vector unitPos = kbUnitGetPosition(scoutUnitID);
    int unitProto = kbUnitGetProtoUnitID(scoutUnitID);
-   if (kbCanPath(unitPos, areaPos, unitProto, 1.0, -1) == false) { return(false); }
+   if (kbCanPath(unitPos, areaPos, unitProto, 1.0, -1) == false)
+   {
+      gAutoScout_diag_rejPath = gAutoScout_diag_rejPath + 1;
+      return(false);
+   }
 
    // Oracle source hard-skip: refuse candidates whose centroid lies within
    // cAutoScout_OracleExclusionFactor * MaxOracleLOS of any OTHER oracle.
@@ -799,9 +894,11 @@ bool autoScout_areaIsCandidate(int areaID = -1, int scoutUnitID = -1)
    if (autoScout_isOracle(scoutUnitID) == true &&
        autoScout_anyOracleNear(areaPos, scoutUnitID, cAutoScout_OracleExclusionFactor) == true)
    {
+      gAutoScout_diag_rejOracle = gAutoScout_diag_rejOracle + 1;
       return(false);
    }
 
+   gAutoScout_diag_passed = gAutoScout_diag_passed + 1;
    return(true);
 }
 
@@ -911,13 +1008,69 @@ float autoScout_areaScore(
 //   - Subsequent batches: single depth each (N+1, then N+2, ...).
 // As soon as a batch contains at least one candidate, we pick the one with
 // the highest autoScout_areaScore and return.
+// Reset diagnostic counters before a BFS pass.
+void autoScout_diag_reset()
+{
+   gAutoScout_diag_considered   = 0;
+   gAutoScout_diag_rejClaim     = 0;
+   gAutoScout_diag_rejSelf      = 0;
+   gAutoScout_diag_rejBlacklist = 0;
+   gAutoScout_diag_rejDanger    = 0;
+   gAutoScout_diag_rejTiles     = 0;
+   gAutoScout_diag_rejPath      = 0;
+   gAutoScout_diag_rejOracle    = 0;
+   gAutoScout_diag_passed       = 0;
+   gAutoScout_diag_dangerMin    = 0.0;
+   gAutoScout_diag_dangerMax    = 0.0;
+   gAutoScout_diag_dangerSum    = 0.0;
+   gAutoScout_diag_dangerCount  = 0;
+   gAutoScout_diag_rejID0       = -1;
+   gAutoScout_diag_rejDng0      = 0.0;
+   gAutoScout_diag_rejID1       = -1;
+   gAutoScout_diag_rejDng1      = 0.0;
+   gAutoScout_diag_rejID2       = -1;
+   gAutoScout_diag_rejDng2      = 0.0;
+}
+
+// Echo the diagnostic stats for the last BFS pass.
+void autoScout_diag_log(int scoutUnitID = -1, int result = -1)
+{
+   float avg = 0.0;
+   if (gAutoScout_diag_dangerCount > 0)
+   {
+      avg = gAutoScout_diag_dangerSum / gAutoScout_diag_dangerCount;
+   }
+   aiEcho("autoScout: BFS unit=" + scoutUnitID + " result=" + result
+      + " considered=" + gAutoScout_diag_considered
+      + " passed=" + gAutoScout_diag_passed
+      + " rej[claim=" + gAutoScout_diag_rejClaim
+      + " self=" + gAutoScout_diag_rejSelf
+      + " blacklist=" + gAutoScout_diag_rejBlacklist
+      + " danger=" + gAutoScout_diag_rejDanger
+      + " tiles=" + gAutoScout_diag_rejTiles
+      + " path=" + gAutoScout_diag_rejPath
+      + " oracle=" + gAutoScout_diag_rejOracle + "]");
+   aiEcho("autoScout: BFS danger min=" + gAutoScout_diag_dangerMin
+      + " max=" + gAutoScout_diag_dangerMax
+      + " avg=" + avg
+      + " sampled=" + gAutoScout_diag_dangerCount
+      + " (hardSkip=" + cAutoScout_DangerHardSkip + ")");
+   if (gAutoScout_diag_rejID0 >= 0)
+   {
+      aiEcho("autoScout: BFS dangerRejSamples area0=" + gAutoScout_diag_rejID0 + "/" + gAutoScout_diag_rejDng0
+         + " area1=" + gAutoScout_diag_rejID1 + "/" + gAutoScout_diag_rejDng1
+         + " area2=" + gAutoScout_diag_rejID2 + "/" + gAutoScout_diag_rejDng2);
+   }
+}
+
 int autoScout_findNextArea(int scoutUnitID = -1)
 {
-   if (scoutUnitID < 0) { return(-1); }
+   autoScout_diag_reset();
+   if (scoutUnitID < 0) { autoScout_diag_log(scoutUnitID, -1); return(-1); }
    vector unitPos = kbUnitGetPosition(scoutUnitID);
-   if (autoScout_isOnMap(unitPos) == false) { return(-1); }
+   if (autoScout_isOnMap(unitPos) == false) { autoScout_diag_log(scoutUnitID, -1); return(-1); }
    int startArea = kbAreaGetIDByPosition(unitPos);
-   if (startArea < 0) { return(-1); }
+   if (startArea < 0) { autoScout_diag_log(scoutUnitID, -1); return(-1); }
 
    // Top priority: scout's current area if it still has unexplored tiles.
    // Skipped for oracles -- their huge LOS makes "finish the current area"
@@ -929,6 +1082,7 @@ int autoScout_findNextArea(int scoutUnitID = -1)
    {
       if (autoScout_areaIsCandidate(startArea, scoutUnitID) == true)
       {
+         autoScout_diag_log(scoutUnitID, startArea);
          return(startArea);
       }
    }
@@ -976,7 +1130,11 @@ int autoScout_findNextArea(int scoutUnitID = -1)
       // Loop because intermediate empty depths are skipped over.
       while (depth > currentBatchMax)
       {
-         if (batchBest >= 0) { return(batchBest); }
+         if (batchBest >= 0)
+         {
+            autoScout_diag_log(scoutUnitID, batchBest);
+            return(batchBest);
+         }
          currentBatchMax = currentBatchMax + 1;
          batchBest = -1;
          batchBestScore = -1.0e18;
@@ -1005,7 +1163,12 @@ int autoScout_findNextArea(int scoutUnitID = -1)
    }
 
    // End of queue: evaluate the in-flight batch.
-   if (batchBest >= 0) { return(batchBest); }
+   if (batchBest >= 0)
+   {
+      autoScout_diag_log(scoutUnitID, batchBest);
+      return(batchBest);
+   }
+   autoScout_diag_log(scoutUnitID, -1);
    return(-1);
 }
 
