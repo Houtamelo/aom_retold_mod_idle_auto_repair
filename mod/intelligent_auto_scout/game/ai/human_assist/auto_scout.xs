@@ -102,6 +102,13 @@ const float cAutoScout_DangerWeight        = 0.15;
 const int   cAutoScout_FleeMinDurationMs   = 5000;
 const int   cAutoScout_BlacklistDurationMs = 90000;
 
+// Baseline effective danger applied to fully-unexplored areas (where we have
+// no ground-truth and the engine's kbAreaGetDangerLevel is unreliable). For
+// fully-explored areas we trust the engine's reading; we blend linearly
+// between the two by the fraction of explored tiles. See
+// autoScout_effectiveDanger.
+const float cAutoScout_DangerBaseline      = 20.0;
+
 // Flee-area picker (autoScout_findFleeArea). BFS expands outward from the
 // scout's current area up to cAutoScout_FleeBfsDepth hops, refusing to
 // propagate through dangerous areas (so the chosen flee target is reachable
@@ -390,14 +397,39 @@ vector autoScout_clampToMap(vector pos = cInvalidVector)
 // Danger / blacklist helpers (2026-05-13)
 //------------------------------------------------------------------------------
 
-// Engine's per-area danger heuristic, averaged with one-area-hop neighbors so
-// a tower in an adjacent area surfaces as elevated danger here.
+// Effective danger of an area, blending baseline (for unexplored portions
+// where we have no ground-truth and the engine's heuristic is noisy/
+// unreliable) with the engine's reading (for explored portions where it
+// reflects observed threats):
+//
+//   explore_percent = 1.0 - blackTiles / totalTiles
+//   danger = baseline * (1 - explore_percent) + engine_danger * explore_percent
+//
+// Fully unexplored area -> baseline (presumed safe at baseline level,
+// scouts will still happily go there). Fully explored area -> engine
+// reading, which reflects enemies observed by our scouts and the engine's
+// per-tile-LOS bookkeeping. averageInBorderAreas=true on the engine call
+// gives 1-hop visibility leak across area boundaries.
+float autoScout_effectiveDanger(int areaID = -1)
+{
+   if (areaID < 0) { return(cAutoScout_DangerBaseline); }
+   if (kbAreaGetIsIDValid(areaID) == false) { return(cAutoScout_DangerBaseline); }
+   int total = kbAreaGetNumberTiles(areaID);
+   if (total <= 0) { return(cAutoScout_DangerBaseline); }
+   int black = kbAreaGetNumberBlackTiles(areaID);
+   float blackFrac = 1.0 * black / total;
+   if (blackFrac < 0.0) { blackFrac = 0.0; }
+   if (blackFrac > 1.0) { blackFrac = 1.0; }
+   float explorePercent = 1.0 - blackFrac;
+   float engineDanger = kbAreaGetDangerLevel(areaID, true);
+   return(cAutoScout_DangerBaseline * (1.0 - explorePercent)
+        + engineDanger * explorePercent);
+}
+
+// Wrapper used by hard-skip / path-aware-block / per-tick flee trigger.
 bool autoScout_areaIsDangerous(int areaID = -1)
 {
-   if (areaID < 0) { return(false); }
-   if (kbAreaGetIsIDValid(areaID) == false) { return(false); }
-   float danger = kbAreaGetDangerLevel(areaID, true);
-   return(danger > cAutoScout_DangerHardSkip);
+   return(autoScout_effectiveDanger(areaID) > cAutoScout_DangerHardSkip);
 }
 
 // Add areaID to the blacklist (or bump its expiry if already present).
@@ -504,7 +536,7 @@ int autoScout_findFleeArea(int scoutUnitID = -1, int dangerAreaID = -1)
             if (kbCanPath(scoutPos, areaPos, unitProto, 1.0, -1) == true)
             {
                // Safety: low danger = high score, dominant component.
-               float danger = kbAreaGetDangerLevel(areaID, true);
+               float danger = autoScout_effectiveDanger(areaID);
                float dRatio = danger / cAutoScout_DangerHardSkip;
                if (dRatio < 0.0) { dRatio = 0.0; }
                if (dRatio > 1.0) { dRatio = 1.0; }
@@ -593,7 +625,7 @@ void autoScout_enterFleeing(int slot = -1, int unitID = -1, int dangerAreaID = -
    if (fleeArea >= 0)
    {
       dest = kbAreaGetCenter(fleeArea);
-      destDanger = kbAreaGetDangerLevel(fleeArea, true);
+      destDanger = autoScout_effectiveDanger(fleeArea);
       aiTaskMoveUnit(unitID, dest, false, false);
       issuedMove = true;
    }
@@ -946,12 +978,14 @@ bool autoScout_areaIsCandidate(int areaID = -1, int scoutUnitID = -1)
       return(false);
    }
 
-   // Sample danger for stats regardless of pass/fail.
+   // Sample danger for stats regardless of pass/fail. Uses the effective
+   // danger (baseline blended with engine reading) so the min/max/avg diag
+   // values match what hard-skip / scoring actually use for decisions.
    bool dangerValid = kbAreaGetIsIDValid(areaID);
    float danger = 0.0;
    if (dangerValid == true)
    {
-      danger = kbAreaGetDangerLevel(areaID, true);
+      danger = autoScout_effectiveDanger(areaID);
       gAutoScout_diag_dangerSum   = gAutoScout_diag_dangerSum + danger;
       gAutoScout_diag_dangerCount = gAutoScout_diag_dangerCount + 1;
       if (gAutoScout_diag_dangerCount == 1)
@@ -1099,7 +1133,7 @@ float autoScout_areaScore(
    // Danger subscore: zero-danger areas score 1.0; areas at the hard-skip
    // threshold score 0.0. Areas above threshold are excluded by
    // autoScout_areaIsCandidate so no overshoot is possible here.
-   float danger = kbAreaGetDangerLevel(areaID, true);
+   float danger = autoScout_effectiveDanger(areaID);
    float dangerRatio = danger / cAutoScout_DangerHardSkip;
    if (dangerRatio < 0.0) { dangerRatio = 0.0; }
    if (dangerRatio > 1.0) { dangerRatio = 1.0; }
