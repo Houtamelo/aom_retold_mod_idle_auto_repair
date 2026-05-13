@@ -84,9 +84,9 @@ const float cAutoScout_OracleExclusionFactor = 0.8;
 // Area-score weights (sum need not be exactly 1.0 since we only compare
 // scores, but normalized weights make tuning intuitive). Each subscore is
 // produced in roughly [0, 1].
-const float cAutoScout_WeightTC      = 0.35;  // closer to main TC -> higher
-const float cAutoScout_WeightScout   = 0.35;  // closer to picking scout -> higher
-const float cAutoScout_WeightDensity = 0.15;  // fewer other scouts nearby -> higher
+const float cAutoScout_WeightTC      = 0.35;   // closer to main TC -> higher
+const float cAutoScout_WeightScout   = 0.525;  // closer to picking scout -> higher (0.35 * 1.5)
+const float cAutoScout_WeightDensity = 0.15;   // fewer other scouts nearby -> higher
 
 // Danger avoidance (2026-05-13). First-playtest calibration on map
 // "alfheim" at t=6s with no enemy contact: kbAreaGetDangerLevel returned
@@ -103,18 +103,30 @@ const float cAutoScout_FleeDistance        = 25.0;
 const int   cAutoScout_FleeMinDurationMs   = 5000;
 const int   cAutoScout_BlacklistDurationMs = 90000;
 
-// Flee-area picker (autoScout_findFleeArea). BFS depth around the polar-
-// projected seed area, plus safety/distance weights. Safety is intentionally
-// an order of magnitude heavier than distance: we'd rather flee to a slightly
-// closer area that's much safer than to a far area that's only marginally
-// safer.
-const int   cAutoScout_FleeBfsDepth         = 2;
-const float cAutoScout_FleeWeightSafety     = 0.95;
-const float cAutoScout_FleeWeightDistance   = 0.05;
+// Flee-area picker (autoScout_findFleeArea). BFS expands outward from the
+// scout's current area up to cAutoScout_FleeBfsDepth hops, refusing to
+// propagate through dangerous areas (so the chosen flee target is reachable
+// via a safe corridor). Score has three components:
+//   safety       (0.7)  : low danger = high score, dominant.
+//   awayDanger   (0.2)  : far from the area we fled from = high score.
+//   nearScout    (0.075): close to scout's current position = high score.
+//                          0.05 baseline * 1.5 bump for near-scout preference.
+const int   cAutoScout_FleeBfsDepth         = 4;
+const float cAutoScout_FleeWeightSafety     = 0.7;
+const float cAutoScout_FleeWeightAwayDanger = 0.2;
+const float cAutoScout_FleeWeightNearScout  = 0.075;
 
 // Other scouts beyond this distance from a candidate area do not influence
 // that area's density subscore.
 const float cAutoScout_DensityRadius = 30.0;
+
+// Depth cap for autoScout_findNextArea BFS. Replaces the previous
+// batch-return-on-first-candidate logic with a single global-best within
+// this depth. Higher value -> more candidates considered, more compute per
+// pick, but lets scouts find far-but-safer targets when nearby options are
+// dangerous. 5 hops in the area-graph covers most map regions on typical
+// AoMR random maps.
+const int cAutoScout_PickBfsDepth = 5;
 
 // Frontier-walk parameters (in-area exploration during WORKING state).
 // Cap on number of frontier waypoints walked before giving up on the area;
@@ -1216,14 +1228,16 @@ int autoScout_findNextArea(int scoutUnitID = -1)
    queueDepth.add(0);
    visited[startArea] = 1;
 
-   // currentBatchMax: largest depth still in the current batch. First batch
-   // is wider for oracles so the hard-skip exclusion has more candidates to
-   // choose from -- avoids cases where the only depth-1/2 areas overlap an
-   // existing oracle and the algorithm has to pick the lesser-evil overlap.
-   int currentBatchMax = 2;
-   if (autoScout_isOracle(scoutUnitID) == true) { currentBatchMax = 3; }
-   int batchBest = -1;
-   float batchBestScore = -1.0e18;
+   // Global-best within cAutoScout_PickBfsDepth. Replaces the previous
+   // batch-return-on-first-candidate behaviour, which pinned scouts to the
+   // nearest unexplored area even when a slightly farther but much-safer
+   // option existed. Now BFS fully expands its reachable subgraph (capped
+   // at the depth constant) and picks the highest-scoring candidate across
+   // all visited depths. The scout-distance subscore (cAutoScout_WeightScout)
+   // still pulls toward nearby areas; far-but-safer wins only when nearby
+   // areas are markedly worse.
+   int bestArea = -1;
+   float bestScore = -1.0e18;
 
    int head = 0;
    while (head < queue.size())
@@ -1232,27 +1246,13 @@ int autoScout_findNextArea(int scoutUnitID = -1)
       int depth  = queueDepth[head];
       head = head + 1;
 
-      // Batch boundary: if we've moved past the current batch, finalize it.
-      // Loop because intermediate empty depths are skipped over.
-      while (depth > currentBatchMax)
-      {
-         if (batchBest >= 0)
-         {
-            autoScout_diag_log(scoutUnitID, batchBest);
-            return(batchBest);
-         }
-         currentBatchMax = currentBatchMax + 1;
-         batchBest = -1;
-         batchBestScore = -1.0e18;
-      }
-
       if (depth >= 1 && autoScout_areaIsCandidate(areaID, scoutUnitID) == true)
       {
          float s = autoScout_areaScore(areaID, scoutUnitID, tcPos, unitPos, mapDiag);
-         if (s > batchBestScore)
+         if (s > bestScore)
          {
-            batchBestScore = s;
-            batchBest = areaID;
+            bestScore = s;
+            bestArea = areaID;
          }
       }
 
@@ -1264,7 +1264,7 @@ int autoScout_findNextArea(int scoutUnitID = -1)
       // corridor are never visited and so can never be picked. Start area
       // (depth 0) is the scout's current position -- always allow expansion
       // from there so the scout can leave a temporarily-dangerous starting
-      // location.
+      // location. Also cap expansion at cAutoScout_PickBfsDepth.
       bool blockExpand = false;
       if (depth >= 1)
       {
@@ -1279,6 +1279,8 @@ int autoScout_findNextArea(int scoutUnitID = -1)
             gAutoScout_diag_blockBlacklist = gAutoScout_diag_blockBlacklist + 1;
          }
       }
+      if (depth >= cAutoScout_PickBfsDepth) { blockExpand = true; }
+
       if (blockExpand == false)
       {
          int n = kbAreaGetNumberBorderAreas(areaID);
@@ -1294,14 +1296,8 @@ int autoScout_findNextArea(int scoutUnitID = -1)
       }
    }
 
-   // End of queue: evaluate the in-flight batch.
-   if (batchBest >= 0)
-   {
-      autoScout_diag_log(scoutUnitID, batchBest);
-      return(batchBest);
-   }
-   autoScout_diag_log(scoutUnitID, -1);
-   return(-1);
+   autoScout_diag_log(scoutUnitID, bestArea);
+   return(bestArea);
 }
 
 //------------------------------------------------------------------------------
