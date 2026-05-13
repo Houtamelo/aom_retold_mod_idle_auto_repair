@@ -17,6 +17,7 @@ const int cAutoScoutState_Walking   = 1;
 const int cAutoScoutState_Working   = 2;
 const int cAutoScoutState_Diverting = 3;
 const int cAutoScoutState_Stationed = 4;
+const int cAutoScoutState_Fleeing   = 5;
 
 // Extra detection radius beyond the scout's LOS, in tiles. Catches herds that
 // briefly flicker at the LOS boundary between ticks. Per-result we still
@@ -83,9 +84,18 @@ const float cAutoScout_OracleExclusionFactor = 0.8;
 // Area-score weights (sum need not be exactly 1.0 since we only compare
 // scores, but normalized weights make tuning intuitive). Each subscore is
 // produced in roughly [0, 1].
-const float cAutoScout_WeightTC      = 0.4;  // closer to main TC -> higher
-const float cAutoScout_WeightScout   = 0.4;  // closer to picking scout -> higher
-const float cAutoScout_WeightDensity = 0.2;  // fewer other scouts nearby -> higher
+const float cAutoScout_WeightTC      = 0.35;  // closer to main TC -> higher
+const float cAutoScout_WeightScout   = 0.35;  // closer to picking scout -> higher
+const float cAutoScout_WeightDensity = 0.15;  // fewer other scouts nearby -> higher
+
+// Danger avoidance (2026-05-13). Hard-skip threshold is a playtest-tune
+// placeholder; the engine's kbAreaGetDangerLevel range is undocumented and
+// the first playtest's aiEcho traces will surface the actual values seen.
+const float cAutoScout_DangerHardSkip      = 5.0;
+const float cAutoScout_DangerWeight        = 0.15;
+const float cAutoScout_FleeDistance        = 25.0;
+const int   cAutoScout_FleeMinDurationMs   = 5000;
+const int   cAutoScout_BlacklistDurationMs = 90000;
 
 // Other scouts beyond this distance from a candidate area do not influence
 // that area's density subscore.
