@@ -326,6 +326,55 @@ void autoScout_dropFromPool(int slot = -1)
 }
 
 //------------------------------------------------------------------------------
+// Danger / blacklist helpers (2026-05-13)
+//------------------------------------------------------------------------------
+
+// Engine's per-area danger heuristic, averaged with one-area-hop neighbors so
+// a tower in an adjacent area surfaces as elevated danger here.
+bool autoScout_areaIsDangerous(int areaID = -1)
+{
+   if (areaID < 0) { return(false); }
+   if (kbAreaGetIsIDValid(areaID) == false) { return(false); }
+   float danger = kbAreaGetDangerLevel(areaID, true);
+   return(danger > cAutoScout_DangerHardSkip);
+}
+
+// Add areaID to the blacklist (or bump its expiry if already present).
+void autoScout_blacklistArea(int areaID = -1)
+{
+   if (areaID < 0) { return; }
+   int newExpiry = xsGetTime() + cAutoScout_BlacklistDurationMs;
+   int n = gAutoScout_blacklistedAreaIDs.size();
+   for (int i = 0; i < n; i = i + 1)
+   {
+      if (gAutoScout_blacklistedAreaIDs[i] == areaID)
+      {
+         gAutoScout_blacklistedExpiryMs[i] = newExpiry;
+         return;
+      }
+   }
+   gAutoScout_blacklistedAreaIDs.add(areaID);
+   gAutoScout_blacklistedExpiryMs.add(newExpiry);
+}
+
+// True if areaID is blacklisted AND its expiry has not yet passed. Expired
+// entries are left in place; they get bumped naturally on re-blacklist.
+bool autoScout_isAreaBlacklisted(int areaID = -1)
+{
+   if (areaID < 0) { return(false); }
+   int now = xsGetTime();
+   int n = gAutoScout_blacklistedAreaIDs.size();
+   for (int i = 0; i < n; i = i + 1)
+   {
+      if (gAutoScout_blacklistedAreaIDs[i] == areaID)
+      {
+         return(gAutoScout_blacklistedExpiryMs[i] > now);
+      }
+   }
+   return(false);
+}
+
+//------------------------------------------------------------------------------
 // Position helpers
 //------------------------------------------------------------------------------
 
