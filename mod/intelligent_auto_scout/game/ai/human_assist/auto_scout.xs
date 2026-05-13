@@ -321,6 +321,8 @@ void autoScout_dropFromPool(int slot = -1)
    gAutoScout_workSteps.removeIndex(slot);
    gAutoScout_stuckTicks.removeIndex(slot);
    gAutoScout_targetHerdID.removeIndex(slot);
+   gAutoScout_fleeUntilMs.removeIndex(slot);
+   gAutoScout_fleeFromArea.removeIndex(slot);
 }
 
 //------------------------------------------------------------------------------
@@ -1385,6 +1387,8 @@ void autoScout_register(int planID = -1, int unitID = -1)
    gAutoScout_workSteps.add(0);
    gAutoScout_stuckTicks.add(0);
    gAutoScout_targetHerdID.add(-1);
+   gAutoScout_fleeUntilMs.add(0);
+   gAutoScout_fleeFromArea.add(-1);
 
    // Immediate first-tick: BFS + initial move now, instead of waiting up to
    // a full rule interval. Without this, the scout starts moving in whatever
