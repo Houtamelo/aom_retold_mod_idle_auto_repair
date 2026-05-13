@@ -509,7 +509,13 @@ void autoScout_updateMaxOracleLOS(int unitID = -1)
    if (unitID < 0) { return; }
    if (kbUnitGetActionType(unitID) != cAutoScout_OracleSaturatedActionType) { return; }
    float current = kbUnitGetStatFloat(unitID, cUnitStatLOS);
-   if (current > gAutoScout_maxOracleLOS) { gAutoScout_maxOracleLOS = current; }
+   if (current > gAutoScout_maxOracleLOS)
+   {
+      float prev = gAutoScout_maxOracleLOS;
+      gAutoScout_maxOracleLOS = current;
+      aiEcho("autoScout: maxOracleLOS cache " + prev + " -> " + current
+         + " (from oracle " + unitID + ")");
+   }
 }
 
 // Returns the pool slot for unitID, or -1 if the unit isn't in the pool.
@@ -1015,6 +1021,9 @@ bool autoScout_tickOracleUnit(int slot = -1)
       gAutoScout_targetWaypoint[slot] = kbAreaGetCenter(nextArea);
       gAutoScout_state[slot] = cAutoScoutState_Walking;
       gAutoScout_stuckTicks[slot] = 0;
+      aiEcho("autoScout: oracle " + unitID + " picked area " + nextArea
+         + " centroid=" + gAutoScout_targetWaypoint[slot]
+         + " (maxLOS=" + gAutoScout_maxOracleLOS + ")");
       aiTaskMoveUnit(unitID, gAutoScout_targetWaypoint[slot], false, false);
       return(true);
    }
@@ -1144,6 +1153,8 @@ bool autoScout_tickUnit(int slot = -1)
       gAutoScout_targetWaypoint[slot] = kbAreaGetCenter(nextArea);
       gAutoScout_state[slot] = cAutoScoutState_Walking;
       gAutoScout_stuckTicks[slot] = 0;
+      aiEcho("autoScout: scout " + unitID + " picked area " + nextArea
+         + " centroid=" + gAutoScout_targetWaypoint[slot]);
       aiTaskMoveUnit(unitID, gAutoScout_targetWaypoint[slot], false, false);
       return(true);
    }
