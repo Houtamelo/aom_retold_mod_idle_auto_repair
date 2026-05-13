@@ -1291,6 +1291,35 @@ bool autoScout_tickUnit(int slot = -1)
    float los = kbUnitGetStatFloat(unitID, cUnitStatLOS);
    if (los < 1.0) { los = 18.0; }
 
+   // Danger check: applies to all non-Idle non-Fleeing states. Idle is exempt
+   // because the next BFS pick respects the hard-skip and blacklist directly;
+   // Fleeing is exempt to avoid recursive entry while the timer is held.
+   int preState = gAutoScout_state[slot];
+   if (preState != cAutoScoutState_Idle && preState != cAutoScoutState_Fleeing)
+   {
+      vector unitPos = kbUnitGetPosition(unitID);
+      int currentArea = -1;
+      if (autoScout_isOnMap(unitPos) == true)
+      {
+         currentArea = kbAreaGetIDByPosition(unitPos);
+      }
+      int targetArea = gAutoScout_targetAreaID[slot];
+
+      if (currentArea >= 0 && autoScout_areaIsDangerous(currentArea) == true)
+      {
+         autoScout_blacklistArea(currentArea);
+         autoScout_enterFleeing(slot, unitID, currentArea);
+         return(true);
+      }
+      if (targetArea >= 0 && targetArea != currentArea
+          && autoScout_areaIsDangerous(targetArea) == true)
+      {
+         autoScout_blacklistArea(targetArea);
+         autoScout_enterFleeing(slot, unitID, targetArea);
+         return(true);
+      }
+   }
+
    int state = gAutoScout_state[slot];
 
    if (state == cAutoScoutState_Idle)
