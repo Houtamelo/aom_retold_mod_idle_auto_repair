@@ -154,14 +154,14 @@ extern bool  gAutoScout_areaArraysInited  = false;
 extern int[] gAutoScout_targetHerdID = default;
 
 // Per-scout danger-avoidance state.
-//   fleeUntilMs[slot]:  xsGetTime() value at which the FLEEING hold expires.
+//   fleeUntilMs[slot]:  xsGetTimeMS() value at which the FLEEING hold expires.
 //   fleeFromArea[slot]: area we fled from (-1 when not fleeing). Diagnostics only.
 extern int[] gAutoScout_fleeUntilMs   = default;
 extern int[] gAutoScout_fleeFromArea  = default;
 
 // Danger blacklist. Two parallel append-only arrays keyed by areaID. Areas
 // enter when a scout aborts because of them and remain excluded from BFS
-// picking until expiryMs < xsGetTime(). Linear scan on lookup; bounded by
+// picking until expiryMs < xsGetTimeMS(). Linear scan on lookup; bounded by
 // the number of distinct dangerous areas seen, which is small in practice.
 extern int[] gAutoScout_blacklistedAreaIDs  = default;
 extern int[] gAutoScout_blacklistedExpiryMs = default;
@@ -343,7 +343,7 @@ bool autoScout_areaIsDangerous(int areaID = -1)
 void autoScout_blacklistArea(int areaID = -1)
 {
    if (areaID < 0) { return; }
-   int newExpiry = xsGetTime() + cAutoScout_BlacklistDurationMs;
+   int newExpiry = xsGetTimeMS() + cAutoScout_BlacklistDurationMs;
    int n = gAutoScout_blacklistedAreaIDs.size();
    for (int i = 0; i < n; i = i + 1)
    {
@@ -362,7 +362,7 @@ void autoScout_blacklistArea(int areaID = -1)
 bool autoScout_isAreaBlacklisted(int areaID = -1)
 {
    if (areaID < 0) { return(false); }
-   int now = xsGetTime();
+   int now = xsGetTimeMS();
    int n = gAutoScout_blacklistedAreaIDs.size();
    for (int i = 0; i < n; i = i + 1)
    {
@@ -372,6 +372,62 @@ bool autoScout_isAreaBlacklisted(int areaID = -1)
       }
    }
    return(false);
+}
+
+// Transition slot/unit to FLEEING. Computes a flee target opposite the danger
+// area's center, issues a single aiTaskMoveUnit if the target is on-map and
+// reachable, releases area claim, sets a 5-second hold timer. The handler
+// keeps the scout in FLEEING until the timer expires regardless of arrival.
+void autoScout_enterFleeing(int slot = -1, int unitID = -1, int dangerAreaID = -1)
+{
+   if (slot < 0) { return; }
+   if (unitID < 0) { return; }
+
+   // Clean up Diverting bookkeeping if we flee mid-divert. attemptedHerdIDs
+   // already records the herd; we don't re-attempt it, matching the
+   // "attempt once globally" rule.
+   if (gAutoScout_state[slot] == cAutoScoutState_Diverting)
+   {
+      gAutoScout_targetHerdID[slot] = -1;
+   }
+
+   vector scoutPos     = kbUnitGetPosition(unitID);
+   vector dangerCenter = kbAreaGetCenter(dangerAreaID);
+   // Polar flee: angle of scoutPos around dangerCenter is the away-direction.
+   // xsVectorTranslateXZ takes (vector, radius, theta) and returns vector +
+   // polar offset on the XZ plane. XS has no vector*scalar operator, so we
+   // go through polar form instead of normalize+scale.
+   float angle = xsVectorAngleAroundY(scoutPos, dangerCenter);
+   vector dest = xsVectorTranslateXZ(scoutPos, cAutoScout_FleeDistance, angle);
+
+   bool destOK = false;
+   if (autoScout_isOnMap(dest) == true)
+   {
+      int destArea = kbAreaGetIDByPosition(dest);
+      if (destArea >= 0)
+      {
+         int unitProto = kbUnitGetProtoUnitID(unitID);
+         if (kbCanPath(scoutPos, dest, unitProto, 1.0, -1) == true)
+         {
+            destOK = true;
+         }
+      }
+   }
+
+   if (destOK == true)
+   {
+      aiTaskMoveUnit(unitID, dest, false, false);
+   }
+
+   autoScout_releaseClaim(slot);
+   gAutoScout_state[slot]        = cAutoScoutState_Fleeing;
+   gAutoScout_fleeFromArea[slot] = dangerAreaID;
+   gAutoScout_fleeUntilMs[slot]  = xsGetTimeMS() + cAutoScout_FleeMinDurationMs;
+   gAutoScout_stuckTicks[slot]   = 0;
+
+   aiEcho("autoScout: FLEE slot=" + slot + " unit=" + unitID
+      + " from area=" + dangerAreaID + " dest=" + dest
+      + " destOK=" + destOK);
 }
 
 //------------------------------------------------------------------------------
