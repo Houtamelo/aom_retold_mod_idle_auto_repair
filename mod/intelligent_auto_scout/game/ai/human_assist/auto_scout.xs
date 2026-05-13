@@ -1345,12 +1345,16 @@ void autoScout_register(int planID = -1, int unitID = -1)
    // scouts because our state machine issues aiTaskMoveUnit every tick
    // (overriding any engine-plan move attempts). For oracles in Stationed
    // state we issue NO movement commands, so the engine's cPlanExplore takes
-   // over unless we additionally tell it not to loop. Empirically (playtest
-   // 2026-05-13), without DoLoops=false oracles wander the map vanilla-style
-   // while our state machine sits in Stationed thinking they're parked.
+   // over unless we additionally give it a stop-condition. Empirically
+   // (playtests 2026-05-13), with NumberOfLoops=0 alone OR with DoLoops=false
+   // added on top, oracles still wander the map vanilla-style. The third var
+   // (StopLOSPercentage) tells the engine "your current iteration is done
+   // when 20% of LOS area is unexplored" -- without it, the engine has no
+   // criterion to ever finish the iteration, so NumberOfLoops=0 never gets
+   // checked.
    if (kbUnitIsType(unitID, cUnitTypeAbstractOracle) == true)
    {
-      aiPlanSetVariableBool(planID, cExplorePlanDoLoops, 0, false);
+      aiPlanSetVariableFloat(planID, cExplorePlanStopLOSPercentage, 0, 0.2);
    }
 
    gAutoScout_unitID.add(unitID);
