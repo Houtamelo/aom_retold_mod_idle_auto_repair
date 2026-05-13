@@ -8,7 +8,7 @@ Herdables are handled along the way. A scout near a Gaia or enemy herdable will 
 
 Player commands always take priority. Pressing the cancel button on the auto-scout, or issuing any move/attack/garrison order to the scout, removes it from the pool and reverts to vanilla behavior. The button is the standard auto-scout UI button — there is no separate toggle.
 
-The mod applies to all `AbstractScout` units except Oracles, which retain their vanilla "stand still and grow LOS" auto-scout behavior because that mechanic is fundamentally different from a frontier walk. Scouts do not currently avoid enemy threats, so a scout walking past an enemy tower or town center on an aggressive map can die before completing its sweep.
+The mod applies to all `AbstractScout` units. Atlantean Oracles get their own state machine because their mechanic is fundamentally different from a frontier walk: they are picked a target area the same way as regular scouts (with an additional discount for areas already covered by another Oracle's growing LOS), walk there, then park and let their AutoLOS bonus saturate before re-picking. Multiple Oracles coordinate so they spread their saturation footprints across the map instead of stacking. Scouts do not currently avoid enemy threats, so a scout walking past an enemy tower or town center on an aggressive map can die before completing its sweep.
 
 The mod adds a single include line plus one function call to `game/ai/human_assist/human_assist.xs` and ships an `auto_scout.xs` file alongside it; that is the entire footprint.
 
@@ -41,6 +41,26 @@ The mod overlays vanilla `human_assist.xs`. After any Age of Mythology Retold pa
 4. Re-upload to the Age of Mythology Retold mod platform.
 
 `auto_scout.xs` itself is independent of vanilla and is generally unaffected by game patches.
+
+## Changelog
+
+**2026-05-13 — Oracle support**
+- Atlantean Oracles now have their own scouting behaviour: walk to a chosen area, park there, wait for LOS to saturate (engine action 37 / meditation animation), then re-pick a fresh target.
+- Multi-oracle coordination: hard-skip for areas within 80% of MaxOracleLOS of another oracle; regular scouts get a multiplicative score discount for areas near oracles. Pool-tracked oracles' target waypoints are considered alongside their current positions so newly-toggled oracles diverge instead of converging on the same destination.
+- Dynamic MaxOracleLOS cache adapts to god-tech upgrades and proto modifications.
+- Engine `cPlanExplore` is parked in `cPlanStateIdle` so it no longer drives the unit; our state machine has full control while the auto-scout UI button stays functional.
+
+**2026-05-04 — Herd diversion**
+- Scouts passing near a Gaia or enemy herdable briefly divert to claim it by walking close enough to flip ownership.
+- Any herdable that flips to your control (whether by intentional divert or by walking past it) is automatically routed to the nearest of your town centers via the engine's herd-on-TC delivery. Town Centers, Citadel Centers, and Village Centers all qualify.
+- Each herdable is attempted at most once globally across all your scouts.
+
+**Initial release — Frontier-based exploration**
+- Replaces the engine's auto-scout for land scouts (Oracles got their own pass later, see above).
+- Layered BFS over the map's area-adjacency graph picks targets scored by closeness to your main town center, closeness to the picking scout, and a density penalty against other scouts already heading to the same region.
+- Frontier-walk inside the chosen area sweeps until coverage is reached or the per-area step cap is hit.
+- Multi-scout coordination via per-area claims; scouts naturally fan out across the map.
+- Player commands and the auto-scout cancel button always take priority.
 
 ## License
 
