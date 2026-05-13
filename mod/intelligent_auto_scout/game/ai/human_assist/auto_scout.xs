@@ -103,6 +103,15 @@ const float cAutoScout_FleeDistance        = 25.0;
 const int   cAutoScout_FleeMinDurationMs   = 5000;
 const int   cAutoScout_BlacklistDurationMs = 90000;
 
+// Flee-area picker (autoScout_findFleeArea). BFS depth around the polar-
+// projected seed area, plus safety/distance weights. Safety is intentionally
+// an order of magnitude heavier than distance: we'd rather flee to a slightly
+// closer area that's much safer than to a far area that's only marginally
+// safer.
+const int   cAutoScout_FleeBfsDepth         = 4;
+const float cAutoScout_FleeWeightSafety     = 0.95;
+const float cAutoScout_FleeWeightDistance   = 0.05;
+
 // Other scouts beyond this distance from a candidate area do not influence
 // that area's density subscore.
 const float cAutoScout_DensityRadius = 30.0;
@@ -431,10 +440,119 @@ bool autoScout_isAreaBlacklisted(int areaID = -1)
    return(false);
 }
 
-// Transition slot/unit to FLEEING. Computes a flee target opposite the danger
-// area's center, issues a single aiTaskMoveUnit if the target is on-map and
-// reachable, releases area claim, sets a 5-second hold timer. The handler
-// keeps the scout in FLEEING until the timer expires regardless of arrival.
+// Picks a safe flee area for unitID fleeing dangerAreaID. Algorithm:
+//   1. Polar-project scoutPos along the away-from-dangerCenter direction by
+//      cAutoScout_FleeDistance. Clamp into map bounds.
+//   2. Look up the area containing that clamped seed position.
+//   3. Flood-fill BFS from seedArea up to cAutoScout_FleeBfsDepth (4) hops.
+//      Score every reachable area by safety (0.95) + distance-from-scout
+//      (0.05) -- safety is intentionally an order of magnitude more
+//      important than distance, so we always prefer the safest reachable
+//      area within the flee neighborhood and only use distance as a
+//      tiebreaker.
+//   4. Return the best-scoring area's ID, or -1 if no reachable area was
+//      found (caller will issue no move, scout holds in FLEEING for the
+//      timer).
+//
+// kbAreaGetDangerLevel is sampled with averageInBorderAreas=true so adjacent
+// dangerous areas leak into a flee candidate's score, biasing us away from
+// the perimeter of a danger pocket.
+int autoScout_findFleeArea(int scoutUnitID = -1, int dangerAreaID = -1)
+{
+   if (scoutUnitID < 0) { return(-1); }
+   if (dangerAreaID < 0) { return(-1); }
+
+   vector scoutPos     = kbUnitGetPosition(scoutUnitID);
+   vector dangerCenter = kbAreaGetCenter(dangerAreaID);
+   float angle         = xsVectorAngleAroundY(scoutPos, dangerCenter);
+   vector rawSeed      = xsVectorTranslateXZ(scoutPos, cAutoScout_FleeDistance, angle);
+   vector seedPos      = autoScout_clampToMap(rawSeed);
+   if (autoScout_isOnMap(seedPos) == false) { return(-1); }
+   int seedArea = kbAreaGetIDByPosition(seedPos);
+   if (seedArea < 0) { return(-1); }
+
+   int unitProto  = kbUnitGetProtoUnitID(scoutUnitID);
+   float mapX     = kbGetMapXSize();
+   float mapZ     = kbGetMapZSize();
+   float mapDiag  = sqrt(mapX * mapX + mapZ * mapZ);
+   if (mapDiag < 1.0) { mapDiag = 1.0; }
+
+   int areaCount = kbAreaGetNumber();
+   int[] visited    = new int(areaCount, 0);
+   int[] queue      = new int(0, 0);
+   int[] queueDepth = new int(0, 0);
+   queue.add(seedArea);
+   queueDepth.add(0);
+   visited[seedArea] = 1;
+
+   int bestArea = -1;
+   float bestScore = -1.0e18;
+
+   int head = 0;
+   while (head < queue.size())
+   {
+      int areaID = queue[head];
+      int depth  = queueDepth[head];
+      head = head + 1;
+
+      // Score the area if it's valid + reachable. No hard filter on danger
+      // or blacklist -- they enter the safety subscore instead. The danger
+      // area itself naturally scores 0 (or negative offset) on safety, so
+      // it's effectively excluded unless every alternative is worse.
+      if (kbAreaGetIsIDValid(areaID) == true)
+      {
+         vector areaPos = kbAreaGetCenter(areaID);
+         if (autoScout_isOnMap(areaPos) == true)
+         {
+            if (kbCanPath(scoutPos, areaPos, unitProto, 1.0, -1) == true)
+            {
+               float danger = kbAreaGetDangerLevel(areaID, true);
+               float dRatio = danger / cAutoScout_DangerHardSkip;
+               if (dRatio < 0.0) { dRatio = 0.0; }
+               if (dRatio > 1.0) { dRatio = 1.0; }
+               float safetyScore = 1.0 - dRatio;
+
+               float distFromScout = xsVectorDistanceXZ(scoutPos, areaPos);
+               float distScore = distFromScout / mapDiag;
+               if (distScore < 0.0) { distScore = 0.0; }
+               if (distScore > 1.0) { distScore = 1.0; }
+
+               float score = cAutoScout_FleeWeightSafety * safetyScore
+                           + cAutoScout_FleeWeightDistance * distScore;
+               if (score > bestScore)
+               {
+                  bestScore = score;
+                  bestArea  = areaID;
+               }
+            }
+         }
+      }
+
+      // Expand neighbors only while still under the depth cap.
+      if (depth < cAutoScout_FleeBfsDepth)
+      {
+         int n = kbAreaGetNumberBorderAreas(areaID);
+         for (int j = 0; j < n; j = j + 1)
+         {
+            int next = kbAreaGetBorderAreaID(areaID, j);
+            if (next < 0 || next >= areaCount) { continue; }
+            if (visited[next] == 1) { continue; }
+            visited[next] = 1;
+            queue.add(next);
+            queueDepth.add(depth + 1);
+         }
+      }
+   }
+
+   return(bestArea);
+}
+
+// Transition slot/unit to FLEEING. Picks a flee target via autoScout_findFleeArea
+// (safety-weighted BFS from a polar-projected seed), issues an aiTaskMoveUnit
+// to the chosen area's centroid, releases area claim, sets a 5-second hold
+// timer. The handler keeps the scout in FLEEING until the timer expires
+// regardless of arrival; if no flee area was found, no move is issued and the
+// scout simply holds in place until the timer expires.
 void autoScout_enterFleeing(int slot = -1, int unitID = -1, int dangerAreaID = -1)
 {
    if (slot < 0) { return; }
@@ -448,34 +566,15 @@ void autoScout_enterFleeing(int slot = -1, int unitID = -1, int dangerAreaID = -
       gAutoScout_targetHerdID[slot] = -1;
    }
 
-   vector scoutPos     = kbUnitGetPosition(unitID);
-   vector dangerCenter = kbAreaGetCenter(dangerAreaID);
-   // Polar flee: angle of scoutPos around dangerCenter is the away-direction.
-   // xsVectorTranslateXZ takes (vector, radius, theta) and returns vector +
-   // polar offset on the XZ plane. XS has no vector*scalar operator, so we
-   // go through polar form instead of normalize+scale.
-   float angle = xsVectorAngleAroundY(scoutPos, dangerCenter);
-   vector rawDest = xsVectorTranslateXZ(scoutPos, cAutoScout_FleeDistance, angle);
-   // Clamp into map bounds so polar overshoot near a map edge doesn't drop
-   // destOK to false and freeze the scout in place. The engine will accept
-   // an unreachable move and silently stop the unit if pathing fails, which
-   // is no worse than standing still -- so we don't pre-gate on kbCanPath.
-   vector dest = autoScout_clampToMap(rawDest);
+   int fleeArea = autoScout_findFleeArea(unitID, dangerAreaID);
 
-   int destArea = -1;
-   if (autoScout_isOnMap(dest) == true)
-   {
-      destArea = kbAreaGetIDByPosition(dest);
-   }
-   float destDanger = 0.0;
-   if (destArea >= 0)
-   {
-      destDanger = kbAreaGetDangerLevel(destArea, true);
-   }
-
+   vector dest = kbUnitGetPosition(unitID);
+   float destDanger = -1.0;
    bool issuedMove = false;
-   if (autoScout_isOnMap(dest) == true)
+   if (fleeArea >= 0)
    {
+      dest = kbAreaGetCenter(fleeArea);
+      destDanger = kbAreaGetDangerLevel(fleeArea, true);
       aiTaskMoveUnit(unitID, dest, false, false);
       issuedMove = true;
    }
@@ -487,9 +586,8 @@ void autoScout_enterFleeing(int slot = -1, int unitID = -1, int dangerAreaID = -
    gAutoScout_stuckTicks[slot]   = 0;
 
    aiEcho("autoScout: FLEE slot=" + slot + " unit=" + unitID
-      + " from area=" + dangerAreaID
-      + " rawDest=" + rawDest + " dest=" + dest
-      + " destArea=" + destArea + " destDanger=" + destDanger
+      + " fromArea=" + dangerAreaID + " toArea=" + fleeArea
+      + " dest=" + dest + " destDanger=" + destDanger
       + " issuedMove=" + issuedMove);
 }
 
