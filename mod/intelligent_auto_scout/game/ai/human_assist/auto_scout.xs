@@ -103,11 +103,26 @@ const int   cAutoScout_FleeMinDurationMs   = 5000;
 const int   cAutoScout_BlacklistDurationMs = 90000;
 
 // Baseline effective danger applied to fully-unexplored areas (where we have
-// no ground-truth and the engine's kbAreaGetDangerLevel is unreliable). For
-// fully-explored areas we trust the engine's reading; we blend linearly
-// between the two by the fraction of explored tiles. See
-// autoScout_effectiveDanger.
+// no ground-truth). For fully-explored areas we trust our own heat-map
+// (gAutoScout_heat[]); we blend linearly between the two by the fraction of
+// explored tiles. See autoScout_effectiveDanger.
 const float cAutoScout_DangerBaseline      = 20.0;
+
+// Heat-map parameters. Per-area float array updated each tick from a
+// kbUnitQuery of visible enemy threats. Replaces kbAreaGetDangerLevel as the
+// signal for the "explored" portion of an area's effective danger.
+//
+//   cAutoScout_HeatMinDPS:       per-threat DPS gate (filters out enemy scouts).
+//   cAutoScout_HeatRangeDivisor: contribution = DPS * (range / divisor).
+//   cAutoScout_HeatSpreadMaxDist: 1-hop spread to border areas weighted
+//                                 linearly (weight = 1 - dist/max, clamped).
+//   cAutoScout_HeatDecayPerCool: linear decay applied every cooldown tick.
+//   cAutoScout_HeatCooldownInterval: tick count between decay passes.
+const float cAutoScout_HeatMinDPS           = 4.0;
+const float cAutoScout_HeatRangeDivisor     = 10.0;
+const float cAutoScout_HeatSpreadMaxDist    = 50.0;
+const float cAutoScout_HeatDecayPerCool     = 1.0;
+const int   cAutoScout_HeatCooldownInterval = 10;
 
 // Flee-area picker (autoScout_findFleeArea). BFS expands outward from the
 // scout's current area up to cAutoScout_FleeBfsDepth hops, refusing to
@@ -190,6 +205,26 @@ extern int[] gAutoScout_fleeFromArea  = default;
 // the number of distinct dangerous areas seen, which is small in practice.
 extern int[] gAutoScout_blacklistedAreaIDs  = default;
 extern int[] gAutoScout_blacklistedExpiryMs = default;
+
+// Per-area heat-map. Indexed by areaID, sized to kbAreaGetNumber() at first
+// rule firing (autoScout_initHeatArray). Updated each tick by
+// autoScout_updateHeatMap and decayed every cAutoScout_HeatCooldownInterval
+// ticks by autoScout_decayHeat.
+extern float[] gAutoScout_heat       = default;
+extern bool    gAutoScout_heatInited = false;
+extern int     gAutoScout_heatCooldownCounter = 0;
+
+// Cached threat-query handle for the heat-map update.
+extern int gAutoScout_threatQuery = -1;
+
+// Per-proto threat profile cache. Parallel arrays:
+//   ID:           proto unit type ID (key)
+//   isThreat:     1 if peak DPS > cAutoScout_HeatMinDPS, else 0
+//   contribution: max DPS * range / divisor across attack actions
+// Linear scan; the proto set we encounter in a game is small (~20-50 distinct).
+extern int[]   gAutoScout_protoThreatID     = default;
+extern int[]   gAutoScout_protoThreatIsT    = default;
+extern float[] gAutoScout_protoThreatContrib = default;
 
 // Diagnostic counters for one BFS pass (reset at top of findNextArea, echoed
 // at every return path). Used to triage "scout immediately untoggles" issues
@@ -394,22 +429,212 @@ vector autoScout_clampToMap(vector pos = cInvalidVector)
 }
 
 //------------------------------------------------------------------------------
+// Heat-map (2026-05-13). Per-area float, rebuilt each tick from visible enemy
+// threats; replaces kbAreaGetDangerLevel as the danger signal for the
+// "explored" portion of an area in autoScout_effectiveDanger.
+//------------------------------------------------------------------------------
+
+// Lazy-init heat array sized to the current map's area count.
+void autoScout_initHeatArray()
+{
+   if (gAutoScout_heatInited == true) { return; }
+   int areaCount = kbAreaGetNumber();
+   for (int i = 0; i < areaCount; i = i + 1)
+   {
+      gAutoScout_heat.add(0.0);
+   }
+   gAutoScout_heatInited = true;
+}
+
+// True if the given cActionType integer is an attack-style action.
+bool autoScout_isAttackActionType(int actionType = -1)
+{
+   if (actionType == 4)  { return(true); }   // HandAttack
+   if (actionType == 10) { return(true); }   // RangedAttack
+   if (actionType == 15) { return(true); }   // Attack
+   if (actionType == 39) { return(true); }   // BombardAttack
+   if (actionType == 40) { return(true); }   // BroadsideAttack
+   if (actionType == 56) { return(true); }   // Bombard
+   if (actionType == 64) { return(true); }   // TruckAttack
+   if (actionType == 68) { return(true); }   // StunAttack
+   if (actionType == 79) { return(true); }   // RoundelAttack
+   if (actionType == 80) { return(true); }   // RoundelMultiAttack
+   return(false);
+}
+
+// Compute (isThreat, contribution) for a proto by iterating its actions.
+// Threshold: any single attack action with DPS > cAutoScout_HeatMinDPS makes
+// the proto a threat. Contribution = max across attack actions of
+// (DPS * range / cAutoScout_HeatRangeDivisor). Damage is summed over the
+// four trigger damage types (Hack=0, Pierce=1, Crush=2, Divine=3).
+void autoScout_computeProtoThreat(int proto = -1, int outSlot = -1)
+{
+   if (proto < 0) { return; }
+   bool isThreat = false;
+   float bestContrib = 0.0;
+
+   int[] actionIDs = kbProtoUnitGetActionIDs(cMyID, proto);
+   int n = actionIDs.size();
+   for (int i = 0; i < n; i = i + 1)
+   {
+      int actionType = actionIDs[i];
+      if (autoScout_isAttackActionType(actionType) == false) { continue; }
+      string actionName = kbActionGetName(actionType);
+      if (actionName == "") { continue; }
+
+      float rof = kbProtoUnitGetActionStatFloat(cMyID, proto, actionName, 0);
+      if (rof <= 0.0) { continue; }
+      float range = kbProtoUnitGetActionMaximumRange(cMyID, proto, actionName, -1);
+      if (range < 0.0) { range = 0.0; }
+
+      float dmgHack   = kbProtoUnitGetActionDamageForType(cMyID, proto, actionName, 0);
+      float dmgPierce = kbProtoUnitGetActionDamageForType(cMyID, proto, actionName, 1);
+      float dmgCrush  = kbProtoUnitGetActionDamageForType(cMyID, proto, actionName, 2);
+      float dmgDivine = kbProtoUnitGetActionDamageForType(cMyID, proto, actionName, 3);
+      float dmgTotal  = dmgHack + dmgPierce + dmgCrush + dmgDivine;
+      if (dmgTotal <= 0.0) { continue; }
+
+      float dps = dmgTotal / rof;
+      if (dps <= cAutoScout_HeatMinDPS) { continue; }
+
+      isThreat = true;
+      float contrib = dps * range / cAutoScout_HeatRangeDivisor;
+      if (contrib > bestContrib) { bestContrib = contrib; }
+   }
+
+   // Write into cache at outSlot (caller has already appended the row).
+   if (outSlot >= 0 && outSlot < gAutoScout_protoThreatID.size())
+   {
+      if (isThreat == true)
+      {
+         gAutoScout_protoThreatIsT[outSlot]      = 1;
+         gAutoScout_protoThreatContrib[outSlot] = bestContrib;
+      }
+   }
+}
+
+// Returns the cached threat contribution for proto, computing it on first
+// encounter. Returns 0.0 if the proto is not a threat.
+float autoScout_protoThreatContribution(int proto = -1)
+{
+   if (proto < 0) { return(0.0); }
+   int n = gAutoScout_protoThreatID.size();
+   for (int i = 0; i < n; i = i + 1)
+   {
+      if (gAutoScout_protoThreatID[i] == proto)
+      {
+         if (gAutoScout_protoThreatIsT[i] == 1)
+         {
+            return(gAutoScout_protoThreatContrib[i]);
+         }
+         return(0.0);
+      }
+   }
+   // First encounter: append a row with default-not-threat, then compute.
+   int slot = gAutoScout_protoThreatID.size();
+   gAutoScout_protoThreatID.add(proto);
+   gAutoScout_protoThreatIsT.add(0);
+   gAutoScout_protoThreatContrib.add(0.0);
+   autoScout_computeProtoThreat(proto, slot);
+   if (gAutoScout_protoThreatIsT[slot] == 1)
+   {
+      return(gAutoScout_protoThreatContrib[slot]);
+   }
+   return(0.0);
+}
+
+// Initialise the cached enemy-threat query (all enemy units, alive).
+void autoScout_initThreatQuery()
+{
+   if (gAutoScout_threatQuery >= 0) { return; }
+   gAutoScout_threatQuery = kbUnitQueryCreate("autoScout_threats");
+   kbUnitQuerySetPlayerRelation(gAutoScout_threatQuery, cPlayerRelationEnemy, false);
+   kbUnitQuerySetState(gAutoScout_threatQuery, cUnitStateAlive);
+}
+
+// Update heat-map: scan visible enemy threats, attribute their contribution
+// to their area (and 1-hop neighbors with linear distance falloff). Uses
+// max-with-existing semantics so the same threat observed across many ticks
+// doesn't pile up unboundedly; decay (autoScout_decayHeat) is what lets the
+// map forget vanished threats.
+void autoScout_updateHeatMap()
+{
+   autoScout_initHeatArray();
+   autoScout_initThreatQuery();
+   if (gAutoScout_threatQuery < 0) { return; }
+   kbUnitQueryResetResults(gAutoScout_threatQuery);
+   int n = kbUnitQueryExecute(gAutoScout_threatQuery);
+   if (n <= 0) { return; }
+
+   for (int i = 0; i < n; i = i + 1)
+   {
+      int unitID = kbUnitQueryGetResult(gAutoScout_threatQuery, i);
+      if (unitID < 0) { continue; }
+      if (kbUnitGetIsIDValid(unitID) == false) { continue; }
+      int proto = kbUnitGetProtoUnitID(unitID);
+      float contrib = autoScout_protoThreatContribution(proto);
+      if (contrib <= 0.0) { continue; }
+
+      vector unitPos = kbUnitGetPosition(unitID);
+      if (autoScout_isOnMap(unitPos) == false) { continue; }
+      int area = kbAreaGetIDByPosition(unitPos);
+      if (area < 0) { continue; }
+      if (area >= gAutoScout_heat.size()) { continue; }
+
+      // Max into the unit's own area.
+      if (contrib > gAutoScout_heat[area])
+      {
+         gAutoScout_heat[area] = contrib;
+      }
+
+      // Spread to 1-hop neighbors with linear distance falloff. Distance is
+      // between area centers; weight = max(0, 1 - dist / HeatSpreadMaxDist).
+      vector areaPos = kbAreaGetCenter(area);
+      int borderCount = kbAreaGetNumberBorderAreas(area);
+      for (int b = 0; b < borderCount; b = b + 1)
+      {
+         int nbr = kbAreaGetBorderAreaID(area, b);
+         if (nbr < 0) { continue; }
+         if (nbr >= gAutoScout_heat.size()) { continue; }
+         vector nbrPos = kbAreaGetCenter(nbr);
+         float dist = xsVectorDistanceXZ(areaPos, nbrPos);
+         float weight = 1.0 - dist / cAutoScout_HeatSpreadMaxDist;
+         if (weight <= 0.0) { continue; }
+         float spread = contrib * weight;
+         if (spread > gAutoScout_heat[nbr])
+         {
+            gAutoScout_heat[nbr] = spread;
+         }
+      }
+   }
+}
+
+// Linear decay applied every cAutoScout_HeatCooldownInterval ticks.
+void autoScout_decayHeat()
+{
+   int n = gAutoScout_heat.size();
+   for (int i = 0; i < n; i = i + 1)
+   {
+      float v = gAutoScout_heat[i] - cAutoScout_HeatDecayPerCool;
+      if (v < 0.0) { v = 0.0; }
+      gAutoScout_heat[i] = v;
+   }
+}
+
+//------------------------------------------------------------------------------
 // Danger / blacklist helpers (2026-05-13)
 //------------------------------------------------------------------------------
 
 // Effective danger of an area, blending baseline (for unexplored portions
-// where we have no ground-truth and the engine's heuristic is noisy/
-// unreliable) with the engine's reading (for explored portions where it
-// reflects observed threats):
+// where we have no ground-truth) with our heat-map (for explored portions
+// where it reflects threats we've observed):
 //
 //   explore_percent = 1.0 - blackTiles / totalTiles
-//   danger = baseline * (1 - explore_percent) + engine_danger * explore_percent
+//   danger = baseline * (1 - explore_percent) + heat[area] * explore_percent
 //
-// Fully unexplored area -> baseline (presumed safe at baseline level,
-// scouts will still happily go there). Fully explored area -> engine
-// reading, which reflects enemies observed by our scouts and the engine's
-// per-tile-LOS bookkeeping. averageInBorderAreas=true on the engine call
-// gives 1-hop visibility leak across area boundaries.
+// Fully unexplored area -> baseline (presumed safe; scouts will go there).
+// Fully explored area -> heat[area] = sum of nearby observed threats (towers,
+// military with DPS > cAutoScout_HeatMinDPS). Mixed areas blend linearly.
 float autoScout_effectiveDanger(int areaID = -1)
 {
    if (areaID < 0) { return(cAutoScout_DangerBaseline); }
@@ -421,9 +646,13 @@ float autoScout_effectiveDanger(int areaID = -1)
    if (blackFrac < 0.0) { blackFrac = 0.0; }
    if (blackFrac > 1.0) { blackFrac = 1.0; }
    float explorePercent = 1.0 - blackFrac;
-   float engineDanger = kbAreaGetDangerLevel(areaID, true);
+   float heatDanger = 0.0;
+   if (gAutoScout_heatInited == true && areaID < gAutoScout_heat.size())
+   {
+      heatDanger = gAutoScout_heat[areaID];
+   }
    return(cAutoScout_DangerBaseline * (1.0 - explorePercent)
-        + engineDanger * explorePercent);
+        + heatDanger * explorePercent);
 }
 
 // Wrapper used by hard-skip / path-aware-block / per-tick flee trigger.
@@ -487,9 +716,10 @@ bool autoScout_isAreaBlacklisted(int areaID = -1)
 //   4. Return the best-scoring area's ID, or -1 if no reachable area was
 //      found (caller issues no move, scout holds in FLEEING for the timer).
 //
-// kbAreaGetDangerLevel is sampled with averageInBorderAreas=true so adjacent
-// dangerous areas leak into a flee candidate's score, biasing us away from
-// the perimeter of a danger pocket.
+// Danger is read via autoScout_effectiveDanger, which blends baseline (for
+// unexplored portions) with our per-tick heat-map (for explored portions).
+// The heat-map's 1-hop spread covers adjacent-danger leakage so we don't
+// need averageInBorderAreas-style smoothing inside this BFS.
 int autoScout_findFleeArea(int scoutUnitID = -1, int dangerAreaID = -1)
 {
    if (scoutUnitID < 0) { return(-1); }
@@ -2019,6 +2249,17 @@ active
 {
    xsSetContextPlayer(cMyID);
    autoScout_initAreaArrays();
+
+   // Heat-map: refresh every tick (max-with-existing semantics; observation
+   // doesn't accumulate). Decay sparsely every cAutoScout_HeatCooldownInterval
+   // ticks so vanished threats fade naturally.
+   gAutoScout_heatCooldownCounter = gAutoScout_heatCooldownCounter + 1;
+   if (gAutoScout_heatCooldownCounter >= cAutoScout_HeatCooldownInterval)
+   {
+      autoScout_decayHeat();
+      gAutoScout_heatCooldownCounter = 0;
+   }
+   autoScout_updateHeatMap();
 
    for (int slot = gAutoScout_unitID.size() - 1; slot >= 0; slot = slot - 1)
    {
