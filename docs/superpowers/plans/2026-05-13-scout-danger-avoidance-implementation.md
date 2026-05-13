@@ -6,13 +6,13 @@
 
 **Architecture:** One danger source (`kbAreaGetDangerLevel(areaID, true)`); one mutable blacklist of `(areaID, expiryMs)` pairs; one new state `cAutoScoutState_Fleeing`. Three integration points: BFS pick (`autoScout_scoreArea` + `autoScout_areaIsCandidate`), per-tick check at top of non-Idle state handlers, and a new FLEEING handler that issues an opposite-direction `aiTaskMoveUnit` and holds the scout for 5 seconds.
 
-**Tech Stack:** XS (Age of Mythology Retold AI scripting). Two source files modified: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` AND `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs`. No tests (XS has no harness); verification is parse-by-deploy + in-game `aiEcho` log inspection.
+**Tech Stack:** XS (Age of Mythology Retold AI scripting). Single source file modified: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs`. The combined mod (`intelligent_auto_repair_and_scout`) inherits this file at deploy time via `scripts/deploy-mods.sh` — no second source copy exists in `mod/intelligent_auto_repair_and_scout/` (only the unified `human_assist.xs` lives there). No tests (XS has no harness); verification is parse-by-deploy + in-game `aiEcho` log inspection.
 
 **Spec:** `docs/superpowers/specs/2026-05-13-scout-danger-avoidance-design.md`.
 
 **Important context for implementers:**
 - **Hard rule:** never write to the AoM:R game folder while the game is running. The deploy script (`scripts/deploy-mods.sh`) is invoked manually by the user after each task batch when they're not playing.
-- **Mirror the change to BOTH source files** (`intelligent_auto_scout` AND `intelligent_auto_repair_and_scout`). The user playtests with the combined mod; skipping the combined source means the change won't ship.
+- **Only one source copy of `auto_scout.xs` exists.** `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/` only contains `human_assist.xs`; `auto_scout.xs` is pulled from `mod/intelligent_auto_scout/` at deploy time by `scripts/deploy-mods.sh`.
 - **XS quirks** (project memory):
   - Locals use `new <type>(size, value)`, NOT `= default`. `default` is for `extern` globals only.
   - Don't combine `&&` + integer math + `>=` in one `if` — split into intermediate variables. (Pure boolean `&&` chains without int-math are fine.)
@@ -24,9 +24,8 @@
 
 ## File Structure
 
-Two parallel files modified identically:
+Single file modified:
 1. `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` (~1594 lines today, +~120 after this plan).
-2. `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs` (mirror).
 
 Edits land in five existing sections + one new function block, in source order:
 1. Constants block (top of file, near line 15) — add `cAutoScoutState_Fleeing` + the 5 tunable constants.
@@ -42,7 +41,6 @@ Edits land in five existing sections + one new function block, in source order:
 
 **Files:**
 - Modify: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` (constants block near line 15)
-- Modify: `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs` (mirror)
 
 - [ ] **Step 1: Add new state value after `cAutoScoutState_Stationed = 4`**
 
@@ -97,15 +95,10 @@ const float cAutoScout_WeightDensity = 0.15;
 
 (0.35 + 0.35 + 0.15 + 0.15 = 1.0)
 
-- [ ] **Step 4: Mirror Steps 1-3 verbatim into the combined-mod source file**
-
-Run the same three edits on `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs`.
-
 - [ ] **Step 5: Commit**
 
 ```bash
-git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs \
-        mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs
+git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs
 git commit --no-gpg-sign -m "feat(scout): add danger-avoidance constants
 
 cAutoScoutState_Fleeing=5, cAutoScout_DangerHardSkip=5.0,
@@ -121,7 +114,6 @@ room for the new 0.15 danger weight (sum stays 1.0)."
 
 **Files:**
 - Modify: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` (globals block near line 120)
-- Modify: `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs` (mirror)
 
 - [ ] **Step 1: Add per-scout flee state arrays after `gAutoScout_targetHerdID`**
 
@@ -155,13 +147,10 @@ extern int[] gAutoScout_blacklistedAreaIDs  = default;
 extern int[] gAutoScout_blacklistedExpiryMs = default;
 ```
 
-- [ ] **Step 3: Mirror to combined-mod source**
-
 - [ ] **Step 4: Commit**
 
 ```bash
-git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs \
-        mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs
+git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs
 git commit --no-gpg-sign -m "feat(scout): add globals for flee state + danger blacklist"
 ```
 
@@ -171,7 +160,6 @@ git commit --no-gpg-sign -m "feat(scout): add globals for flee state + danger bl
 
 **Files:**
 - Modify: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` (`autoScout_register` near line 1350, `autoScout_dropFromPool` near line 282)
-- Modify: `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs` (mirror)
 
 The two new per-scout fields (`gAutoScout_fleeUntilMs`, `gAutoScout_fleeFromArea`) need to be appended in `autoScout_register` and `removeIndex`'d in `autoScout_dropFromPool` so slot indices stay aligned.
 
@@ -205,13 +193,10 @@ Append:
    gAutoScout_fleeFromArea.removeIndex(slot);
 ```
 
-- [ ] **Step 3: Mirror to combined-mod source**
-
 - [ ] **Step 4: Commit**
 
 ```bash
-git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs \
-        mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs
+git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs
 git commit --no-gpg-sign -m "feat(scout): track flee fields in pool register/drop"
 ```
 
@@ -221,7 +206,6 @@ git commit --no-gpg-sign -m "feat(scout): track flee fields in pool register/dro
 
 **Files:**
 - Modify: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` (insert new helper block after `autoScout_dropFromPool`, near line 310)
-- Modify: `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs` (mirror)
 
 - [ ] **Step 1: Add the helper block**
 
@@ -278,13 +262,10 @@ bool autoScout_isAreaBlacklisted(int areaID = -1)
 }
 ```
 
-- [ ] **Step 2: Mirror to combined-mod source**
-
 - [ ] **Step 3: Commit**
 
 ```bash
-git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs \
-        mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs
+git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs
 git commit --no-gpg-sign -m "feat(scout): add danger + blacklist helpers"
 ```
 
@@ -294,7 +275,6 @@ git commit --no-gpg-sign -m "feat(scout): add danger + blacklist helpers"
 
 **Files:**
 - Modify: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` (extend the helper block from Task 4)
-- Modify: `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs` (mirror)
 
 - [ ] **Step 1: Append `autoScout_enterFleeing` after `autoScout_isAreaBlacklisted`**
 
@@ -344,13 +324,10 @@ void autoScout_enterFleeing(int slot = -1, int unitID = -1, int dangerAreaID = -
 }
 ```
 
-- [ ] **Step 2: Mirror to combined-mod source**
-
 - [ ] **Step 3: Commit**
 
 ```bash
-git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs \
-        mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs
+git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs
 git commit --no-gpg-sign -m "feat(scout): add autoScout_enterFleeing"
 ```
 
@@ -360,7 +337,6 @@ git commit --no-gpg-sign -m "feat(scout): add autoScout_enterFleeing"
 
 **Files:**
 - Modify: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` (`autoScout_areaIsCandidate` near line 649; `autoScout_scoreArea` near line 700-750)
-- Modify: `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs` (mirror)
 
 - [ ] **Step 1: Hard-skip in `autoScout_areaIsCandidate`**
 
@@ -405,13 +381,10 @@ Then replace the `baseScore` assignment with the four-weight blend:
                    + cAutoScout_DangerWeight * dangerScore;
 ```
 
-- [ ] **Step 3: Mirror to combined-mod source**
-
 - [ ] **Step 4: Commit**
 
 ```bash
-git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs \
-        mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs
+git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs
 git commit --no-gpg-sign -m "feat(scout): danger-aware BFS pick
 
 Hard-skip blacklisted + over-threshold-danger areas in
@@ -425,7 +398,6 @@ autoScout_scoreArea. dangerScore = 1.0 - clamp01(danger/threshold)."
 
 **Files:**
 - Modify: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` (`autoScout_tickUnit`, near line 1128)
-- Modify: `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs` (mirror)
 
 The check goes after the validity/oracle-routing block but before the Idle handler. This way Idle is unaffected (Idle just re-picks, which already respects hard-skip), and Walking/Working/Diverting all get covered by a single check.
 
@@ -471,13 +443,10 @@ Immediately before `int state = ...`, insert:
    }
 ```
 
-- [ ] **Step 2: Mirror to combined-mod source**
-
 - [ ] **Step 3: Commit**
 
 ```bash
-git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs \
-        mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs
+git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs
 git commit --no-gpg-sign -m "feat(scout): per-tick danger check in regular tickUnit"
 ```
 
@@ -487,7 +456,6 @@ git commit --no-gpg-sign -m "feat(scout): per-tick danger check in regular tickU
 
 **Files:**
 - Modify: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` (`autoScout_tickOracleUnit`, near line 1025)
-- Modify: `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs` (mirror)
 
 - [ ] **Step 1: Add the same danger-check block as Task 7, placed after `autoScout_updateMaxOracleLOS` and before the Diverting branch**
 
@@ -532,13 +500,10 @@ Just before `float los = ...`, insert:
    }
 ```
 
-- [ ] **Step 2: Mirror to combined-mod source**
-
 - [ ] **Step 3: Commit**
 
 ```bash
-git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs \
-        mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs
+git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs
 git commit --no-gpg-sign -m "feat(scout): per-tick danger check for oracles"
 ```
 
@@ -548,7 +513,6 @@ git commit --no-gpg-sign -m "feat(scout): per-tick danger check for oracles"
 
 **Files:**
 - Modify: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` (both `autoScout_tickUnit` and `autoScout_tickOracleUnit`)
-- Modify: `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs` (mirror)
 
 The FLEEING handler is identical for oracles and regular scouts: hold until timer, then transition to Idle. Add it to both tick functions.
 
@@ -584,13 +548,10 @@ Locate the equivalent end-of-function area (after the defensive `Working → Sta
    }
 ```
 
-- [ ] **Step 3: Mirror to combined-mod source**
-
 - [ ] **Step 4: Commit**
 
 ```bash
-git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs \
-        mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs
+git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs
 git commit --no-gpg-sign -m "feat(scout): FLEEING state handler
 
 Hold scout in FLEEING until xsGetTime() > fleeUntilMs, then transition to
@@ -603,7 +564,6 @@ Idle. BFS picks fresh from the new position; blacklisted area is excluded."
 
 **Files:**
 - Modify: `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs` (`autoScout_tickDivertingState`, near line 963)
-- Modify: `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs` (mirror)
 
 Diverting is covered by the top-of-tick check from Tasks 7 and 8 — but those checks only look at `gAutoScout_targetAreaID`, which Diverting may not have set (the scout is chasing a herd, not an area target). The current-area check still fires for Diverting and catches "scout walked into a tower while chasing a herd". This task just adds the herd-id cleanup on flee from Diverting.
 
@@ -621,13 +581,10 @@ Update `autoScout_enterFleeing` (added in Task 5). After the initial validity gu
    }
 ```
 
-- [ ] **Step 2: Mirror to combined-mod source**
-
 - [ ] **Step 3: Commit**
 
 ```bash
-git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs \
-        mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs
+git add mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs
 git commit --no-gpg-sign -m "feat(scout): clear herd target when fleeing from Diverting"
 ```
 
@@ -649,20 +606,11 @@ grep -nE "cAutoScoutState_Fleeing|cAutoScout_(DangerHardSkip|DangerWeight|FleeDi
 
 Expected: each helper called from at least one place; each constant referenced in code (not only in its declaration).
 
-- [ ] **Step 2: Verify combined-mod parity**
-
-```bash
-diff mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs \
-     mod/intelligent_auto_repair_and_scout/game/ai/human_assist/auto_scout.xs
-```
-
-Expected: no diff (the two source files for `auto_scout.xs` should be byte-identical).
-
-- [ ] **Step 3: Confirm forward-reference safety**
+- [ ] **Step 2: Confirm forward-reference safety**
 
 `autoScout_enterFleeing` is called from `autoScout_tickUnit` and `autoScout_tickOracleUnit` (Tasks 7-8). It's defined in the helper block from Task 5, which is above both tick functions in source order. XS within-file forward refs work anyway, but this confirms there's no implicit ordering bug.
 
-- [ ] **Step 4: (User-driven) Deploy and playtest**
+- [ ] **Step 3: (User-driven) Deploy and playtest**
 
 User runs `scripts/deploy-mods.sh` when the game is closed. First playtest will surface the actual `kbAreaGetDangerLevel` value range via the `aiEcho` lines added in Task 5. Expect to retune `cAutoScout_DangerHardSkip` after seeing the first 1-3 abort events.
 
