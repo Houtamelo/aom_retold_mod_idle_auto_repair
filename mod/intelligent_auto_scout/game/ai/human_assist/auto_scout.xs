@@ -1168,6 +1168,34 @@ bool autoScout_tickOracleUnit(int slot = -1)
    // of which state branch we hit.
    autoScout_updateMaxOracleLOS(unitID);
 
+   // Danger check: same logic as regular tickUnit. Applies to all non-Idle
+   // non-Fleeing oracle states (Walking / Stationed / Diverting).
+   int preState = gAutoScout_state[slot];
+   if (preState != cAutoScoutState_Idle && preState != cAutoScoutState_Fleeing)
+   {
+      vector unitPos = kbUnitGetPosition(unitID);
+      int currentArea = -1;
+      if (autoScout_isOnMap(unitPos) == true)
+      {
+         currentArea = kbAreaGetIDByPosition(unitPos);
+      }
+      int targetArea = gAutoScout_targetAreaID[slot];
+
+      if (currentArea >= 0 && autoScout_areaIsDangerous(currentArea) == true)
+      {
+         autoScout_blacklistArea(currentArea);
+         autoScout_enterFleeing(slot, unitID, currentArea);
+         return(true);
+      }
+      if (targetArea >= 0 && targetArea != currentArea
+          && autoScout_areaIsDangerous(targetArea) == true)
+      {
+         autoScout_blacklistArea(targetArea);
+         autoScout_enterFleeing(slot, unitID, targetArea);
+         return(true);
+      }
+   }
+
    float los = kbUnitGetStatFloat(unitID, cUnitStatLOS);
    int   state = gAutoScout_state[slot];
 
