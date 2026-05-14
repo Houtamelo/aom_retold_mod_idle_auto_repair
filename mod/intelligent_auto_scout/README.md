@@ -8,7 +8,9 @@ Herdables are handled along the way. A scout near a Gaia or enemy herdable will 
 
 Player commands always take priority. Pressing the cancel button on the auto-scout, or issuing any move/attack/garrison order to the scout, removes it from the pool and reverts to vanilla behavior. The button is the standard auto-scout UI button — there is no separate toggle.
 
-The mod applies to all `AbstractScout` units. Atlantean Oracles get their own state machine because their mechanic is fundamentally different from a frontier walk: they are picked a target area the same way as regular scouts (with an additional discount for areas already covered by another Oracle's growing LOS), walk there, then park and let their AutoLOS bonus saturate before re-picking. Multiple Oracles coordinate so they spread their saturation footprints across the map instead of stacking. Scouts do not currently avoid enemy threats, so a scout walking past an enemy tower or town center on an aggressive map can die before completing its sweep.
+The mod applies to all `AbstractScout` units. Atlantean Oracles get their own state machine because their mechanic is fundamentally different from a frontier walk: they are picked a target area the same way as regular scouts (with an additional discount for areas already covered by another Oracle's growing LOS), walk there, then park and let their AutoLOS bonus saturate before re-picking. Multiple Oracles coordinate so they spread their saturation footprints across the map instead of stacking.
+
+Scouts actively avoid enemy threats. Visible enemy military units, town centers, and towers radiate danger into surrounding areas via a heat-map flood-fill scaled by each threat's DPS and attack range; areas with heat above a hard-skip threshold are refused as candidates and as propagation steps, and the chosen target is reached through a multi-hop corridor of BFS-validated safe areas instead of letting the engine pathfinder cut toward the destination through a heated zone. Damage and death events leave persistent heat bumps so subsequent scouts steer wide of where one was attacked. A scout that finds itself in a now-dangerous area enters a flee state, walks to the lowest-danger neighbour, and holds for a few seconds before picking a fresh target.
 
 The mod adds a single include line plus one function call to `game/ai/human_assist/human_assist.xs` and ships an `auto_scout.xs` file alongside it; that is the entire footprint.
 
@@ -44,22 +46,26 @@ The mod overlays vanilla `human_assist.xs`. After any Age of Mythology Retold pa
 
 ## Changelog
 
+**2026-05-14 — Scouts now avoid enemy danger**
+- Scouts actively keep away from enemy military units, town centers, and towers. Tiles around visible threats become no-go zones; the more dangerous a building (more damage, longer range, more projectiles), the wider the no-go ring around it.
+- Path-aware walking: when a scout's destination is on the far side of an enemy threat, the scout detours around the danger area instead of cutting through it on the way.
+- Retreat behaviour: a scout that ends up in a freshly-discovered danger zone walks to a safer nearby area and pauses for five seconds before picking a new destination. Areas it fled from are remembered for a minute and a half.
+- Combat memory: tiles where a scout was attacked or killed stay marked dangerous for ten seconds, so the next scouts steer wide of the same hot spot.
+- Oracle re-positioning hops are shorter (about a quarter of an Oracle's maximum sight range), so each move reveals more new map without wasting LOS on already-seen ground.
+- Oracles whose claim circles touch can now share a little overlap instead of being hard-blocked, so they can still cover the map when there's no perfectly-clean alternative.
+
 **2026-05-13 — Oracle support**
-- Atlantean Oracles now have their own scouting behaviour: walk to a chosen area, park there, wait for LOS to saturate (engine action 37 / meditation animation), then re-pick a fresh target.
-- Multi-oracle coordination: hard-skip for areas within 80% of MaxOracleLOS of another oracle; regular scouts get a multiplicative score discount for areas near oracles. Pool-tracked oracles' target waypoints are considered alongside their current positions so newly-toggled oracles diverge instead of converging on the same destination.
-- Dynamic MaxOracleLOS cache adapts to god-tech upgrades and proto modifications.
-- Engine `cPlanExplore` is parked in `cPlanStateIdle` so it no longer drives the unit; our state machine has full control while the auto-scout UI button stays functional.
+- Atlantean Oracles now use the auto-scout button: walk to a chosen spot, park, wait for line-of-sight to grow to its maximum (the meditation animation plays), then move on to a fresh location.
+- Multiple Oracles coordinate so they spread across the map instead of stacking on the same area. Regular scouts also discount areas already covered by an Oracle's growing LOS.
 
 **2026-05-04 — Herd diversion**
-- Scouts passing near a Gaia or enemy herdable briefly divert to claim it by walking close enough to flip ownership.
-- Any herdable that flips to your control (whether by intentional divert or by walking past it) is automatically routed to the nearest of your town centers via the engine's herd-on-TC delivery. Town Centers, Citadel Centers, and Village Centers all qualify.
-- Each herdable is attempted at most once globally across all your scouts.
+- Scouts that pass near a wild or enemy herdable briefly detour to claim it by walking close enough to flip ownership.
+- Any herdable that ends up under your control (whether by intentional divert or by walking past it during normal scouting) is automatically sent to the nearest of your town centers — Town Centers, Citadel Centers, and Atlantean Village Centers all qualify.
+- Each herd is attempted at most once across all your scouts, so they don't pile onto the same target.
 
 **Initial release — Frontier-based exploration**
-- Replaces the engine's auto-scout for land scouts (Oracles got their own pass later, see above).
-- Layered BFS over the map's area-adjacency graph picks targets scored by closeness to your main town center, closeness to the picking scout, and a density penalty against other scouts already heading to the same region.
-- Frontier-walk inside the chosen area sweeps until coverage is reached or the per-area step cap is hit.
-- Multi-scout coordination via per-area claims; scouts naturally fan out across the map.
+- Replaces the engine's auto-scout button on land scouts. The scout pool spreads across the map, prioritizes areas near your town center, and avoids stacking on the same direction.
+- Each scout sweeps its chosen area until coverage is reached, then picks a new one.
 - Player commands and the auto-scout cancel button always take priority.
 
 ## License

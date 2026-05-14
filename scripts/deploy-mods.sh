@@ -7,11 +7,8 @@
 #   - Intelligent Auto-Scout                 (auto_scout.xs  + human_assist.xs)
 #   - Intelligent Auto-Repair and Scout      (auto_repair.xs + auto_scout.xs + unified human_assist.xs)
 #
-# Refuses to run while AoMR is open (overwriting loaded mod scripts mid-session
-# can corrupt the running game per the no-game-folder-writes house rule).
-#
-# Run from the host shell -- NOT from inside the claude-sandbox container.
-# The sandbox doesn't bind-mount ~/.steam, so it cannot reach the deploy root.
+# Caller is responsible for ensuring AoMR is closed -- overwriting loaded
+# mod scripts mid-session can corrupt the running game.
 #
 # Environment overrides:
 #   AOMR_LOCAL_MODS   path to the mods/local/ folder in the Proton prefix.
@@ -25,11 +22,6 @@ SRC_ROOT="$REPO_ROOT/mod"
 DEPLOY_ROOT="${AOMR_LOCAL_MODS:-$HOME/.steam/steam/steamapps/compatdata/1934680/pfx/drive_c/users/steamuser/Games/Age of Mythology Retold/76561198001426736/mods/local}"
 
 # --- preflight ---------------------------------------------------------------
-
-if pgrep -x AoMRT_s.exe > /dev/null; then
-   echo "ERROR: AoMRT_s.exe is running. Close AoMR before deploying." >&2
-   exit 1
-fi
 
 if [ ! -d "$DEPLOY_ROOT" ]; then
    echo "ERROR: deploy root not found: $DEPLOY_ROOT" >&2

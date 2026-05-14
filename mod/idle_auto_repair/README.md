@@ -41,15 +41,15 @@ The mod overlays vanilla `human_assist.xs`. After any Age of Mythology Retold pa
 ## Changelog
 
 **2026-05-03 — Norse Farms fix**
-- Norse villagers under non-Freyr gods now correctly skip Farms (the vanilla `<rate type="House">` constraint means they can only repair Houses; previously they would attempt Farms and get stuck).
+- Norse villagers under Thor, Odin, and Loki now correctly skip Farms. Previously they would try to repair Farms (which they cannot, under those gods) and get stuck.
 
 **Initial release**
-- Idle repair-capable units automatically walk to nearby damaged friendly buildings and repair them at normal resource cost.
-- Coverage: villagers for Greek, Egyptian, Atlantean, Chinese, Japanese, and Aztec civilizations; Norse soldier-builders (Berserk, Throwing Axeman, Hersir, Hirdman, Huskarl, Godi, Heroes of Ragnarok) for any building type; Norse villagers for the building types they can repair under the current major god.
-- Up to 10 units can converge on a single damaged building.
-- Buildings inside engine-flagged warzones are skipped so workers don't get sent into combat.
-- Buildings flagged non-repairable in the game's data are also skipped.
-- Player commands always take priority and remove the unit from its auto-repair plan immediately.
+- Idle units capable of repairing automatically walk to nearby damaged friendly buildings and repair them at normal resource cost.
+- Coverage: villagers for Greek, Egyptian, Atlantean, Chinese, Japanese, and Aztec; Norse soldier-builders (Berserk, Throwing Axeman, Hersir, Hirdman, Huskarl, Godi, Heroes of Ragnarok) for any building; Norse villagers for the building types their major god allows.
+- Up to ten builders can converge on a single damaged building.
+- Buildings inside active warzones are skipped so workers don't get sent into combat.
+- Buildings the game marks as non-repairable are also skipped.
+- Player commands always take priority — issue any order to a repairing unit and it leaves auto-repair immediately.
 
 ## License
 

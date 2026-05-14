@@ -56,6 +56,12 @@ const int cAutoScout_StuckTickLimit = 30;
 // against unexpected state cycles).
 const int cAutoScout_MaxChainPerTick = 4;
 
+// Max hops in a per-scout corridor (BFS predecessor chain from start area to
+// chosen target area, inclusive of both endpoints). BFS batchMax is 2 for
+// regular scouts and 3 for oracles, so a real corridor is at most 4 entries;
+// 8 leaves comfortable headroom and keeps the flat-array math trivial.
+const int cAutoScout_MaxCorridorHops = 8;
+
 // Action-type code reported by kbUnitGetActionType when an Oracle has reached
 // its peak AutoLOS bonus and switches to the meditation/glow animation.
 // Identified empirically (2026-05-06): the unit's reported action transitioned
@@ -151,7 +157,7 @@ const float cAutoScout_DangerBaseline      = 0.0;
 const float cAutoScout_HeatMinDPS                  = 4.0;
 const float cAutoScout_HeatRangeDivisor            = 20.0;
 const float cAutoScout_HeatMinFloodReach           = 15.0;
-const float cAutoScout_HeatAreaPad                 = 8.0;
+const float cAutoScout_HeatAreaPad                 = 14.0;
 const int   cAutoScout_HeatMobileFogTimeoutMs      = 10000;
 const float cAutoScout_HeatDamageEventMagnitude    = 150.0;
 const float cAutoScout_HeatDamageEventRange        = 20.0;
@@ -210,6 +216,30 @@ extern vector[] gAutoScout_targetWaypoint = default;
 // (capped by cAutoScout_MaxFrontierSteps). Reset to 0 on entering WORKING.
 extern int[]    gAutoScout_workSteps      = default;
 extern int[]    gAutoScout_stuckTicks     = default;
+
+// Per-scout safe-corridor state. The Walking-state next-area BFS reconstructs
+// its predecessor chain into this flat array so the engine pathfinder is
+// forced through a sequence of BFS-validated safe areas (rather than letting
+// it cut corners through a heat zone on the way to a far target). Layout:
+// gAutoScout_corridorAreas[slot * MaxCorridorHops + i] is the i-th area in
+// the corridor for that slot, where i = 0 is the scout's start area and
+// i = len-1 is the chosen target. gAutoScout_corridorLen[slot] is the total
+// number of valid entries (1..MaxCorridorHops). Reset to len = 1 (just the
+// start area, no extra hops) by setStateIdle and friends.
+extern int[] gAutoScout_corridorAreas = default;
+extern int[] gAutoScout_corridorLen   = default;
+
+// Transient buffer filled by autoScout_findNextArea after a successful pick:
+// ordered area IDs from the scout's start area (index 0) to the chosen target
+// (index Len-1), reconstructed from the BFS predecessor chain. Read once by
+// the caller (Idle-state handler) and copied into per-slot corridor state.
+extern int[] gAutoScout_bfsResultPath = default;
+extern int   gAutoScout_bfsResultLen  = 0;
+// Per-call BFS predecessor table. Index = area ID, value = predecessor area
+// ID (or -1 if not yet visited, or the start area's slot which stays -1).
+// Reallocated to size = kbAreaGetNumber() at every findNextArea entry, then
+// walked back from the chosen target by autoScout_buildBfsPath.
+extern int[] gAutoScout_bfsPredecessor = default;
 
 // Per-area claim. Value = claiming scout's unit ID, 0 = unclaimed.
 extern int[] gAutoScout_areaClaim         = default;
@@ -382,6 +412,18 @@ extern float gAutoScout_maxOracleLOS = cAutoScout_OracleColdCacheMaxLOS;
 // controlled oracles still influence target-area selection.
 extern int gAutoScout_oracleQuery = -1;
 
+float floatClamp01(float value = 0.0) {
+    if (value < 0.0) { value = 0.0; }
+    if (value > 1.0) { value = 1.0; }
+    return(value);
+}
+
+float floatClamp(float value = 0.0, float lo = 0.0, float hi = 1.0) {
+    if (value < lo) { value = lo; }
+    if (value > hi) { value = hi; }
+    return(value);
+}
+
 //------------------------------------------------------------------------------
 // Visited-waypoint memory (used by frontier-walk to break A<->B oscillation).
 // Defined here -- ahead of pool management -- because autoScout_dropFromPool
@@ -506,6 +548,18 @@ void autoScout_dropFromPool(int slot = -1)
    gAutoScout_fleeFromArea.removeIndex(slot);
    gAutoScout_lastHP.removeIndex(slot);
    gAutoScout_lastPos.removeIndex(slot);
+   gAutoScout_corridorLen.removeIndex(slot);
+   // Remove this slot's MaxCorridorHops entries from the flat areas array.
+   // Each removeIndex call shifts subsequent entries left by 1, so calling it
+   // MAX times at the same starting offset pops exactly the slot's block.
+   int corridorOffset = slot * cAutoScout_MaxCorridorHops;
+   for (int j = 0; j < cAutoScout_MaxCorridorHops; j = j + 1)
+   {
+      if (corridorOffset < gAutoScout_corridorAreas.size())
+      {
+         gAutoScout_corridorAreas.removeIndex(corridorOffset);
+      }
+   }
 }
 
 //------------------------------------------------------------------------------
@@ -1750,16 +1804,31 @@ bool autoScout_areaIsCandidate(int areaID = -1, int scoutUnitID = -1)
    return(true);
 }
 
-// Score function for ranking candidate areas during BFS. Three weighted
-// subscores, each in roughly [0, 1]:
-//   - tcScore:      closer to player's main TC -> higher
-//   - scoutScore:   closer to picking scout    -> higher
+// Score function for ranking candidate areas during BFS. Four subscores
+// combined into a single baseScore (regular + oracle share the same formula):
+//   - tcScore:      closer to player's main TC -> higher; clamped to [0, 1].
+//   - scoutScore:   distance to picking scout, signed-squared (see below).
 //   - densityScore: fewer other scouts within cAutoScout_DensityRadius
-//                   of this area's center -> higher (avoids overlap)
-// The score function is the SOLE prioritization mechanism for candidate
-// areas during BFS -- the BFS itself is a flat full-graph traversal (no
-// depth-batched layering). Depth-0 (scout's current area) is still handled
-// as a hard top-priority before this function runs.
+//                   of this area's center -> higher; clamped to [0, 1].
+//   - dangerScore:  multiplicative (NOT additive) on the sum of the above.
+//
+// scoutScore for regular scouts: peak at distance 0, linear decay over
+// mapDiag. For oracles: symmetric triangle peaking at MaxOracleLOS / 4 with
+// MaxOracleLOS-sharp falloff, allowed to go negative past the cliff so the
+// final additive term in baseScore punishes far oracle picks directly.
+// The signed-square transform (-x*x for x<0, x*x for x>=0) sharpens the
+// curve at both ends: nearby picks are pulled up superlinearly and far/past-
+// cliff picks are pushed down superlinearly. Replaces the previous oracle-
+// only multiplicative far-penalty -- the squared decay now does that job
+// for both source types in one shape.
+//
+// dangerScore is applied multiplicatively as a final factor: baseScore *
+// (1 - dangerRatio) for positive baseScore (the usual case -- the close-to-
+// hard-skip area gets attenuated toward zero); baseScore * (1 + dangerRatio)
+// clamped to [0, 2] for negative baseScore (oracle far picks get pushed
+// further negative when they're also in heat). Areas above hardSkip are
+// already excluded by autoScout_areaIsCandidate so dangerRatio stays in
+// [0, 1] for the positive branch.
 float autoScout_areaScore(
    int areaID = -1, int scoutUnitID = -1,
    vector tcPos = cInvalidVector, vector scoutPos = cInvalidVector, float mapDiag = 1.0)
@@ -1768,8 +1837,7 @@ float autoScout_areaScore(
    bool sourceIsOracle = autoScout_isOracle(scoutUnitID);
 
    float distTC = xsVectorDistanceXZ(tcPos, areaPos);
-   float tcScore = 1.0 - distTC / mapDiag;
-   if (tcScore < 0.0) { tcScore = 0.0; }
+   float tcScore = floatClamp01(1.0 - distTC / mapDiag);
 
    // scoutScore: distance from the picking scout to the candidate area.
    //   - Regular scouts: peak at distance 0, linear decay over mapDiag.
@@ -1785,29 +1853,34 @@ float autoScout_areaScore(
    float distScout = xsVectorDistanceXZ(scoutPos, areaPos);
    // XS requires every variable to be initialized with a literal or const at
    // declaration -- can't do `float x; if (...) x = ...;`. So we start with
-   // the regular-scout formula and overwrite for the oracle branch.
-   float scoutScore = 1.0 - distScout / mapDiag;
+   // a dummy 0.0 value.
+   float scoutScore = 0.0;
    if (sourceIsOracle == true)
    {
       float oraclePeakDist = gAutoScout_maxOracleLOS * 0.25;
       float scoutDelta = distScout - oraclePeakDist;
       if (scoutDelta < 0.0) { scoutDelta = -scoutDelta; }
-      float scoutFalloff = gAutoScout_maxOracleLOS;
-      if (scoutFalloff < 1.0) { scoutFalloff = 1.0; }
-      scoutScore = 1.0 - scoutDelta / scoutFalloff;
-      // Deliberately NOT clamped to 0 for oracles. Beyond the cliff (where
-      // scoutScore reaches 0 at dist = oraclePeakDist + scoutFalloff) the
-      // value keeps decreasing linearly, becoming negative. This gives the
-      // weighted sum a direct additive penalty proportional to "how far
-      // past the cliff" the candidate is, so two equally far-frontier picks
-      // still differentiate by raw distance.
+
+      scoutScore = 1.0 - scoutDelta / gAutoScout_maxOracleLOS;
    }
    else
    {
-      // Regular scouts keep the clamp -- their peak is at distance 0 so
-      // scoutScore monotonically decreases, and negative would mean "farther
-      // than mapDiag" which can't happen on-map.
-      if (scoutScore < 0.0) { scoutScore = 0.0; }
+      scoutScore = 1.0 - distScout / mapDiag;
+   }
+
+   // Signed-square: amplifies BOTH ends of the curve. Near scoutScore=1 the
+   // square preserves the peak; far values (scoutScore approaching 0 or
+   // negative for past-cliff oracle picks) get pulled down faster than
+   // linear, so the bias toward nearby grows with the gap. The sign-preserving
+   // branch keeps negative values negative so they remain additive penalties
+   // in the final baseScore sum.
+   if (scoutScore < 0.0)
+   {
+       scoutScore = - (scoutScore * scoutScore);
+   }
+   else
+   {
+       scoutScore =  scoutScore * scoutScore;
    }
 
    // Density: per-other-scout penalty using the MIN of the other scout's
@@ -1828,18 +1901,20 @@ float autoScout_areaScore(
    for (int i = 0; i < poolSize; i++)
    {
       int otherID = gAutoScout_unitID[i];
+
       if (otherID == scoutUnitID) { continue; }
       if (kbUnitGetIsIDValid(otherID) == false) { continue; }
+
       vector otherPos = kbUnitGetPosition(otherID);
       float dPos = xsVectorDistanceXZ(otherPos, areaPos);
       float dEffective = dPos;
 
-      vector otherWaypoint = gAutoScout_targetWaypoint[i];
       // Skip waypoint contribution if the other scout doesn't have a
       // valid waypoint set (e.g. just transitioned to IDLE this tick).
       // We treat it as valid if the other scout has a claimed area.
       if (gAutoScout_targetAreaID[i] >= 0)
       {
+         vector otherWaypoint = gAutoScout_targetWaypoint[i];
          float dWp = xsVectorDistanceXZ(otherWaypoint, areaPos);
          if (dWp < dEffective) { dEffective = dWp; }
       }
@@ -1852,58 +1927,32 @@ float autoScout_areaScore(
 
       if (dEffective < densityRadius)
       {
-         densityPenalty = densityPenalty
-            + (densityRadius - dEffective) / densityRadius;
+         densityPenalty = densityPenalty + (densityRadius - dEffective) / densityRadius;
       }
    }
-   float densityScore = 1.0 - densityPenalty;
-   if (densityScore < 0.0) { densityScore = 0.0; }
 
-   // Danger subscore: zero-danger areas score 1.0; areas at the hard-skip
-   // threshold score 0.0. Areas above threshold are excluded by
-   // autoScout_areaIsCandidate so no overshoot is possible here.
+   float densityScore = floatClamp01(1.0 - densityPenalty);
+
+   // Weighted sum of the three "directional" subscores. scoutScore can be
+   // negative (oracle past its cliff), which directly drags baseScore down --
+   // that's the same role the old oracle-only multiplicative far-penalty
+   // played, now baked into the signed-square scoutScore shape.
+   float baseScore = cAutoScout_WeightTC      * tcScore
+                   + cAutoScout_WeightDensity * densityScore
+                   + cAutoScout_WeightScout   * scoutScore;
+
+   // Multiplicative danger. The candidate gate excludes areas with
+   // danger > hardSkip, so dangerRatio is in [0, 1] for the positive branch.
+   // Positive baseScore + danger -> attenuates toward zero as danger climbs.
+   // Negative baseScore + danger -> stretches further negative (1 + ratio),
+   // clamped to [0, 2] so the worst case is a 2x amplification of negativity.
    float danger = autoScout_effectiveDanger(areaID);
    float dangerRatio = danger / cAutoScout_DangerHardSkip;
-   if (dangerRatio < 0.0) { dangerRatio = 0.0; }
-   if (dangerRatio > 1.0) { dangerRatio = 1.0; }
-   float dangerScore = 1.0 - dangerRatio;
-
-   // Score assembly differs by source:
-   //   - non-oracle: simple weighted sum of all four subscores.
-   //   - oracle: scoutScore can be NEGATIVE past its cliff, so the additive
-   //     term naturally penalises far picks. On top of that, a multiplicative
-   //     "far-penalty" applied to the POSITIVE (tc/density/danger) components
-   //     shrinks the magnitude of the baseScore further past the cliff. We
-   //     keep multiplicative off the scout term so the additive penalty isn't
-   //     also scaled (which would cancel out for negative scoutScore values).
-   float baseScore = 0.0;
-   if (sourceIsOracle == true)
-   {
-      float positivesAddend = cAutoScout_WeightTC * tcScore
-                            + cAutoScout_WeightDensity * densityScore
-                            + cAutoScout_DangerWeight * dangerScore;
-
-      // Far-cliff: same boundary where the additive scoutScore would have
-      // clamped to zero originally (peak + falloff). Beyond it, multiply the
-      // positives by a linear falloff over mapDiag so they shrink toward 0
-      // for genuinely-far picks.
-      float farCliff = gAutoScout_maxOracleLOS * 0.25 + gAutoScout_maxOracleLOS;
-      float farPenalty = 1.0;
-      if (distScout > farCliff)
-      {
-         farPenalty = 1.0 - (distScout - farCliff) / mapDiag;
-         if (farPenalty < 0.0) { farPenalty = 0.0; }
-      }
-      baseScore = positivesAddend * farPenalty
-                + cAutoScout_WeightScout * scoutScore;
-   }
-   else
-   {
-      baseScore = cAutoScout_WeightTC * tcScore
-                + cAutoScout_WeightScout * scoutScore
-                + cAutoScout_WeightDensity * densityScore
-                + cAutoScout_DangerWeight * dangerScore;
-   }
+   float dangerScore = 0.0;
+   if (baseScore < 0.0) { dangerScore = 1.0 + dangerRatio; }
+   else                 { dangerScore = 1.0 - dangerRatio; }
+   dangerScore = floatClamp(dangerScore, 0.0, 2.0);
+   baseScore = baseScore * dangerScore;
 
    // Oracle-overlap shaping:
    //   - source is NOT an oracle: multiplicative discount against oracle
@@ -1918,7 +1967,7 @@ float autoScout_areaScore(
    //     pick a partially-overlapped area.
    if (sourceIsOracle == false)
    {
-      float oracleDiscount = 1.0 - autoScout_oraclePenalty(areaPos, scoutUnitID);
+      float oracleDiscount = floatClamp01(1.0 - autoScout_oraclePenalty(areaPos, scoutUnitID));
       baseScore = baseScore * oracleDiscount;
    }
    else
@@ -2002,9 +2051,57 @@ void autoScout_diag_log(int scoutUnitID = -1, int result = -1)
    }
 }
 
+// Clear gAutoScout_bfsResultPath / Len. Called on every BFS failure path and
+// at the start of every successful path-build to wipe the previous result.
+void autoScout_clearBfsResult()
+{
+   while (gAutoScout_bfsResultPath.size() > 0)
+   {
+      gAutoScout_bfsResultPath.removeIndex(0);
+   }
+   gAutoScout_bfsResultLen = 0;
+}
+
+// Fill gAutoScout_bfsResultPath with the ordered chain start -> ... -> target
+// by walking gAutoScout_bfsPredecessor backwards from target. Capped at
+// cAutoScout_MaxCorridorHops as a defensive guard against unexpected loops.
+// XS doesn't allow int[] function parameters, hence the global predecessor
+// table instead of passing it in.
+void autoScout_buildBfsPath(int startArea = -1, int targetArea = -1)
+{
+   autoScout_clearBfsResult();
+   if (targetArea < 0 || startArea < 0) { return; }
+
+   // Walk back from target -> start. tmp holds the chain in target-first order;
+   // we reverse it into gAutoScout_bfsResultPath afterwards.
+   int[] tmp = new int(0, 0);
+   int cur = targetArea;
+   while (cur >= 0 && cur != startArea && tmp.size() < cAutoScout_MaxCorridorHops)
+   {
+      tmp.add(cur);
+      if (cur >= gAutoScout_bfsPredecessor.size()) { cur = -1; }
+      else                                          { cur = gAutoScout_bfsPredecessor[cur]; }
+   }
+   if (cur != startArea)
+   {
+      // Walkback failed (loop guard hit, or predecessor table corrupted).
+      // Bail out -- caller will fall back to a single-hop direct move.
+      autoScout_clearBfsResult();
+      return;
+   }
+   tmp.add(startArea);
+
+   for (int q = tmp.size() - 1; q >= 0; q = q - 1)
+   {
+      gAutoScout_bfsResultPath.add(tmp[q]);
+   }
+   gAutoScout_bfsResultLen = gAutoScout_bfsResultPath.size();
+}
+
 int autoScout_findNextArea(int scoutUnitID = -1)
 {
    autoScout_diag_reset();
+   autoScout_clearBfsResult();
    if (scoutUnitID < 0) { autoScout_diag_log(scoutUnitID, -1); return(-1); }
    vector unitPos = kbUnitGetPosition(scoutUnitID);
    if (autoScout_isOnMap(unitPos) == false) { autoScout_diag_log(scoutUnitID, -1); return(-1); }
@@ -2021,6 +2118,9 @@ int autoScout_findNextArea(int scoutUnitID = -1)
    {
       if (autoScout_areaIsCandidate(startArea, scoutUnitID) == true)
       {
+         // Trivial corridor: scout stays in current area, no intermediate hops.
+         gAutoScout_bfsResultPath.add(startArea);
+         gAutoScout_bfsResultLen = 1;
          autoScout_diag_log(scoutUnitID, startArea);
          return(startArea);
       }
@@ -2045,6 +2145,19 @@ int autoScout_findNextArea(int scoutUnitID = -1)
    int[] visited     = new int(areaCount, 0);
    int[] queue       = new int(0, 0);
    int[] queueDepth  = new int(0, 0);
+   // Grow predecessor table to areaCount if it's smaller (extern globals
+   // can't be wholesale-reassigned in XS like locals can), then reset every
+   // entry to -1. Walk-back from chosen target terminates on area-ID equality
+   // with startArea, so -1 is just "not yet visited" -- including the start
+   // itself, which has no predecessor.
+   while (gAutoScout_bfsPredecessor.size() < areaCount)
+   {
+      gAutoScout_bfsPredecessor.add(-1);
+   }
+   for (int k = 0; k < areaCount; k = k + 1)
+   {
+      gAutoScout_bfsPredecessor[k] = -1;
+   }
    queue.add(startArea);
    queueDepth.add(0);
    visited[startArea] = 1;
@@ -2071,6 +2184,7 @@ int autoScout_findNextArea(int scoutUnitID = -1)
       {
          if (batchBest >= 0)
          {
+            autoScout_buildBfsPath(startArea, batchBest);
             autoScout_diag_log(scoutUnitID, batchBest);
             return(batchBest);
          }
@@ -2121,6 +2235,7 @@ int autoScout_findNextArea(int scoutUnitID = -1)
             if (next < 0 || next >= areaCount) { continue; }
             if (visited[next] == 1) { continue; }
             visited[next] = 1;
+            gAutoScout_bfsPredecessor[next] = areaID;
             queue.add(next);
             queueDepth.add(depth + 1);
          }
@@ -2130,6 +2245,7 @@ int autoScout_findNextArea(int scoutUnitID = -1)
    // End of queue: evaluate the in-flight batch.
    if (batchBest >= 0)
    {
+      autoScout_buildBfsPath(startArea, batchBest);
       autoScout_diag_log(scoutUnitID, batchBest);
       return(batchBest);
    }
@@ -2207,6 +2323,76 @@ void autoScout_setStateIdle(int slot = -1)
    gAutoScout_targetWaypoint[slot] = cInvalidVector;
    gAutoScout_workSteps[slot] = 0;
    gAutoScout_stuckTicks[slot] = 0;
+   gAutoScout_corridorLen[slot] = 0;
+}
+
+// Copies the just-computed BFS corridor (gAutoScout_bfsResultPath) into this
+// slot's flat-array slice, then issues the aiTaskMoveUnit chain. Index 0 of
+// the chain is the scout's current area (we're already there, no move
+// needed); the first move issued is the first hop AWAY from the start area
+// and uses queue=false to clear any pending engine queue and start moving
+// immediately. Subsequent hops append to the engine queue with queue=true so
+// the unit transitions through them seamlessly -- this is what forces the
+// engine pathfinder to stay inside the BFS-validated safe corridor instead
+// of cutting corners through a heat zone toward the final centroid.
+//
+// Degenerate corridors (len == 1, i.e. the scout's start area was itself the
+// chosen target) issue a single move to the start area's center so the unit
+// is tasked; the engine no-ops if already there.
+void autoScout_issueCorridor(int slot = -1, int unitID = -1)
+{
+   if (slot < 0 || unitID < 0) { return; }
+   int len = gAutoScout_bfsResultLen;
+   if (len <= 0) { gAutoScout_corridorLen[slot] = 0; return; }
+   if (len > cAutoScout_MaxCorridorHops) { len = cAutoScout_MaxCorridorHops; }
+
+   int baseIdx = slot * cAutoScout_MaxCorridorHops;
+   for (int i = 0; i < len; i = i + 1)
+   {
+      gAutoScout_corridorAreas[baseIdx + i] = gAutoScout_bfsResultPath[i];
+   }
+   gAutoScout_corridorLen[slot] = len;
+
+   if (len == 1)
+   {
+      vector startCenter = kbAreaGetCenter(gAutoScout_corridorAreas[baseIdx]);
+      aiTaskMoveUnit(unitID, startCenter, false, false);
+      return;
+   }
+
+   bool first = true;
+   for (int j = 1; j < len; j = j + 1)
+   {
+      int hopArea = gAutoScout_corridorAreas[baseIdx + j];
+      vector hopCenter = kbAreaGetCenter(hopArea);
+      bool queueFlag = false;
+      if (first == false) { queueFlag = true; }
+      aiTaskMoveUnit(unitID, hopCenter, false, queueFlag);
+      first = false;
+   }
+}
+
+// Walk the slot's corridor hops (excluding the start area at index 0 and the
+// final target area at index len-1, which are checked separately by the
+// existing currentArea / targetArea per-tick gates). Return the first hop
+// area that is now dangerous, or -1 if none. Used so a freshly-discovered
+// heat zone on a mid-corridor hop triggers a flee BEFORE the scout walks
+// into it, instead of waiting for currentArea to update on arrival.
+int autoScout_corridorFirstDangerousHop(int slot = -1)
+{
+   if (slot < 0) { return(-1); }
+   int len = gAutoScout_corridorLen[slot];
+   if (len < 3) { return(-1); }  // no intermediates (len<=2: just start + maybe target)
+   int baseIdx = slot * cAutoScout_MaxCorridorHops;
+   for (int i = 1; i < len - 1; i = i + 1)
+   {
+      int hopArea = gAutoScout_corridorAreas[baseIdx + i];
+      if (hopArea >= 0 && autoScout_areaIsDangerous(hopArea) == true)
+      {
+         return(hopArea);
+      }
+   }
+   return(-1);
 }
 
 // Arrived = scout is right at the waypoint (within cAutoScout_ArrivalDistance,
@@ -2324,6 +2510,13 @@ bool autoScout_tickOracleUnit(int slot = -1)
          autoScout_enterFleeing(slot, unitID, targetArea);
          return(true);
       }
+      int dangerHop = autoScout_corridorFirstDangerousHop(slot);
+      if (dangerHop >= 0)
+      {
+         autoScout_blacklistArea(dangerHop);
+         autoScout_enterFleeing(slot, unitID, dangerHop);
+         return(true);
+      }
    }
 
    float los = kbUnitGetStatFloat(unitID, cUnitStatLOS);
@@ -2358,8 +2551,9 @@ bool autoScout_tickOracleUnit(int slot = -1)
       gAutoScout_stuckTicks[slot] = 0;
       aiEcho("autoScout: oracle " + unitID + " picked area " + nextArea
          + " centroid=" + gAutoScout_targetWaypoint[slot]
+         + " corridorLen=" + gAutoScout_bfsResultLen
          + " (maxLOS=" + gAutoScout_maxOracleLOS + ")");
-      aiTaskMoveUnit(unitID, gAutoScout_targetWaypoint[slot], false, false);
+      autoScout_issueCorridor(slot, unitID);
       return(true);
    }
 
@@ -2488,6 +2682,13 @@ bool autoScout_tickUnit(int slot = -1)
          autoScout_enterFleeing(slot, unitID, targetArea);
          return(true);
       }
+      int dangerHop = autoScout_corridorFirstDangerousHop(slot);
+      if (dangerHop >= 0)
+      {
+         autoScout_blacklistArea(dangerHop);
+         autoScout_enterFleeing(slot, unitID, dangerHop);
+         return(true);
+      }
    }
 
    int state = gAutoScout_state[slot];
@@ -2511,8 +2712,9 @@ bool autoScout_tickUnit(int slot = -1)
       gAutoScout_state[slot] = cAutoScoutState_Walking;
       gAutoScout_stuckTicks[slot] = 0;
       aiEcho("autoScout: scout " + unitID + " picked area " + nextArea
-         + " centroid=" + gAutoScout_targetWaypoint[slot]);
-      aiTaskMoveUnit(unitID, gAutoScout_targetWaypoint[slot], false, false);
+         + " centroid=" + gAutoScout_targetWaypoint[slot]
+         + " corridorLen=" + gAutoScout_bfsResultLen);
+      autoScout_issueCorridor(slot, unitID);
       return(true);
    }
 
@@ -2717,6 +2919,11 @@ void autoScout_register(int planID = -1, int unitID = -1)
    gAutoScout_fleeFromArea.add(-1);
    gAutoScout_lastHP.add(kbUnitGetStatFloat(unitID, cUnitStatCurrHP));
    gAutoScout_lastPos.add(kbUnitGetPosition(unitID));
+   gAutoScout_corridorLen.add(0);
+   for (int i = 0; i < cAutoScout_MaxCorridorHops; i = i + 1)
+   {
+      gAutoScout_corridorAreas.add(-1);
+   }
 
    // Immediate first-tick: BFS + initial move now, instead of waiting up to
    // a full rule interval. Without this, the scout starts moving in whatever
@@ -2791,17 +2998,38 @@ void autoScout_homeMoveScan()
 // Tick rule
 //------------------------------------------------------------------------------
 
-rule autoScout_tick
+// Split tick rules. Both fire at minInterval 1 (the original cadence). The
+// split is purely organisational -- heat-map / home-move scan live in one
+// rule, the per-slot state machine in another -- so future tuning can move
+// either rule's cadence independently without touching the other's body.
+//
+// An earlier iteration ran autoScout_tickFast at highFrequency + priority 80
+// to close the ~500ms-1s "idle military unit" UI flicker between a scout
+// finishing WORKING and BFS picking its next area. Backed out 2026-05-14:
+// every-frame execution pushed enough script load that the engine started
+// throttling scripts (it prefers slowing the script budget over slowing the
+// update loop), which manifested as ~10s delays in homeMoveScan picking up
+// newly-converted herds (kb-update latency on the owned-herd query). For
+// now the UI flicker is accepted; if revisited, prefer reducing per-frame
+// work over re-raising priority.
+
+rule autoScout_tickHeavy
 minInterval 1
 active
 {
    xsSetContextPlayer(cMyID);
    autoScout_initAreaArrays();
-
-   // Heat-map: full reset + recompute each tick. ADD semantics across
-   // observations so clusters pile up. Damage/death events stay in their
-   // own array and are layered on top inside updateHeatMap until expired.
    autoScout_updateHeatMap();
+   autoScout_homeMoveScan();
+   xsSetContextPlayer(-1);
+}
+
+rule autoScout_tickFast
+minInterval 1
+active
+{
+   xsSetContextPlayer(cMyID);
+   autoScout_initAreaArrays();
 
    for (int slot = gAutoScout_unitID.size() - 1; slot >= 0; slot = slot - 1)
    {
@@ -2817,7 +3045,6 @@ active
          iter = iter + 1;
       }
    }
-   autoScout_homeMoveScan();
    xsSetContextPlayer(-1);
 }
 
