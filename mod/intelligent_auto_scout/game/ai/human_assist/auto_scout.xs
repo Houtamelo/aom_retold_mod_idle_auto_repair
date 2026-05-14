@@ -128,6 +128,7 @@ const float cAutoScout_DangerBaseline      = 20.0;
 const float cAutoScout_HeatMinDPS                  = 4.0;
 const float cAutoScout_HeatRangeDivisor            = 20.0;
 const float cAutoScout_HeatMinFloodReach           = 15.0;
+const float cAutoScout_HeatAreaPad                 = 8.0;
 const int   cAutoScout_HeatMobileFogTimeoutMs      = 10000;
 const float cAutoScout_HeatDamageEventMagnitude    = 150.0;
 const float cAutoScout_HeatDamageEventRange        = 20.0;
@@ -660,12 +661,13 @@ void autoScout_initThreatQuery()
 
 // Flood-fill heat from an entity's position outward through the area graph.
 // Areas receive (and propagate from) only while
-//   dist(entityPos, kbAreaGetCenter(area)) <= max(entityRange, MinFloodReach).
-// Heat applied per area: magnitude * max(0, 1 - dist / maxDist) — linear
-// falloff from the entity's actual position. Distances use area centroids
-// as the comparison point; entity position is the source (so an entity sits
-// at the edge of one area but close to a neighbor's centroid will leak more
-// heat into the neighbor).
+//   dist(entityPos, kbAreaGetCenter(area)) <= max(entityRange + AreaPad, MinFloodReach).
+// Heat applied per area: magnitude * max(0, 1 - dist / (maxDist + AreaPad)).
+// The +AreaPad bumps (cAutoScout_HeatAreaPad, ~average area radius) reflect
+// the fact that the centroid is a single point representing a region; an
+// area whose centroid is just outside the threat's bare range may still
+// contain tiles within range, and conversely a steep "1 - dist/range"
+// falloff at the boundary is too sharp for the centroid-as-stand-in model.
 void autoScout_addHeatFlood(vector entityPos = cInvalidVector, float entityRange = 0.0, float magnitude = 0.0)
 {
    if (magnitude <= 0.0) { return; }
@@ -673,8 +675,9 @@ void autoScout_addHeatFlood(vector entityPos = cInvalidVector, float entityRange
    int startArea = kbAreaGetIDByPosition(entityPos);
    if (startArea < 0 || startArea >= gAutoScout_heat.size()) { return; }
 
-   float maxDist = entityRange;
+   float maxDist = entityRange + cAutoScout_HeatAreaPad;
    if (maxDist < cAutoScout_HeatMinFloodReach) { maxDist = cAutoScout_HeatMinFloodReach; }
+   float falloffDenom = maxDist + cAutoScout_HeatAreaPad;
 
    int areaCount = gAutoScout_heat.size();
    int[] visited = new int(areaCount, 0);
@@ -692,7 +695,7 @@ void autoScout_addHeatFlood(vector entityPos = cInvalidVector, float entityRange
       float dist = xsVectorDistanceXZ(entityPos, areaPos);
       if (dist > maxDist) { continue; }  // skip + don't propagate
 
-      float weight = 1.0 - dist / maxDist;
+      float weight = 1.0 - dist / falloffDenom;
       if (weight > 0.0)
       {
          gAutoScout_heat[area] = gAutoScout_heat[area] + magnitude * weight;
