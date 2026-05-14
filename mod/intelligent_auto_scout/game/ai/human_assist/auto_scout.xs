@@ -110,25 +110,30 @@ const float cAutoScout_DangerBaseline      = 20.0;
 
 // Heat-map parameters. Per-area float array recomputed each tick from
 // visible enemy threats (full reset + ADD across threats, so multiple units
-// in the same area pile up). Separate damage/death event bumps persist for
-// a fixed duration on top of the per-tick base.
+// in the same area pile up). Each threat does a flood-fill outward from its
+// position; an area receives heat only while
+//   distance(entityPos, kbAreaGetCenter(area)) <= max(entityRange, MinFloodReach).
+// Damage/death event bumps follow the same flood-fill rules with a
+// synthetic event range.
 //
-//   cAutoScout_HeatMinDPS:       per-threat DPS gate (filters out scouts).
-//   cAutoScout_HeatRangeDivisor: contribution = DPS * (1 + range / divisor).
-//   cAutoScout_HeatSpreadMaxDist: 1-hop spread to border areas, linear falloff.
-//   cAutoScout_HeatMobileUnitFogTimeoutMs: how long a non-building threat
-//                                          remains a heat producer after we
-//                                          lose LOS on it.
-//   cAutoScout_HeatDamageEventMag/Dur:   bump added at scout's position on
-//                                        damage; persists for the duration.
-//   cAutoScout_HeatDeathEventMag/Dur:    same but much stronger, on death.
+//   cAutoScout_HeatMinDPS:           per-threat DPS gate (filters out scouts).
+//   cAutoScout_HeatRangeDivisor:     contribution = DPS * (1 + range / divisor).
+//   cAutoScout_HeatMinFloodReach:    floor on the flood-fill cutoff distance
+//                                    so melee threats spread at least this
+//                                    far. Bigger threats use their own range.
+//   cAutoScout_HeatMobileFogTimeoutMs: how long a non-building threat remains
+//                                      a heat producer after we lose LOS.
+//   cAutoScout_HeatDamageEvent*:  bump + flood radius for a scout hit event.
+//   cAutoScout_HeatDeathEvent*:   stronger bump + radius for a scout death.
 const float cAutoScout_HeatMinDPS                  = 4.0;
 const float cAutoScout_HeatRangeDivisor            = 20.0;
-const float cAutoScout_HeatSpreadMaxDist           = 50.0;
-const int   cAutoScout_HeatMobileUnitFogTimeoutMs  = 10000;
+const float cAutoScout_HeatMinFloodReach           = 15.0;
+const int   cAutoScout_HeatMobileFogTimeoutMs      = 10000;
 const float cAutoScout_HeatDamageEventMagnitude    = 150.0;
+const float cAutoScout_HeatDamageEventRange        = 20.0;
 const int   cAutoScout_HeatDamageEventDurationMs   = 10000;
 const float cAutoScout_HeatDeathEventMagnitude     = 500.0;
+const float cAutoScout_HeatDeathEventRange         = 30.0;
 const int   cAutoScout_HeatDeathEventDurationMs    = 10000;
 
 // Flee-area picker (autoScout_findFleeArea). BFS expands outward from the
@@ -232,28 +237,34 @@ extern int gAutoScout_threatQuery = -1;
 //   ID:           proto unit type ID (key)
 //   isThreat:     1 if peak DPS > cAutoScout_HeatMinDPS, else 0
 //   contribution: max DPS * (1 + range/divisor) across attack actions
+//   range:        attack range of the action that produced the max contrib
+//                 (used by the heat-map flood-fill to bound spread distance)
 //   isVillager:   1 if proto is AbstractVillager (skip entirely)
 //   isBuilding:   1 if proto is Building (fogged-OK, no fog timeout)
 // Linear scan; the proto set we encounter in a game is small (~20-50 distinct).
 extern int[]   gAutoScout_protoThreatID     = default;
 extern int[]   gAutoScout_protoThreatIsT    = default;
 extern float[] gAutoScout_protoThreatContrib = default;
+extern float[] gAutoScout_protoThreatRange   = default;
 extern int[]   gAutoScout_protoThreatIsVill = default;
 extern int[]   gAutoScout_protoThreatIsBld  = default;
 
 // Per-(mobile-)unit fog timer. We record the last time each enemy unit was
 // CURRENTLY VISIBLE; mobile units (non-building) stop contributing heat once
-// they've been fogged for more than cAutoScout_HeatMobileUnitFogTimeoutMs.
+// they've been fogged for more than cAutoScout_HeatMobileFogTimeoutMs.
 // Buildings are exempt (they don't move, so fogged-position is still accurate).
 extern int[] gAutoScout_unitLastSeenID = default;
 extern int[] gAutoScout_unitLastSeenMs = default;
 
-// Damage/death event bumps. Three parallel arrays — area, magnitude, and
-// expiry timestamp. Active events are added on top of the per-tick base
-// heat in autoScout_updateHeatMap.
-extern int[]   gAutoScout_eventArea      = default;
-extern float[] gAutoScout_eventMagnitude = default;
-extern int[]   gAutoScout_eventExpiryMs  = default;
+// Damage/death event bumps. Five parallel arrays — origin position, flood
+// radius, magnitude, expiry timestamp, and a diag-only area. Active events
+// are flood-filled into the heat map each tick by autoScout_updateHeatMap
+// until expiry.
+extern vector[] gAutoScout_eventPos       = default;
+extern float[]  gAutoScout_eventRange     = default;
+extern float[]  gAutoScout_eventMagnitude = default;
+extern int[]    gAutoScout_eventExpiryMs  = default;
+extern int[]    gAutoScout_eventArea      = default;  // diag/log only
 
 // Diagnostic counters for one BFS pass (reset at top of findNextArea, echoed
 // at every return path). Used to triage "scout immediately untoggles" issues
@@ -431,9 +442,11 @@ void autoScout_dropFromPool(int slot = -1)
             int deathArea = kbAreaGetIDByPosition(lastPos);
             if (deathArea >= 0)
             {
-               gAutoScout_eventArea.add(deathArea);
+               gAutoScout_eventPos.add(lastPos);
+               gAutoScout_eventRange.add(cAutoScout_HeatDeathEventRange);
                gAutoScout_eventMagnitude.add(cAutoScout_HeatDeathEventMagnitude);
                gAutoScout_eventExpiryMs.add(xsGetTimeMS() + cAutoScout_HeatDeathEventDurationMs);
+               gAutoScout_eventArea.add(deathArea);
                aiEcho("autoScout: DEATH event slot=" + slot + " unit=" + droppedUnit
                   + " area=" + deathArea + " pos=" + lastPos);
             }
@@ -486,7 +499,7 @@ vector autoScout_clampToMap(vector pos = cInvalidVector)
 // Heat-map (2026-05-13). Per-area float, fully reset and rebuilt each tick.
 // The base layer sums (ADD) contributions of known-position enemy threats
 // (buildings: always; mobile units: only while currently-visible OR within
-// cAutoScout_HeatMobileUnitFogTimeoutMs of last LOS; villagers: never).
+// cAutoScout_HeatMobileFogTimeoutMs of last LOS; villagers: never).
 // Persistent damage/death event bumps are added on top of the base layer
 // for their duration. Replaces kbAreaGetDangerLevel.
 //------------------------------------------------------------------------------
@@ -556,6 +569,7 @@ int autoScout_protoCacheRow(int proto = -1)
    gAutoScout_protoThreatID.add(proto);
    gAutoScout_protoThreatIsT.add(0);
    gAutoScout_protoThreatContrib.add(0.0);
+   gAutoScout_protoThreatRange.add(0.0);
    gAutoScout_protoThreatIsVill.add(0);
    gAutoScout_protoThreatIsBld.add(0);
 
@@ -577,6 +591,7 @@ int autoScout_protoCacheRow(int proto = -1)
    // full DPS, instead of being effectively ignored by an old range/10 term.
    bool isThreat = false;
    float bestContrib = 0.0;
+   float bestRange = 0.0;
    int[] actionIDs = kbProtoUnitGetActionIDs(cMyID, proto);
    int aN = actionIDs.size();
    for (int a = 0; a < aN; a = a + 1)
@@ -603,12 +618,17 @@ int autoScout_protoCacheRow(int proto = -1)
 
       isThreat = true;
       float contrib = dps * (1.0 + range / cAutoScout_HeatRangeDivisor);
-      if (contrib > bestContrib) { bestContrib = contrib; }
+      if (contrib > bestContrib)
+      {
+         bestContrib = contrib;
+         bestRange   = range;
+      }
    }
    if (isThreat == true)
    {
       gAutoScout_protoThreatIsT[slot]      = 1;
       gAutoScout_protoThreatContrib[slot] = bestContrib;
+      gAutoScout_protoThreatRange[slot]   = bestRange;
    }
    return(slot);
 }
@@ -638,39 +658,74 @@ void autoScout_initThreatQuery()
    kbUnitQuerySetState(gAutoScout_threatQuery, cUnitStateAlive);
 }
 
-// Helper: ADD heat to area + spread to 1-hop neighbors with linear distance
-// falloff. weight = max(0, 1 - dist/cAutoScout_HeatSpreadMaxDist).
-void autoScout_addHeatToArea(int area = -1, float magnitude = 0.0)
+// Flood-fill heat from an entity's position outward through the area graph.
+// Areas receive (and propagate from) only while
+//   dist(entityPos, kbAreaGetCenter(area)) <= max(entityRange, MinFloodReach).
+// Heat applied per area: magnitude * max(0, 1 - dist / maxDist) — linear
+// falloff from the entity's actual position. Distances use area centroids
+// as the comparison point; entity position is the source (so an entity sits
+// at the edge of one area but close to a neighbor's centroid will leak more
+// heat into the neighbor).
+void autoScout_addHeatFlood(vector entityPos = cInvalidVector, float entityRange = 0.0, float magnitude = 0.0)
 {
-   if (area < 0 || area >= gAutoScout_heat.size()) { return; }
    if (magnitude <= 0.0) { return; }
-   gAutoScout_heat[area] = gAutoScout_heat[area] + magnitude;
+   if (autoScout_isOnMap(entityPos) == false) { return; }
+   int startArea = kbAreaGetIDByPosition(entityPos);
+   if (startArea < 0 || startArea >= gAutoScout_heat.size()) { return; }
 
-   vector areaPos = kbAreaGetCenter(area);
-   int borderCount = kbAreaGetNumberBorderAreas(area);
-   for (int b = 0; b < borderCount; b = b + 1)
+   float maxDist = entityRange;
+   if (maxDist < cAutoScout_HeatMinFloodReach) { maxDist = cAutoScout_HeatMinFloodReach; }
+
+   int areaCount = gAutoScout_heat.size();
+   int[] visited = new int(areaCount, 0);
+   int[] queue   = new int(0, 0);
+   queue.add(startArea);
+   visited[startArea] = 1;
+
+   int head = 0;
+   while (head < queue.size())
    {
-      int nbr = kbAreaGetBorderAreaID(area, b);
-      if (nbr < 0) { continue; }
-      if (nbr >= gAutoScout_heat.size()) { continue; }
-      vector nbrPos = kbAreaGetCenter(nbr);
-      float dist = xsVectorDistanceXZ(areaPos, nbrPos);
-      float weight = 1.0 - dist / cAutoScout_HeatSpreadMaxDist;
-      if (weight <= 0.0) { continue; }
-      gAutoScout_heat[nbr] = gAutoScout_heat[nbr] + magnitude * weight;
+      int area = queue[head];
+      head = head + 1;
+
+      vector areaPos = kbAreaGetCenter(area);
+      float dist = xsVectorDistanceXZ(entityPos, areaPos);
+      if (dist > maxDist) { continue; }  // skip + don't propagate
+
+      float weight = 1.0 - dist / maxDist;
+      if (weight > 0.0)
+      {
+         gAutoScout_heat[area] = gAutoScout_heat[area] + magnitude * weight;
+      }
+
+      int borderCount = kbAreaGetNumberBorderAreas(area);
+      for (int b = 0; b < borderCount; b = b + 1)
+      {
+         int nbr = kbAreaGetBorderAreaID(area, b);
+         if (nbr < 0 || nbr >= areaCount) { continue; }
+         if (visited[nbr] == 1) { continue; }
+         visited[nbr] = 1;
+         queue.add(nbr);
+      }
    }
 }
 
 // Append a damage/death heat event. Active for durationMs from now; applied
-// each tick on top of the per-tick base heat.
-void autoScout_addHeatEvent(int area = -1, float magnitude = 0.0, int durationMs = 0)
+// each tick on top of the per-tick base heat via the flood-fill helper.
+void autoScout_addHeatEvent(vector pos = cInvalidVector, float range = 0.0,
+                            float magnitude = 0.0, int durationMs = 0)
 {
-   if (area < 0) { return; }
    if (magnitude <= 0.0) { return; }
    if (durationMs <= 0) { return; }
-   gAutoScout_eventArea.add(area);
+   if (range <= 0.0) { return; }
+   if (autoScout_isOnMap(pos) == false) { return; }
+   int area = kbAreaGetIDByPosition(pos);
+   if (area < 0) { return; }
+   gAutoScout_eventPos.add(pos);
+   gAutoScout_eventRange.add(range);
    gAutoScout_eventMagnitude.add(magnitude);
    gAutoScout_eventExpiryMs.add(xsGetTimeMS() + durationMs);
+   gAutoScout_eventArea.add(area);
 }
 
 // Per-scout damage detection: compare current HP to last-known. If lower,
@@ -688,15 +743,13 @@ void autoScout_trackHPAndPos(int slot = -1, int unitID = -1)
    float lastHP = gAutoScout_lastHP[slot];
    if (currentHP < lastHP && autoScout_isOnMap(currentPos) == true)
    {
+      autoScout_addHeatEvent(currentPos,
+         cAutoScout_HeatDamageEventRange,
+         cAutoScout_HeatDamageEventMagnitude,
+         cAutoScout_HeatDamageEventDurationMs);
       int dmgArea = kbAreaGetIDByPosition(currentPos);
-      if (dmgArea >= 0)
-      {
-         autoScout_addHeatEvent(dmgArea,
-            cAutoScout_HeatDamageEventMagnitude,
-            cAutoScout_HeatDamageEventDurationMs);
-         aiEcho("autoScout: DAMAGE event slot=" + slot + " unit=" + unitID
-            + " area=" + dmgArea + " hp=" + currentHP + "/" + lastHP);
-      }
+      aiEcho("autoScout: DAMAGE event slot=" + slot + " unit=" + unitID
+         + " area=" + dmgArea + " hp=" + currentHP + "/" + lastHP);
    }
 
    gAutoScout_lastHP[slot] = currentHP;
@@ -757,7 +810,7 @@ void autoScout_updateHeatMap()
             int lastSeen = -1;
             if (seenRow >= 0) { lastSeen = gAutoScout_unitLastSeenMs[seenRow]; }
             if (lastSeen < 0) { continue; }  // never seen visible
-            if (now - lastSeen > cAutoScout_HeatMobileUnitFogTimeoutMs)
+            if (now - lastSeen > cAutoScout_HeatMobileFogTimeoutMs)
             {
                continue;  // fog timer expired
             }
@@ -765,17 +818,21 @@ void autoScout_updateHeatMap()
 
          vector unitPos = kbUnitGetPosition(unitID);
          if (autoScout_isOnMap(unitPos) == false) { continue; }
-         int area = kbAreaGetIDByPosition(unitPos);
-         autoScout_addHeatToArea(area, gAutoScout_protoThreatContrib[cacheRow]);
+         autoScout_addHeatFlood(unitPos,
+            gAutoScout_protoThreatRange[cacheRow],
+            gAutoScout_protoThreatContrib[cacheRow]);
       }
    }
 
-   // Damage/death event layer. Applied on top until expired.
-   int en = gAutoScout_eventArea.size();
+   // Damage/death event layer. Applied on top until expired, using the same
+   // flood-fill with the event's stored position + range.
+   int en = gAutoScout_eventExpiryMs.size();
    for (int e = 0; e < en; e = e + 1)
    {
       if (gAutoScout_eventExpiryMs[e] <= now) { continue; }  // expired
-      autoScout_addHeatToArea(gAutoScout_eventArea[e], gAutoScout_eventMagnitude[e]);
+      autoScout_addHeatFlood(gAutoScout_eventPos[e],
+         gAutoScout_eventRange[e],
+         gAutoScout_eventMagnitude[e]);
    }
 }
 
