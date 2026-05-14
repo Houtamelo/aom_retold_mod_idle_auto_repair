@@ -26,7 +26,13 @@ const int cAutoScoutState_Fleeing   = 5;
 const float cAutoScout_HerdLOSBuffer = 12.0;
 
 // Skip areas where less than this percent of tiles are still black (unexplored).
-const int cAutoScout_BlackTilesPercentMin = 10;
+// Regular scouts use 10 (avoid mostly-revealed areas where they'd waste a hop).
+// Oracles use a lower bar because their MaxLOS=34 saturation reveals huge
+// rings, so by the time the oracle has 7+ siblings parked the only candidates
+// left have very small unrevealed fractions; setting the bar too high blocks
+// every nearby option and forces the BFS to bubble out to map-edge slivers.
+const int cAutoScout_BlackTilesPercentMin       = 10;
+const int cAutoScout_BlackTilesPercentMinOracle = 3;
 
 // Arrival = within this distance of target waypoint (kbUnitGetDistanceToPoint
 // is edge-to-point, so 1.5 tiles ~= unit center is ~2 tiles from target).
@@ -74,12 +80,29 @@ const int cAutoScout_PlanStateIdle = 23;
 // climb on first observed saturation) and above any oracle's base LOS.
 const float cAutoScout_OracleColdCacheMaxLOS = 20.0;
 
-// Oracle-vs-oracle exclusion factor used by autoScout_areaIsCandidate when
-// the source unit is an Oracle. Areas whose centroid lies within
-// cAutoScout_OracleExclusionFactor * gAutoScout_maxOracleLOS of any other
-// oracle (toggled-on or not) are skipped. 0.8 leaves a small buffer around
-// each oracle's claim so oracles park with adjacent (not overlapping) circles.
-const float cAutoScout_OracleExclusionFactor = 0.8;
+// Oracle-on-oracle soft penalty (2026-05-14). Replaces the previous
+// hard-skip based on cAutoScout_OracleExclusionFactor. Two oracles whose
+// claim circles touch can still overlap their LOS rings; the linear
+// falloff out to 2 * gAutoScout_maxOracleLOS captures that.
+//   range  = cAutoScout_OracleOnOracleRangeFactor * gAutoScout_maxOracleLOS
+//   weight = cAutoScout_OracleOnOracleWeight        (additive, not multiplicative;
+//            should dominate the sum of the other weights -- WeightTC + WeightScout
+//            + WeightDensity + DangerWeight = ~1.175 -- so a fully-overlapping other
+//            oracle alone is enough to disqualify the area in practice).
+const float cAutoScout_OracleOnOracleRangeFactor = 2.0;
+const float cAutoScout_OracleOnOracleWeight      = 3.0;
+
+// Padding added to an oracle's claim radius when a NON-oracle source is
+// evaluating area overlap with the oracle (mechanism #2 in the doc:
+// autoScout_oraclePenalty). Keeps regular scouts further from oracle
+// claim edges than a strict radius would.
+const float cAutoScout_OraclePenaltyRadiusPad = 15.0;
+
+// Density-radius override: when source is an oracle and the other scout
+// is NOT an oracle, expand the soft density radius from
+// cAutoScout_DensityRadius (30) to this value so oracles avoid steering
+// to areas already covered by regular scouts even at slightly larger range.
+const float cAutoScout_DensityRadiusOracleToOther = 45.0;
 
 // Area-score weights (sum need not be exactly 1.0 since we only compare
 // scores, but normalized weights make tuning intuitive). Each subscore is
@@ -88,25 +111,25 @@ const float cAutoScout_WeightTC      = 0.35;   // closer to main TC -> higher
 const float cAutoScout_WeightScout   = 0.525;  // closer to picking scout -> higher (0.35 * 1.5)
 const float cAutoScout_WeightDensity = 0.15;   // fewer other scouts nearby -> higher
 
-// Danger avoidance (2026-05-13). First-playtest calibration on map
-// "alfheim" at t=6s with no enemy contact: kbAreaGetDangerLevel returned
-// min=35.26, max=95.00, avg=88.56 across 96 areas. Baseline floor is ~35
-// and most of the map is near max even with no enemies in sight, so 5.0
-// rejected 96/96. Raised to 110 (above observed max) so hard-skip is
-// effectively off; the 0.15-weighted soft-discount still differentiates
-// safer-vs-less-safe within the [35..95] range (range/threshold => ~50%
-// differentiation across the danger weight). Re-tune after observing the
-// heuristic's behaviour during actual enemy contact.
-const float cAutoScout_DangerHardSkip      = 110.0;
+// Danger avoidance. Threshold is calibrated against OUR heat-map
+// (autoScout_effectiveDanger), not engine kbAreaGetDangerLevel which was
+// the old reference. A single TC with DPS ~= 20 should hard-skip every
+// area within its flood-fill reach. The flood adds
+// magnitude*(1 - dist/(maxDist+pad)) per pass.
+const float cAutoScout_DangerHardSkip      = 20.0;
 const float cAutoScout_DangerWeight        = 0.15;
 const int   cAutoScout_FleeMinDurationMs   = 5000;
 const int   cAutoScout_BlacklistDurationMs = 90000;
 
 // Baseline effective danger applied to fully-unexplored areas (where we have
-// no ground-truth). For fully-explored areas we trust our own heat-map
-// (gAutoScout_heat[]); we blend linearly between the two by the fraction of
-// explored tiles. See autoScout_effectiveDanger.
-const float cAutoScout_DangerBaseline      = 20.0;
+// no ground-truth). 0.0 = presume safe: with no observation, scouts treat
+// unknown terrain as low-danger and will explore freely. The previous value
+// (20) was calibrated for the engine's kbAreaGetDangerLevel which returned
+// 35-95; our own heat-map is 0-based so the baseline must be 0-based too.
+// For fully-explored areas we trust gAutoScout_heat[] directly; we blend
+// linearly between the two by the fraction of explored tiles. See
+// autoScout_effectiveDanger.
+const float cAutoScout_DangerBaseline      = 0.0;
 
 // Heat-map parameters. Per-area float array recomputed each tick from
 // visible enemy threats (full reset + ADD across threats, so multiple units
@@ -231,8 +254,19 @@ extern int[] gAutoScout_blacklistedExpiryMs = default;
 extern float[] gAutoScout_heat       = default;
 extern bool    gAutoScout_heatInited = false;
 
-// Cached threat-query handle for the heat-map update.
-extern int gAutoScout_threatQuery = -1;
+// Cached threat-query handles for the heat-map update. Split into two:
+//   - threatUnitQuery:     cUnitTypeMilitaryUnit (soldiers, archers, cavalry,
+//                          myth units -- combat actors only; excludes villagers,
+//                          heroes, animals which the DPS gate would drop anyway).
+//   - threatBuildingQuery: cUnitTypeBuilding (TCs, towers, walls, gates, all
+//                          static structures including resource-drop sites).
+// Two queries instead of one cUnitTypeAll because cUnitTypeAll also returns
+// gold mines, trees, columns, relics, berries -- inert flora/scenery that we
+// process and then discard. The military-only narrowing on the unit side
+// further drops villagers + heroes (DPS too low) and animals (no attack) from
+// per-tick iteration.
+extern int gAutoScout_threatUnitQuery     = -1;
+extern int gAutoScout_threatBuildingQuery = -1;
 
 // Per-proto threat profile cache. Parallel arrays:
 //   ID:           proto unit type ID (key)
@@ -270,6 +304,11 @@ extern int[]    gAutoScout_eventArea      = default;  // diag/log only
 // Diagnostic counters for one BFS pass (reset at top of findNextArea, echoed
 // at every return path). Used to triage "scout immediately untoggles" issues
 // where the candidate pool is being filtered out by an unexpected reason.
+// Heat-map diagnostic throttle counter. Incremented every tick; logs fire
+// every 5 ticks (~5s with minInterval=1) plus any tick with non-empty
+// threat query or active damage/death events.
+extern int   gAutoScout_heatDiagTickCounter = 0;
+
 extern int   gAutoScout_diag_considered    = 0;
 extern int   gAutoScout_diag_rejClaim      = 0;
 extern int   gAutoScout_diag_rejSelf       = 0;
@@ -518,11 +557,24 @@ void autoScout_initHeatArray()
 }
 
 // True if the given cActionType integer is an attack-style action.
+//
+// Broad whitelist (revisited 2026-05-14 after the narrow {4, 10} version
+// missed every military threat in a playtest). Empirically, kbProtoUnit-
+// GetActionIDs returns the generic "Attack" type (15) for many protos --
+// villagers, soldiers, towers, town centres -- even when the proto's XML
+// uses a specific action name like HandAttack or RangedAttack. The engine
+// categorises broadly internally, so we must accept type 15 to catch those
+// threats. Side effect: kbProtoUnitGetActionStatFloat will emit a "provided
+// action: Attack, doesn't exist for protoUnitID N" engine warning when
+// the proto's XML doesn't literally name an action "Attack" -- harmless
+// (stat returns 0, our `if (rof <= 0) continue` skips), just noisy in the
+// log. Specialty types (BombardAttack=39, Bombard=56, etc.) are kept for
+// siege coverage even though they're less common.
 bool autoScout_isAttackActionType(int actionType = -1)
 {
    if (actionType == 4)  { return(true); }   // HandAttack
    if (actionType == 10) { return(true); }   // RangedAttack
-   if (actionType == 15) { return(true); }   // Attack
+   if (actionType == 15) { return(true); }   // Attack (generic; needed for most threats)
    if (actionType == 39) { return(true); }   // BombardAttack
    if (actionType == 40) { return(true); }   // BroadsideAttack
    if (actionType == 56) { return(true); }   // Bombard
@@ -552,6 +604,71 @@ int autoScout_getBuildingType()
       gAutoScout_typeBuilding = kbGetUnitTypeID("Building");
    }
    return(gAutoScout_typeBuilding);
+}
+
+// Hardcoded projectile-count lookup for known multi-projectile protos. The
+// underlying <displayednumberprojectiles> XML field is not exposed by any
+// of the kbProtoUnitGetActionStat* APIs (Float and Int variants both reject
+// stat IDs > 3; the engine's "Valid range: 0 - 17" message was misleading,
+// real valid range is 0..3 and none of those slots contain the projectile
+// count). Without this multiplier, TC contribution underestimates by 2-3x
+// and the heat-flood radius around enemy bases is too small to repel
+// scouts -- the critical mod goal.
+//
+// Limited to actionName == "RangedAttack" because per-shot projectile counts
+// in proto.xml are only attached to ranged-attack action entries (SentryTower
+// also has a HandAttack at range 4 with no projectiles; we must not multiply
+// that). Specialty attacks (BombardAttack on Cheiroballista, etc.) accept
+// the single-shot underestimate -- siege is rarely a scout threat.
+//
+// List of 37 multi-projectile protos extracted from
+// extracted/gameplay/proto.xml as of 2026-05-14.
+int autoScout_getProtoProjectiles(int proto = -1, string actionName = "")
+{
+   if (actionName != "RangedAttack") { return(1); }
+   string name = kbProtoUnitGetName(proto);
+
+   // Buildings (Town Centres, fortresses, towers). The critical early-game
+   // protos for the "scouts avoid enemy TC" goal are in this group.
+   if (name == "TownCenter")          { return(2); }
+   if (name == "TownCenterAbandoned") { return(2); }
+   if (name == "VillageCenter")       { return(2); }
+   if (name == "CitadelCenter")       { return(3); }
+   if (name == "Castle")              { return(3); }
+   if (name == "Palace")              { return(3); }
+   if (name == "Fortress")            { return(3); }
+   if (name == "MigdolStronghold")    { return(3); }
+   if (name == "GreatTemple")         { return(3); }
+   if (name == "HillFort")            { return(3); }
+   if (name == "AsgardianHillFort")   { return(3); }
+   if (name == "Baolei")              { return(3); }
+   if (name == "SentryTower")             { return(2); }
+   if (name == "MilitaryCampTower")       { return(2); }
+   if (name == "MachineWorkshopTower")    { return(2); }
+   if (name == "CalpulliLumberOutpost")   { return(2); }
+
+   // Myth units / heroes (later-game; included for completeness).
+   if (name == "BaiHu")               { return(5); }
+   if (name == "ZhuQue")              { return(5); }
+   if (name == "Fafnir")              { return(6); }
+   if (name == "FafnirBoss")          { return(6); }
+   if (name == "UFO")                 { return(6); }
+   if (name == "FireGiant")           { return(2); }
+   if (name == "FireKing")            { return(2); }
+   if (name == "FireKingSPC")         { return(2); }
+   if (name == "YingLong")            { return(2); }
+   if (name == "Kamaitachi")          { return(3); }
+   if (name == "ScorpionMan")         { return(3); }
+   if (name == "Tzitzimitl")          { return(3); }
+   if (name == "TeixiptlaTezca")          { return(4); }
+   if (name == "SuperTeixiptlaTezca")     { return(4); }
+   if (name == "CheatSuperTeixiptlaTezca"){ return(4); }
+   if (name == "Tezcatlipoca")            { return(4); }
+   if (name == "Cheiroballista")          { return(4); }
+   if (name == "Junkozosen")              { return(4); }
+   if (name == "Shinobi")                 { return(3); }
+   if (name == "ChuKoNu")                 { return(4); }
+   return(1);
 }
 
 // Find or append a cache row for the given proto. Computes isThreat,
@@ -586,20 +703,42 @@ int autoScout_protoCacheRow(int proto = -1)
       gAutoScout_protoThreatIsBld[slot] = 1;
    }
 
-   // Threat profile: iterate attack actions, pick max contribution under the
-   // formula contribution = DPS * (1 + range / cAutoScout_HeatRangeDivisor).
-   // The 1.0 floor ensures melee attackers (range=1) still contribute their
-   // full DPS, instead of being effectively ignored by an old range/10 term.
+   // Threat profile: iterate attack actions by NAME and pick max contribution
+   // (formula: contrib = DPS * (1 + range / cAutoScout_HeatRangeDivisor)).
+   //
+   // Why we don't go through kbProtoUnitGetActionIDs: empirically, that call
+   // returns the generic "Attack" action type (15) for protos whose XML names
+   // its attacks "RangedAttack" or "HandAttack" -- SentryTower, CitadelCenter,
+   // Berserk all reported only type 15 in playtest 2026-05-14, even though
+   // their XML uses the specific names. kbActionGetName(15) returns "Attack",
+   // and kbProtoUnitGetActionStatFloat(proto, "Attack", ...) then fails with
+   // "action doesn't exist for protoUnitID" because the proto literally has
+   // no action named "Attack". Result: every threat proto profiled as
+   // isThreat=0 and the heat-map saw zero kb-tracked threats.
+   //
+   // Fix: iterate the known XML action-name list directly. Each name we try
+   // either returns valid stats (rof > 0, used) or returns 0 (skipped). The
+   // engine warns when an action doesn't exist for the proto, but the warning
+   // is cosmetic -- correct data still flows through. Names cover the common
+   // schema entries from extracted/gameplay/proto.xml.
    bool isThreat = false;
    float bestContrib = 0.0;
    float bestRange = 0.0;
-   int[] actionIDs = kbProtoUnitGetActionIDs(cMyID, proto);
-   int aN = actionIDs.size();
+   string[] attackNames = new string(10, "");
+   attackNames[0] = "HandAttack";
+   attackNames[1] = "RangedAttack";
+   attackNames[2] = "Attack";
+   attackNames[3] = "BombardAttack";
+   attackNames[4] = "BroadsideAttack";
+   attackNames[5] = "Bombard";
+   attackNames[6] = "TruckAttack";
+   attackNames[7] = "StunAttack";
+   attackNames[8] = "RoundelAttack";
+   attackNames[9] = "RoundelMultiAttack";
+   int aN = attackNames.size();
    for (int a = 0; a < aN; a = a + 1)
    {
-      int actionType = actionIDs[a];
-      if (autoScout_isAttackActionType(actionType) == false) { continue; }
-      string actionName = kbActionGetName(actionType);
+      string actionName = attackNames[a];
       if (actionName == "") { continue; }
 
       float rof = kbProtoUnitGetActionStatFloat(cMyID, proto, actionName, 0);
@@ -611,10 +750,29 @@ int autoScout_protoCacheRow(int proto = -1)
       float dmgPierce = kbProtoUnitGetActionDamageForType(cMyID, proto, actionName, 1);
       float dmgCrush  = kbProtoUnitGetActionDamageForType(cMyID, proto, actionName, 2);
       float dmgDivine = kbProtoUnitGetActionDamageForType(cMyID, proto, actionName, 3);
-      float dmgTotal  = dmgHack + dmgPierce + dmgCrush + dmgDivine;
-      if (dmgTotal <= 0.0) { continue; }
+      float dmgRaw  = dmgHack + dmgPierce + dmgCrush + dmgDivine;
+      if (dmgRaw <= 0.0) { continue; }
+
+      // Multi-projectile damage multiplier. See autoScout_getProtoProjectiles
+      // for why this is hardcoded (the engine doesn't expose
+      // displayednumberprojectiles through kbProtoUnitGetActionStatFloat;
+      // probe of stats 3..17 was all -1 or unrelated values).
+      int numProj = autoScout_getProtoProjectiles(proto, actionName);
+      if (numProj < 1) { numProj = 1; }
+      float dmgTotal = dmgRaw * numProj;
 
       float dps = dmgTotal / rof;
+      // Per-action verification echo so we can confirm each KB reading.
+      // Logged once per unique proto x action since protoCacheRow is lazy.
+      aiEcho("autoScout: profile proto=" + proto + " (" + kbProtoUnitGetName(proto)
+         + ") action=" + actionName
+         + " rof=" + rof
+         + " range=" + range
+         + " dmgRaw=" + dmgRaw
+         + " (H=" + dmgHack + " P=" + dmgPierce + " C=" + dmgCrush + " D=" + dmgDivine + ")"
+         + " numProj=" + numProj
+         + " dmgTotal=" + dmgTotal
+         + " dps=" + dps);
       if (dps <= cAutoScout_HeatMinDPS) { continue; }
 
       isThreat = true;
@@ -630,6 +788,14 @@ int autoScout_protoCacheRow(int proto = -1)
       gAutoScout_protoThreatIsT[slot]      = 1;
       gAutoScout_protoThreatContrib[slot] = bestContrib;
       gAutoScout_protoThreatRange[slot]   = bestRange;
+      aiEcho("autoScout: PROFILE result proto=" + proto + " (" + kbProtoUnitGetName(proto)
+         + ") isThreat=1 bestContrib=" + bestContrib
+         + " bestRange=" + bestRange);
+   }
+   else
+   {
+      aiEcho("autoScout: PROFILE result proto=" + proto + " (" + kbProtoUnitGetName(proto)
+         + ") isThreat=0 (no qualifying attack actions)");
    }
    return(slot);
 }
@@ -650,13 +816,34 @@ int autoScout_unitLastSeenRow(int unitID = -1)
    return(slot);
 }
 
-// Initialise the cached enemy-threat query (all enemy units, alive).
+// Initialise the cached enemy-threat queries (live mobile units + buildings).
+// Two separate queries instead of one cUnitTypeAll. cUnitTypeAll returns
+// trees / gold mines / relics / columns / berries as well -- ~1000 units per
+// tick that we then have to process and discard. cUnitTypeUnit (889) alone
+// EXCLUDES buildings so the heat-map would miss enemy TCs and towers. The
+// split: one query for live mobile units, one for buildings. Both share the
+// same downstream processing in autoScout_updateHeatMap.
+//
+// Visibility filter is left at the engine default (cUnitQuerySeeableStateAllValid
+// = -1, no filtering) for both queries. Adding cUnitQueryVisibleStateRecent-
+// PositionKnown (=4) was found to filter out everything in a previous playtest --
+// the downstream fog timer + isOnMap check already gate stale positions.
 void autoScout_initThreatQuery()
 {
-   if (gAutoScout_threatQuery >= 0) { return; }
-   gAutoScout_threatQuery = kbUnitQueryCreate("autoScout_threats");
-   kbUnitQuerySetPlayerRelation(gAutoScout_threatQuery, cPlayerRelationEnemy, false);
-   kbUnitQuerySetState(gAutoScout_threatQuery, cUnitStateAlive);
+   if (gAutoScout_threatUnitQuery < 0)
+   {
+      gAutoScout_threatUnitQuery = kbUnitQueryCreate("autoScout_threats_units");
+      kbUnitQuerySetPlayerRelation(gAutoScout_threatUnitQuery, cPlayerRelationEnemy, false);
+      kbUnitQuerySetState(gAutoScout_threatUnitQuery, cUnitStateAlive);
+      kbUnitQuerySetUnitType(gAutoScout_threatUnitQuery, cUnitTypeMilitaryUnit);
+   }
+   if (gAutoScout_threatBuildingQuery < 0)
+   {
+      gAutoScout_threatBuildingQuery = kbUnitQueryCreate("autoScout_threats_buildings");
+      kbUnitQuerySetPlayerRelation(gAutoScout_threatBuildingQuery, cPlayerRelationEnemy, false);
+      kbUnitQuerySetState(gAutoScout_threatBuildingQuery, cUnitStateAlive);
+      kbUnitQuerySetUnitType(gAutoScout_threatBuildingQuery, cUnitTypeBuilding);
+   }
 }
 
 // Flood-fill heat from an entity's position outward through the area graph.
@@ -779,23 +966,38 @@ void autoScout_updateHeatMap()
 
    int now = xsGetTimeMS();
 
-   // Visible-threat layer.
-   if (gAutoScout_threatQuery >= 0)
+   // Per-tick filter accounting for the diagnostic at the bottom of this
+   // function. Helps narrow down where heat-map data is being lost. Counters
+   // are aggregated across BOTH the unit query and the building query.
+   int diagQueryN     = 0;
+   int diagRejInvalid = 0;
+   int diagRejVill    = 0;
+   int diagRejNonT    = 0;
+   int diagRejFogMob  = 0;
+   int diagRejOffMap  = 0;
+   int diagContrib    = 0;
+
+   // Visible-threat layer: process both queries with the same per-unit logic.
+   for (int q = 0; q < 2; q = q + 1)
    {
-      kbUnitQueryResetResults(gAutoScout_threatQuery);
-      int n = kbUnitQueryExecute(gAutoScout_threatQuery);
+      int queryID = gAutoScout_threatUnitQuery;
+      if (q == 1) { queryID = gAutoScout_threatBuildingQuery; }
+      if (queryID < 0) { continue; }
+      kbUnitQueryResetResults(queryID);
+      int n = kbUnitQueryExecute(queryID);
+      diagQueryN = diagQueryN + n;
       for (int i = 0; i < n; i = i + 1)
       {
-         int unitID = kbUnitQueryGetResult(gAutoScout_threatQuery, i);
-         if (unitID < 0) { continue; }
-         if (kbUnitGetIsIDValid(unitID) == false) { continue; }
+         int unitID = kbUnitQueryGetResult(queryID, i);
+         if (unitID < 0) { diagRejInvalid = diagRejInvalid + 1; continue; }
+         if (kbUnitGetIsIDValid(unitID) == false) { diagRejInvalid = diagRejInvalid + 1; continue; }
          int proto = kbUnitGetProtoUnitID(unitID);
          int cacheRow = autoScout_protoCacheRow(proto);
-         if (cacheRow < 0) { continue; }
+         if (cacheRow < 0) { diagRejInvalid = diagRejInvalid + 1; continue; }
 
          // Skip villagers entirely.
-         if (gAutoScout_protoThreatIsVill[cacheRow] == 1) { continue; }
-         if (gAutoScout_protoThreatIsT[cacheRow] != 1) { continue; }
+         if (gAutoScout_protoThreatIsVill[cacheRow] == 1) { diagRejVill = diagRejVill + 1; continue; }
+         if (gAutoScout_protoThreatIsT[cacheRow] != 1)    { diagRejNonT = diagRejNonT + 1; continue; }
 
          bool visible = kbUnitVisible(unitID);
          bool isBuilding = (gAutoScout_protoThreatIsBld[cacheRow] == 1);
@@ -812,23 +1014,26 @@ void autoScout_updateHeatMap()
          {
             int lastSeen = -1;
             if (seenRow >= 0) { lastSeen = gAutoScout_unitLastSeenMs[seenRow]; }
-            if (lastSeen < 0) { continue; }  // never seen visible
+            if (lastSeen < 0) { diagRejFogMob = diagRejFogMob + 1; continue; }  // never seen visible
             if (now - lastSeen > cAutoScout_HeatMobileFogTimeoutMs)
             {
+               diagRejFogMob = diagRejFogMob + 1;
                continue;  // fog timer expired
             }
          }
 
          vector unitPos = kbUnitGetPosition(unitID);
-         if (autoScout_isOnMap(unitPos) == false) { continue; }
+         if (autoScout_isOnMap(unitPos) == false) { diagRejOffMap = diagRejOffMap + 1; continue; }
          autoScout_addHeatFlood(unitPos,
             gAutoScout_protoThreatRange[cacheRow],
             gAutoScout_protoThreatContrib[cacheRow]);
+         diagContrib = diagContrib + 1;
       }
    }
 
    // Damage/death event layer. Applied on top until expired, using the same
    // flood-fill with the event's stored position + range.
+   int activeEvents = 0;
    int en = gAutoScout_eventExpiryMs.size();
    for (int e = 0; e < en; e = e + 1)
    {
@@ -836,6 +1041,28 @@ void autoScout_updateHeatMap()
       autoScout_addHeatFlood(gAutoScout_eventPos[e],
          gAutoScout_eventRange[e],
          gAutoScout_eventMagnitude[e]);
+      activeEvents = activeEvents + 1;
+   }
+
+   // Throttled per-tick diagnostic. Log every 5s (counter % 5) OR any tick
+   // where the threat query returned anything OR any tick with an active
+   // damage/death event. Silent ticks when no enemies are in kb avoid log
+   // spam but the modulus floor confirms the heat-map is still ticking.
+   gAutoScout_heatDiagTickCounter = gAutoScout_heatDiagTickCounter + 1;
+   bool logThisTick = false;
+   if (diagQueryN > 0)              { logThisTick = true; }
+   if (activeEvents > 0)            { logThisTick = true; }
+   if (gAutoScout_heatDiagTickCounter % 5 == 0) { logThisTick = true; }
+   if (logThisTick == true)
+   {
+      aiEcho("autoScout: heat tick query=" + diagQueryN
+         + " contrib=" + diagContrib
+         + " rej[invalid=" + diagRejInvalid
+         + " vill=" + diagRejVill
+         + " nonThreat=" + diagRejNonT
+         + " fogMob=" + diagRejFogMob
+         + " offMap=" + diagRejOffMap + "]"
+         + " events=" + activeEvents);
    }
 }
 
@@ -1312,39 +1539,6 @@ int autoScout_findSlotForUnit(int unitID = -1)
    return(-1);
 }
 
-// Returns true if areaPos lies within (radiusFactor * gAutoScout_maxOracleLOS)
-// of ANY of cMyID's alive oracles, excluding excludeUnitID. Considers BOTH
-// each oracle's current position AND, for pool-tracked oracles with a valid
-// target, the target waypoint -- matching the min(pos, target) pattern the
-// regular-scout density penalty uses. Without the target-waypoint check,
-// oracles toggled in quick succession from the same Temple all see each other
-// as "still at the Temple" and pick identical destinations near the TC.
-bool autoScout_anyOracleNear(
-   vector areaPos = cInvalidVector, int excludeUnitID = -1, float radiusFactor = 0.8)
-{
-   autoScout_initOracleQuery();
-   kbUnitQueryResetResults(gAutoScout_oracleQuery);
-   int n = kbUnitQueryExecute(gAutoScout_oracleQuery);
-   if (n <= 0) { return(false); }
-   float threshold = radiusFactor * gAutoScout_maxOracleLOS;
-   for (int i = 0; i < n; i = i + 1)
-   {
-      int oracleID = kbUnitQueryGetResult(gAutoScout_oracleQuery, i);
-      if (oracleID < 0) { continue; }
-      if (oracleID == excludeUnitID) { continue; }
-      vector pos = kbUnitGetPosition(oracleID);
-      if (xsVectorDistanceXZ(pos, areaPos) < threshold) { return(true); }
-
-      int slot = autoScout_findSlotForUnit(oracleID);
-      if (slot >= 0 && gAutoScout_targetAreaID[slot] >= 0)
-      {
-         vector wp = gAutoScout_targetWaypoint[slot];
-         if (xsVectorDistanceXZ(wp, areaPos) < threshold) { return(true); }
-      }
-   }
-   return(false);
-}
-
 // Returns a [0, 1] penalty representing summed overlap of areaPos with all
 // our oracles' claim circles, excluding excludeUnitID. Per-oracle distance is
 // min(dCurrentPos, dTargetWaypoint) for pool-tracked oracles with a valid
@@ -1386,6 +1580,8 @@ float autoScout_oraclePenalty(vector areaPos = cInvalidVector, int excludeUnitID
          radius = kbUnitGetStatFloat(oracleID, cUnitStatLOS);
       }
       if (radius < 0.001) { continue; }
+      // Pad: regular scouts should keep extra distance from oracle claim edges.
+      radius = radius + cAutoScout_OraclePenaltyRadiusPad;
       if (d < radius)
       {
          // Doubled (2026-05-13) -- regular scouts were still picking areas
@@ -1397,6 +1593,48 @@ float autoScout_oraclePenalty(vector areaPos = cInvalidVector, int excludeUnitID
       }
    }
    if (penalty > 1.0) { penalty = 1.0; }
+   return(penalty);
+}
+
+// Oracle-source -> other-oracle additive penalty. Replaces the previous
+// hard-skip (cAutoScout_OracleExclusionFactor) with a soft term: oracles
+// strongly avoid overlapping each other but can still pick an overlapping
+// area if no better option exists. Range scales with current maxOracleLOS:
+// two oracles each at MaxLOS can still cover non-overlapping ground if the
+// distance between them is >= 2 * MaxLOS. Inside that, the penalty ramps
+// linearly to 1.0 at exact overlap, and is summed (NOT clamped) so multiple
+// nearby oracles compound. Multiplied by cAutoScout_OracleOnOracleWeight at
+// the call site to dominate the rest of the score.
+float autoScout_oracleOnOraclePenalty(vector areaPos = cInvalidVector, int excludeUnitID = -1)
+{
+   autoScout_initOracleQuery();
+   kbUnitQueryResetResults(gAutoScout_oracleQuery);
+   int n = kbUnitQueryExecute(gAutoScout_oracleQuery);
+   if (n <= 0) { return(0.0); }
+   float radius = cAutoScout_OracleOnOracleRangeFactor * gAutoScout_maxOracleLOS;
+   if (radius < 0.001) { return(0.0); }
+   float penalty = 0.0;
+   for (int i = 0; i < n; i = i + 1)
+   {
+      int oracleID = kbUnitQueryGetResult(gAutoScout_oracleQuery, i);
+      if (oracleID < 0) { continue; }
+      if (oracleID == excludeUnitID) { continue; }
+
+      vector pos = kbUnitGetPosition(oracleID);
+      float d = xsVectorDistanceXZ(pos, areaPos);
+
+      int slot = autoScout_findSlotForUnit(oracleID);
+      if (slot >= 0 && gAutoScout_targetAreaID[slot] >= 0)
+      {
+         float dWp = xsVectorDistanceXZ(gAutoScout_targetWaypoint[slot], areaPos);
+         if (dWp < d) { d = dWp; }
+      }
+
+      if (d < radius)
+      {
+         penalty = penalty + (radius - d) / radius;
+      }
+   }
    return(penalty);
 }
 
@@ -1477,7 +1715,12 @@ bool autoScout_areaIsCandidate(int areaID = -1, int scoutUnitID = -1)
       return(false);
    }
    int blackTiles = kbAreaGetNumberBlackTiles(areaID);
-   if (blackTiles * 100 / totalTiles < cAutoScout_BlackTilesPercentMin)
+   int minBlackPercent = cAutoScout_BlackTilesPercentMin;
+   if (autoScout_isOracle(scoutUnitID) == true)
+   {
+      minBlackPercent = cAutoScout_BlackTilesPercentMinOracle;
+   }
+   if (blackTiles * 100 / totalTiles < minBlackPercent)
    {
       gAutoScout_diag_rejTiles = gAutoScout_diag_rejTiles + 1;
       return(false);
@@ -1498,16 +1741,10 @@ bool autoScout_areaIsCandidate(int areaID = -1, int scoutUnitID = -1)
       return(false);
    }
 
-   // Oracle source hard-skip: refuse candidates whose centroid lies within
-   // cAutoScout_OracleExclusionFactor * MaxOracleLOS of any OTHER oracle.
-   // Prevents oracle-on-oracle LOS overlap (which throttles favor income
-   // for the overlapped pair) and redundant coverage.
-   if (autoScout_isOracle(scoutUnitID) == true &&
-       autoScout_anyOracleNear(areaPos, scoutUnitID, cAutoScout_OracleExclusionFactor) == true)
-   {
-      gAutoScout_diag_rejOracle = gAutoScout_diag_rejOracle + 1;
-      return(false);
-   }
+   // Oracle-source -> other-oracle was previously a hard skip here. It is
+   // now a soft additive penalty applied inside autoScout_areaScore (via
+   // autoScout_oracleOnOraclePenalty), so oracles can still pick an
+   // overlapping area when no better option exists.
 
    gAutoScout_diag_passed = gAutoScout_diag_passed + 1;
    return(true);
@@ -1528,14 +1765,50 @@ float autoScout_areaScore(
    vector tcPos = cInvalidVector, vector scoutPos = cInvalidVector, float mapDiag = 1.0)
 {
    vector areaPos = kbAreaGetCenter(areaID);
+   bool sourceIsOracle = autoScout_isOracle(scoutUnitID);
 
    float distTC = xsVectorDistanceXZ(tcPos, areaPos);
    float tcScore = 1.0 - distTC / mapDiag;
    if (tcScore < 0.0) { tcScore = 0.0; }
 
+   // scoutScore: distance from the picking scout to the candidate area.
+   //   - Regular scouts: peak at distance 0, linear decay over mapDiag.
+   //   - Oracles: symmetric triangle peaking at MaxOracleLOS / 4 (the optimal
+   //     hop length that maximises new LOS without wasted overlap or
+   //     overshoot, biased even closer in than half-LOS so the oracle leaves
+   //     its current claim ring barely overlapping the next). Denominator is
+   //     MaxOracleLOS (NOT mapDiag) so the slope is sharp: scoutScore reaches
+   //     0 at ~1.25 * MaxOracleLOS from the oracle and stays there for
+   //     everything farther. Soft rather than hard-skip -- if no near area
+   //     qualifies, far picks can still win via tcScore + density, but the
+   //     bias toward nearby is strong.
    float distScout = xsVectorDistanceXZ(scoutPos, areaPos);
+   // XS requires every variable to be initialized with a literal or const at
+   // declaration -- can't do `float x; if (...) x = ...;`. So we start with
+   // the regular-scout formula and overwrite for the oracle branch.
    float scoutScore = 1.0 - distScout / mapDiag;
-   if (scoutScore < 0.0) { scoutScore = 0.0; }
+   if (sourceIsOracle == true)
+   {
+      float oraclePeakDist = gAutoScout_maxOracleLOS * 0.25;
+      float scoutDelta = distScout - oraclePeakDist;
+      if (scoutDelta < 0.0) { scoutDelta = -scoutDelta; }
+      float scoutFalloff = gAutoScout_maxOracleLOS;
+      if (scoutFalloff < 1.0) { scoutFalloff = 1.0; }
+      scoutScore = 1.0 - scoutDelta / scoutFalloff;
+      // Deliberately NOT clamped to 0 for oracles. Beyond the cliff (where
+      // scoutScore reaches 0 at dist = oraclePeakDist + scoutFalloff) the
+      // value keeps decreasing linearly, becoming negative. This gives the
+      // weighted sum a direct additive penalty proportional to "how far
+      // past the cliff" the candidate is, so two equally far-frontier picks
+      // still differentiate by raw distance.
+   }
+   else
+   {
+      // Regular scouts keep the clamp -- their peak is at distance 0 so
+      // scoutScore monotonically decreases, and negative would mean "farther
+      // than mapDiag" which can't happen on-map.
+      if (scoutScore < 0.0) { scoutScore = 0.0; }
+   }
 
    // Density: per-other-scout penalty using the MIN of the other scout's
    // current position and its target waypoint, both measured to areaPos.
@@ -1545,9 +1818,11 @@ float autoScout_areaScore(
    // (two scouts walking past each other to similar destinations) that pure
    // current-position distance misses.
    //
-   // Penalty ramps linearly from 1.0 at exact overlap to 0.0 at
-   // cAutoScout_DensityRadius. Resulting subscore = 1.0 - sum(penalties),
-   // clamped to [0, 1].
+   // Per-pair radius:
+   //   - oracle source vs non-oracle other: cAutoScout_DensityRadiusOracleToOther (45)
+   //   - all other combinations: cAutoScout_DensityRadius (30)
+   // Penalty ramps linearly from 1.0 at exact overlap to 0.0 at radius.
+   // Resulting subscore = 1.0 - sum(penalties), clamped to [0, 1].
    float densityPenalty = 0.0;
    int poolSize = gAutoScout_unitID.size();
    for (int i = 0; i < poolSize; i++)
@@ -1569,10 +1844,16 @@ float autoScout_areaScore(
          if (dWp < dEffective) { dEffective = dWp; }
       }
 
-      if (dEffective < cAutoScout_DensityRadius)
+      float densityRadius = cAutoScout_DensityRadius;
+      if (sourceIsOracle == true && autoScout_isOracle(otherID) == false)
+      {
+         densityRadius = cAutoScout_DensityRadiusOracleToOther;
+      }
+
+      if (dEffective < densityRadius)
       {
          densityPenalty = densityPenalty
-            + (cAutoScout_DensityRadius - dEffective) / cAutoScout_DensityRadius;
+            + (densityRadius - dEffective) / densityRadius;
       }
    }
    float densityScore = 1.0 - densityPenalty;
@@ -1587,21 +1868,63 @@ float autoScout_areaScore(
    if (dangerRatio > 1.0) { dangerRatio = 1.0; }
    float dangerScore = 1.0 - dangerRatio;
 
-   float baseScore = cAutoScout_WeightTC * tcScore
-                   + cAutoScout_WeightScout * scoutScore
-                   + cAutoScout_WeightDensity * densityScore
-                   + cAutoScout_DangerWeight * dangerScore;
+   // Score assembly differs by source:
+   //   - non-oracle: simple weighted sum of all four subscores.
+   //   - oracle: scoutScore can be NEGATIVE past its cliff, so the additive
+   //     term naturally penalises far picks. On top of that, a multiplicative
+   //     "far-penalty" applied to the POSITIVE (tc/density/danger) components
+   //     shrinks the magnitude of the baseScore further past the cliff. We
+   //     keep multiplicative off the scout term so the additive penalty isn't
+   //     also scaled (which would cancel out for negative scoutScore values).
+   float baseScore = 0.0;
+   if (sourceIsOracle == true)
+   {
+      float positivesAddend = cAutoScout_WeightTC * tcScore
+                            + cAutoScout_WeightDensity * densityScore
+                            + cAutoScout_DangerWeight * dangerScore;
 
-   // Oracle-overlap discount applies only when the source scout is NOT an
-   // oracle. Oracle sources already use the hard-skip in
-   // autoScout_areaIsCandidate; double-applying a discount here would over-
-   // penalise oracle re-positioning. Multiplicative so areas deeply inside an
-   // oracle's claim approach zero score, while areas just barely touching the
-   // claim circle keep most of their score.
-   if (autoScout_isOracle(scoutUnitID) == false)
+      // Far-cliff: same boundary where the additive scoutScore would have
+      // clamped to zero originally (peak + falloff). Beyond it, multiply the
+      // positives by a linear falloff over mapDiag so they shrink toward 0
+      // for genuinely-far picks.
+      float farCliff = gAutoScout_maxOracleLOS * 0.25 + gAutoScout_maxOracleLOS;
+      float farPenalty = 1.0;
+      if (distScout > farCliff)
+      {
+         farPenalty = 1.0 - (distScout - farCliff) / mapDiag;
+         if (farPenalty < 0.0) { farPenalty = 0.0; }
+      }
+      baseScore = positivesAddend * farPenalty
+                + cAutoScout_WeightScout * scoutScore;
+   }
+   else
+   {
+      baseScore = cAutoScout_WeightTC * tcScore
+                + cAutoScout_WeightScout * scoutScore
+                + cAutoScout_WeightDensity * densityScore
+                + cAutoScout_DangerWeight * dangerScore;
+   }
+
+   // Oracle-overlap shaping:
+   //   - source is NOT an oracle: multiplicative discount against oracle
+   //     claim circles (autoScout_oraclePenalty, range = oracle radius + pad).
+   //     Multiplicative so areas deeply inside an oracle's claim approach
+   //     zero score, while areas just barely touching keep most of their score.
+   //   - source IS an oracle: strong additive penalty against other oracles
+   //     (autoScout_oracleOnOraclePenalty, range = 2 * MaxOracleLOS, weight
+   //     ~3.0). Designed to dominate the rest of the score so a fully-
+   //     overlapping other oracle alone disqualifies the area in practice.
+   //     Soft (not hard-skip) so an oracle with no better option can still
+   //     pick a partially-overlapped area.
+   if (sourceIsOracle == false)
    {
       float oracleDiscount = 1.0 - autoScout_oraclePenalty(areaPos, scoutUnitID);
       baseScore = baseScore * oracleDiscount;
+   }
+   else
+   {
+      float oraclePen = autoScout_oracleOnOraclePenalty(areaPos, scoutUnitID);
+      baseScore = baseScore - cAutoScout_OracleOnOracleWeight * oraclePen;
    }
 
    return(baseScore);
@@ -1615,7 +1938,8 @@ float autoScout_areaScore(
 //   - First batch from BFS: depths 1..N combined where N=2 for regular scouts
 //     and N=4 for oracles. Oracles have a far larger effective coverage radius
 //     (full MaxOracleLOS when parked), so a wider first-batch gives the
-//     anyOracleNear hard-skip more candidates to pick non-overlapping spots.
+//     oracle-on-oracle additive penalty more candidates to differentiate
+//     between (originally a hard skip; now soft via autoScout_oracleOnOraclePenalty).
 //   - Subsequent batches: single depth each (N+1, then N+2, ...).
 // As soon as a batch contains at least one candidate, we pick the one with
 // the highest autoScout_areaScore and return.
