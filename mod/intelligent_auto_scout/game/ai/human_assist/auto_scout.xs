@@ -108,21 +108,28 @@ const int   cAutoScout_BlacklistDurationMs = 90000;
 // explored tiles. See autoScout_effectiveDanger.
 const float cAutoScout_DangerBaseline      = 20.0;
 
-// Heat-map parameters. Per-area float array updated each tick from a
-// kbUnitQuery of visible enemy threats. Replaces kbAreaGetDangerLevel as the
-// signal for the "explored" portion of an area's effective danger.
+// Heat-map parameters. Per-area float array recomputed each tick from
+// visible enemy threats (full reset + ADD across threats, so multiple units
+// in the same area pile up). Separate damage/death event bumps persist for
+// a fixed duration on top of the per-tick base.
 //
-//   cAutoScout_HeatMinDPS:       per-threat DPS gate (filters out enemy scouts).
-//   cAutoScout_HeatRangeDivisor: contribution = DPS * (range / divisor).
-//   cAutoScout_HeatSpreadMaxDist: 1-hop spread to border areas weighted
-//                                 linearly (weight = 1 - dist/max, clamped).
-//   cAutoScout_HeatDecayPerCool: linear decay applied every cooldown tick.
-//   cAutoScout_HeatCooldownInterval: tick count between decay passes.
-const float cAutoScout_HeatMinDPS           = 4.0;
-const float cAutoScout_HeatRangeDivisor     = 10.0;
-const float cAutoScout_HeatSpreadMaxDist    = 50.0;
-const float cAutoScout_HeatDecayPerCool     = 1.0;
-const int   cAutoScout_HeatCooldownInterval = 10;
+//   cAutoScout_HeatMinDPS:       per-threat DPS gate (filters out scouts).
+//   cAutoScout_HeatRangeDivisor: contribution = DPS * (1 + range / divisor).
+//   cAutoScout_HeatSpreadMaxDist: 1-hop spread to border areas, linear falloff.
+//   cAutoScout_HeatMobileUnitFogTimeoutMs: how long a non-building threat
+//                                          remains a heat producer after we
+//                                          lose LOS on it.
+//   cAutoScout_HeatDamageEventMag/Dur:   bump added at scout's position on
+//                                        damage; persists for the duration.
+//   cAutoScout_HeatDeathEventMag/Dur:    same but much stronger, on death.
+const float cAutoScout_HeatMinDPS                  = 4.0;
+const float cAutoScout_HeatRangeDivisor            = 20.0;
+const float cAutoScout_HeatSpreadMaxDist           = 50.0;
+const int   cAutoScout_HeatMobileUnitFogTimeoutMs  = 10000;
+const float cAutoScout_HeatDamageEventMagnitude    = 150.0;
+const int   cAutoScout_HeatDamageEventDurationMs   = 10000;
+const float cAutoScout_HeatDeathEventMagnitude     = 500.0;
+const int   cAutoScout_HeatDeathEventDurationMs    = 10000;
 
 // Flee-area picker (autoScout_findFleeArea). BFS expands outward from the
 // scout's current area up to cAutoScout_FleeBfsDepth hops, refusing to
@@ -199,6 +206,12 @@ extern int[] gAutoScout_targetHerdID = default;
 extern int[] gAutoScout_fleeUntilMs   = default;
 extern int[] gAutoScout_fleeFromArea  = default;
 
+// Per-scout HP and last-known position tracking. Used to detect damage
+// (lastHP decreases tick-over-tick) and death (unit becomes invalid) events
+// so we can bump the heat-map at the scout's location.
+extern float[]  gAutoScout_lastHP  = default;
+extern vector[] gAutoScout_lastPos = default;
+
 // Danger blacklist. Two parallel append-only arrays keyed by areaID. Areas
 // enter when a scout aborts because of them and remain excluded from BFS
 // picking until expiryMs < xsGetTimeMS(). Linear scan on lookup; bounded by
@@ -207,12 +220,10 @@ extern int[] gAutoScout_blacklistedAreaIDs  = default;
 extern int[] gAutoScout_blacklistedExpiryMs = default;
 
 // Per-area heat-map. Indexed by areaID, sized to kbAreaGetNumber() at first
-// rule firing (autoScout_initHeatArray). Updated each tick by
-// autoScout_updateHeatMap and decayed every cAutoScout_HeatCooldownInterval
-// ticks by autoScout_decayHeat.
+// rule firing (autoScout_initHeatArray). Fully reset and rebuilt each tick
+// in autoScout_updateHeatMap from currently-known threats and active events.
 extern float[] gAutoScout_heat       = default;
 extern bool    gAutoScout_heatInited = false;
-extern int     gAutoScout_heatCooldownCounter = 0;
 
 // Cached threat-query handle for the heat-map update.
 extern int gAutoScout_threatQuery = -1;
@@ -220,11 +231,29 @@ extern int gAutoScout_threatQuery = -1;
 // Per-proto threat profile cache. Parallel arrays:
 //   ID:           proto unit type ID (key)
 //   isThreat:     1 if peak DPS > cAutoScout_HeatMinDPS, else 0
-//   contribution: max DPS * range / divisor across attack actions
+//   contribution: max DPS * (1 + range/divisor) across attack actions
+//   isVillager:   1 if proto is AbstractVillager (skip entirely)
+//   isBuilding:   1 if proto is Building (fogged-OK, no fog timeout)
 // Linear scan; the proto set we encounter in a game is small (~20-50 distinct).
 extern int[]   gAutoScout_protoThreatID     = default;
 extern int[]   gAutoScout_protoThreatIsT    = default;
 extern float[] gAutoScout_protoThreatContrib = default;
+extern int[]   gAutoScout_protoThreatIsVill = default;
+extern int[]   gAutoScout_protoThreatIsBld  = default;
+
+// Per-(mobile-)unit fog timer. We record the last time each enemy unit was
+// CURRENTLY VISIBLE; mobile units (non-building) stop contributing heat once
+// they've been fogged for more than cAutoScout_HeatMobileUnitFogTimeoutMs.
+// Buildings are exempt (they don't move, so fogged-position is still accurate).
+extern int[] gAutoScout_unitLastSeenID = default;
+extern int[] gAutoScout_unitLastSeenMs = default;
+
+// Damage/death event bumps. Three parallel arrays — area, magnitude, and
+// expiry timestamp. Active events are added on top of the per-tick base
+// heat in autoScout_updateHeatMap.
+extern int[]   gAutoScout_eventArea      = default;
+extern float[] gAutoScout_eventMagnitude = default;
+extern int[]   gAutoScout_eventExpiryMs  = default;
 
 // Diagnostic counters for one BFS pass (reset at top of findNextArea, echoed
 // at every return path). Used to triage "scout immediately untoggles" issues
@@ -387,6 +416,29 @@ void autoScout_dropFromPool(int slot = -1)
       aiEcho("autoScout: dropFromPool slot=" + slot + " unit=" + droppedUnit
          + " state=" + droppedState);
       autoScout_clearVisited(droppedUnit);
+
+      // Death detection: if the unit ID is no longer valid AT THE MOMENT WE
+      // DROP, the scout was killed (vs. player-cancelled, in which case the
+      // unit is still alive and the plan was destroyed). Emit a strong heat
+      // event at the cached last-known position. Inlined here because
+      // autoScout_addHeatEvent / autoScout_isOnMap live below this point in
+      // source order.
+      if (kbUnitGetIsIDValid(droppedUnit) == false)
+      {
+         vector lastPos = gAutoScout_lastPos[slot];
+         if (kbGetIsLocationOnMap(lastPos) == true)
+         {
+            int deathArea = kbAreaGetIDByPosition(lastPos);
+            if (deathArea >= 0)
+            {
+               gAutoScout_eventArea.add(deathArea);
+               gAutoScout_eventMagnitude.add(cAutoScout_HeatDeathEventMagnitude);
+               gAutoScout_eventExpiryMs.add(xsGetTimeMS() + cAutoScout_HeatDeathEventDurationMs);
+               aiEcho("autoScout: DEATH event slot=" + slot + " unit=" + droppedUnit
+                  + " area=" + deathArea + " pos=" + lastPos);
+            }
+         }
+      }
    }
    autoScout_releaseClaim(slot);
    gAutoScout_unitID.removeIndex(slot);
@@ -399,6 +451,8 @@ void autoScout_dropFromPool(int slot = -1)
    gAutoScout_targetHerdID.removeIndex(slot);
    gAutoScout_fleeUntilMs.removeIndex(slot);
    gAutoScout_fleeFromArea.removeIndex(slot);
+   gAutoScout_lastHP.removeIndex(slot);
+   gAutoScout_lastPos.removeIndex(slot);
 }
 
 //------------------------------------------------------------------------------
@@ -429,9 +483,12 @@ vector autoScout_clampToMap(vector pos = cInvalidVector)
 }
 
 //------------------------------------------------------------------------------
-// Heat-map (2026-05-13). Per-area float, rebuilt each tick from visible enemy
-// threats; replaces kbAreaGetDangerLevel as the danger signal for the
-// "explored" portion of an area in autoScout_effectiveDanger.
+// Heat-map (2026-05-13). Per-area float, fully reset and rebuilt each tick.
+// The base layer sums (ADD) contributions of known-position enemy threats
+// (buildings: always; mobile units: only while currently-visible OR within
+// cAutoScout_HeatMobileUnitFogTimeoutMs of last LOS; villagers: never).
+// Persistent damage/death event bumps are added on top of the base layer
+// for their duration. Replaces kbAreaGetDangerLevel.
 //------------------------------------------------------------------------------
 
 // Lazy-init heat array sized to the current map's area count.
@@ -462,22 +519,69 @@ bool autoScout_isAttackActionType(int actionType = -1)
    return(false);
 }
 
-// Compute (isThreat, contribution) for a proto by iterating its actions.
-// Threshold: any single attack action with DPS > cAutoScout_HeatMinDPS makes
-// the proto a threat. Contribution = max across attack actions of
-// (DPS * range / cAutoScout_HeatRangeDivisor). Damage is summed over the
-// four trigger damage types (Hack=0, Pierce=1, Crush=2, Divine=3).
-void autoScout_computeProtoThreat(int proto = -1, int outSlot = -1)
+// Lazy lookup for the AbstractVillager and Building unit-type IDs. Cached
+// after first call; -1 if the lookup failed.
+extern int gAutoScout_typeVillager = -2;
+extern int gAutoScout_typeBuilding = -2;
+int autoScout_getVillagerType()
 {
-   if (proto < 0) { return; }
-   bool isThreat = false;
-   float bestContrib = 0.0;
+   if (gAutoScout_typeVillager == -2)
+   {
+      gAutoScout_typeVillager = kbGetUnitTypeID("AbstractVillager");
+   }
+   return(gAutoScout_typeVillager);
+}
+int autoScout_getBuildingType()
+{
+   if (gAutoScout_typeBuilding == -2)
+   {
+      gAutoScout_typeBuilding = kbGetUnitTypeID("Building");
+   }
+   return(gAutoScout_typeBuilding);
+}
 
-   int[] actionIDs = kbProtoUnitGetActionIDs(cMyID, proto);
-   int n = actionIDs.size();
+// Find or append a cache row for the given proto. Computes isThreat,
+// contribution, isVillager, isBuilding on first encounter.
+int autoScout_protoCacheRow(int proto = -1)
+{
+   if (proto < 0) { return(-1); }
+   int n = gAutoScout_protoThreatID.size();
    for (int i = 0; i < n; i = i + 1)
    {
-      int actionType = actionIDs[i];
+      if (gAutoScout_protoThreatID[i] == proto) { return(i); }
+   }
+
+   // First encounter: append, then compute.
+   int slot = n;
+   gAutoScout_protoThreatID.add(proto);
+   gAutoScout_protoThreatIsT.add(0);
+   gAutoScout_protoThreatContrib.add(0.0);
+   gAutoScout_protoThreatIsVill.add(0);
+   gAutoScout_protoThreatIsBld.add(0);
+
+   // Villager / Building flags.
+   int vType = autoScout_getVillagerType();
+   if (vType >= 0 && kbProtoUnitIsType(proto, vType) == true)
+   {
+      gAutoScout_protoThreatIsVill[slot] = 1;
+   }
+   int bType = autoScout_getBuildingType();
+   if (bType >= 0 && kbProtoUnitIsType(proto, bType) == true)
+   {
+      gAutoScout_protoThreatIsBld[slot] = 1;
+   }
+
+   // Threat profile: iterate attack actions, pick max contribution under the
+   // formula contribution = DPS * (1 + range / cAutoScout_HeatRangeDivisor).
+   // The 1.0 floor ensures melee attackers (range=1) still contribute their
+   // full DPS, instead of being effectively ignored by an old range/10 term.
+   bool isThreat = false;
+   float bestContrib = 0.0;
+   int[] actionIDs = kbProtoUnitGetActionIDs(cMyID, proto);
+   int aN = actionIDs.size();
+   for (int a = 0; a < aN; a = a + 1)
+   {
+      int actionType = actionIDs[a];
       if (autoScout_isAttackActionType(actionType) == false) { continue; }
       string actionName = kbActionGetName(actionType);
       if (actionName == "") { continue; }
@@ -498,49 +602,31 @@ void autoScout_computeProtoThreat(int proto = -1, int outSlot = -1)
       if (dps <= cAutoScout_HeatMinDPS) { continue; }
 
       isThreat = true;
-      float contrib = dps * range / cAutoScout_HeatRangeDivisor;
+      float contrib = dps * (1.0 + range / cAutoScout_HeatRangeDivisor);
       if (contrib > bestContrib) { bestContrib = contrib; }
    }
-
-   // Write into cache at outSlot (caller has already appended the row).
-   if (outSlot >= 0 && outSlot < gAutoScout_protoThreatID.size())
+   if (isThreat == true)
    {
-      if (isThreat == true)
-      {
-         gAutoScout_protoThreatIsT[outSlot]      = 1;
-         gAutoScout_protoThreatContrib[outSlot] = bestContrib;
-      }
+      gAutoScout_protoThreatIsT[slot]      = 1;
+      gAutoScout_protoThreatContrib[slot] = bestContrib;
    }
+   return(slot);
 }
 
-// Returns the cached threat contribution for proto, computing it on first
-// encounter. Returns 0.0 if the proto is not a threat.
-float autoScout_protoThreatContribution(int proto = -1)
+// Per-unit last-seen-visible bookkeeping. Returns the row index (lazily
+// appending if absent). lastSeenMs is updated by autoScout_updateHeatMap.
+int autoScout_unitLastSeenRow(int unitID = -1)
 {
-   if (proto < 0) { return(0.0); }
-   int n = gAutoScout_protoThreatID.size();
+   if (unitID < 0) { return(-1); }
+   int n = gAutoScout_unitLastSeenID.size();
    for (int i = 0; i < n; i = i + 1)
    {
-      if (gAutoScout_protoThreatID[i] == proto)
-      {
-         if (gAutoScout_protoThreatIsT[i] == 1)
-         {
-            return(gAutoScout_protoThreatContrib[i]);
-         }
-         return(0.0);
-      }
+      if (gAutoScout_unitLastSeenID[i] == unitID) { return(i); }
    }
-   // First encounter: append a row with default-not-threat, then compute.
-   int slot = gAutoScout_protoThreatID.size();
-   gAutoScout_protoThreatID.add(proto);
-   gAutoScout_protoThreatIsT.add(0);
-   gAutoScout_protoThreatContrib.add(0.0);
-   autoScout_computeProtoThreat(proto, slot);
-   if (gAutoScout_protoThreatIsT[slot] == 1)
-   {
-      return(gAutoScout_protoThreatContrib[slot]);
-   }
-   return(0.0);
+   int slot = n;
+   gAutoScout_unitLastSeenID.add(unitID);
+   gAutoScout_unitLastSeenMs.add(-1);
+   return(slot);
 }
 
 // Initialise the cached enemy-threat query (all enemy units, alive).
@@ -552,72 +638,144 @@ void autoScout_initThreatQuery()
    kbUnitQuerySetState(gAutoScout_threatQuery, cUnitStateAlive);
 }
 
-// Update heat-map: scan visible enemy threats, attribute their contribution
-// to their area (and 1-hop neighbors with linear distance falloff). Uses
-// max-with-existing semantics so the same threat observed across many ticks
-// doesn't pile up unboundedly; decay (autoScout_decayHeat) is what lets the
-// map forget vanished threats.
+// Helper: ADD heat to area + spread to 1-hop neighbors with linear distance
+// falloff. weight = max(0, 1 - dist/cAutoScout_HeatSpreadMaxDist).
+void autoScout_addHeatToArea(int area = -1, float magnitude = 0.0)
+{
+   if (area < 0 || area >= gAutoScout_heat.size()) { return; }
+   if (magnitude <= 0.0) { return; }
+   gAutoScout_heat[area] = gAutoScout_heat[area] + magnitude;
+
+   vector areaPos = kbAreaGetCenter(area);
+   int borderCount = kbAreaGetNumberBorderAreas(area);
+   for (int b = 0; b < borderCount; b = b + 1)
+   {
+      int nbr = kbAreaGetBorderAreaID(area, b);
+      if (nbr < 0) { continue; }
+      if (nbr >= gAutoScout_heat.size()) { continue; }
+      vector nbrPos = kbAreaGetCenter(nbr);
+      float dist = xsVectorDistanceXZ(areaPos, nbrPos);
+      float weight = 1.0 - dist / cAutoScout_HeatSpreadMaxDist;
+      if (weight <= 0.0) { continue; }
+      gAutoScout_heat[nbr] = gAutoScout_heat[nbr] + magnitude * weight;
+   }
+}
+
+// Append a damage/death heat event. Active for durationMs from now; applied
+// each tick on top of the per-tick base heat.
+void autoScout_addHeatEvent(int area = -1, float magnitude = 0.0, int durationMs = 0)
+{
+   if (area < 0) { return; }
+   if (magnitude <= 0.0) { return; }
+   if (durationMs <= 0) { return; }
+   gAutoScout_eventArea.add(area);
+   gAutoScout_eventMagnitude.add(magnitude);
+   gAutoScout_eventExpiryMs.add(xsGetTimeMS() + durationMs);
+}
+
+// Per-scout damage detection: compare current HP to last-known. If lower,
+// emit a damage heat event at the scout's current area. Also keep the cached
+// lastPos fresh so dropFromPool's death-event helper has an on-map position
+// to attribute the kill to.
+void autoScout_trackHPAndPos(int slot = -1, int unitID = -1)
+{
+   if (slot < 0 || unitID < 0) { return; }
+   if (slot >= gAutoScout_lastHP.size()) { return; }
+
+   float currentHP = kbUnitGetStatFloat(unitID, cUnitStatCurrHP);
+   vector currentPos = kbUnitGetPosition(unitID);
+
+   float lastHP = gAutoScout_lastHP[slot];
+   if (currentHP < lastHP && autoScout_isOnMap(currentPos) == true)
+   {
+      int dmgArea = kbAreaGetIDByPosition(currentPos);
+      if (dmgArea >= 0)
+      {
+         autoScout_addHeatEvent(dmgArea,
+            cAutoScout_HeatDamageEventMagnitude,
+            cAutoScout_HeatDamageEventDurationMs);
+         aiEcho("autoScout: DAMAGE event slot=" + slot + " unit=" + unitID
+            + " area=" + dmgArea + " hp=" + currentHP + "/" + lastHP);
+      }
+   }
+
+   gAutoScout_lastHP[slot] = currentHP;
+   if (autoScout_isOnMap(currentPos) == true)
+   {
+      gAutoScout_lastPos[slot] = currentPos;
+   }
+}
+
+// Rebuild heat from scratch this tick. Reset + ADD across observations =
+// volatile: heat reflects currently-relevant threats every tick. Events
+// (damage/death) add their magnitude on top until they expire.
 void autoScout_updateHeatMap()
 {
    autoScout_initHeatArray();
    autoScout_initThreatQuery();
-   if (gAutoScout_threatQuery < 0) { return; }
-   kbUnitQueryResetResults(gAutoScout_threatQuery);
-   int n = kbUnitQueryExecute(gAutoScout_threatQuery);
-   if (n <= 0) { return; }
 
-   for (int i = 0; i < n; i = i + 1)
+   // Full reset.
+   int areaCount = gAutoScout_heat.size();
+   for (int i = 0; i < areaCount; i = i + 1)
    {
-      int unitID = kbUnitQueryGetResult(gAutoScout_threatQuery, i);
-      if (unitID < 0) { continue; }
-      if (kbUnitGetIsIDValid(unitID) == false) { continue; }
-      int proto = kbUnitGetProtoUnitID(unitID);
-      float contrib = autoScout_protoThreatContribution(proto);
-      if (contrib <= 0.0) { continue; }
+      gAutoScout_heat[i] = 0.0;
+   }
 
-      vector unitPos = kbUnitGetPosition(unitID);
-      if (autoScout_isOnMap(unitPos) == false) { continue; }
-      int area = kbAreaGetIDByPosition(unitPos);
-      if (area < 0) { continue; }
-      if (area >= gAutoScout_heat.size()) { continue; }
+   int now = xsGetTimeMS();
 
-      // Max into the unit's own area.
-      if (contrib > gAutoScout_heat[area])
+   // Visible-threat layer.
+   if (gAutoScout_threatQuery >= 0)
+   {
+      kbUnitQueryResetResults(gAutoScout_threatQuery);
+      int n = kbUnitQueryExecute(gAutoScout_threatQuery);
+      for (int i = 0; i < n; i = i + 1)
       {
-         gAutoScout_heat[area] = contrib;
-      }
+         int unitID = kbUnitQueryGetResult(gAutoScout_threatQuery, i);
+         if (unitID < 0) { continue; }
+         if (kbUnitGetIsIDValid(unitID) == false) { continue; }
+         int proto = kbUnitGetProtoUnitID(unitID);
+         int cacheRow = autoScout_protoCacheRow(proto);
+         if (cacheRow < 0) { continue; }
 
-      // Spread to 1-hop neighbors with linear distance falloff. Distance is
-      // between area centers; weight = max(0, 1 - dist / HeatSpreadMaxDist).
-      vector areaPos = kbAreaGetCenter(area);
-      int borderCount = kbAreaGetNumberBorderAreas(area);
-      for (int b = 0; b < borderCount; b = b + 1)
-      {
-         int nbr = kbAreaGetBorderAreaID(area, b);
-         if (nbr < 0) { continue; }
-         if (nbr >= gAutoScout_heat.size()) { continue; }
-         vector nbrPos = kbAreaGetCenter(nbr);
-         float dist = xsVectorDistanceXZ(areaPos, nbrPos);
-         float weight = 1.0 - dist / cAutoScout_HeatSpreadMaxDist;
-         if (weight <= 0.0) { continue; }
-         float spread = contrib * weight;
-         if (spread > gAutoScout_heat[nbr])
+         // Skip villagers entirely.
+         if (gAutoScout_protoThreatIsVill[cacheRow] == 1) { continue; }
+         if (gAutoScout_protoThreatIsT[cacheRow] != 1) { continue; }
+
+         bool visible = kbUnitVisible(unitID);
+         bool isBuilding = (gAutoScout_protoThreatIsBld[cacheRow] == 1);
+
+         // Track per-unit last-seen-visible. Mobile units get a fog timeout;
+         // buildings get an indefinite kb-tracked position (kb only forgets
+         // them if we never saw them, which is fine).
+         int seenRow = autoScout_unitLastSeenRow(unitID);
+         if (visible == true && seenRow >= 0)
          {
-            gAutoScout_heat[nbr] = spread;
+            gAutoScout_unitLastSeenMs[seenRow] = now;
          }
+         if (visible == false && isBuilding == false)
+         {
+            int lastSeen = -1;
+            if (seenRow >= 0) { lastSeen = gAutoScout_unitLastSeenMs[seenRow]; }
+            if (lastSeen < 0) { continue; }  // never seen visible
+            if (now - lastSeen > cAutoScout_HeatMobileUnitFogTimeoutMs)
+            {
+               continue;  // fog timer expired
+            }
+         }
+
+         vector unitPos = kbUnitGetPosition(unitID);
+         if (autoScout_isOnMap(unitPos) == false) { continue; }
+         int area = kbAreaGetIDByPosition(unitPos);
+         autoScout_addHeatToArea(area, gAutoScout_protoThreatContrib[cacheRow]);
       }
    }
-}
 
-// Linear decay applied every cAutoScout_HeatCooldownInterval ticks.
-void autoScout_decayHeat()
-{
-   int n = gAutoScout_heat.size();
-   for (int i = 0; i < n; i = i + 1)
+   // Damage/death event layer. Applied on top until expired.
+   int en = gAutoScout_eventArea.size();
+   for (int e = 0; e < en; e = e + 1)
    {
-      float v = gAutoScout_heat[i] - cAutoScout_HeatDecayPerCool;
-      if (v < 0.0) { v = 0.0; }
-      gAutoScout_heat[i] = v;
+      if (gAutoScout_eventExpiryMs[e] <= now) { continue; }  // expired
+      autoScout_addHeatToArea(gAutoScout_eventArea[e], gAutoScout_eventMagnitude[e]);
    }
 }
 
@@ -1749,6 +1907,8 @@ bool autoScout_tickOracleUnit(int slot = -1)
       return(true);
    }
 
+   autoScout_trackHPAndPos(slot, unitID);
+
    // Opportunistic cache update -- harmless if not saturated (the helper is
    // gated). Done every tick so we capture the saturation moment regardless
    // of which state branch we hit.
@@ -1903,6 +2063,8 @@ bool autoScout_tickUnit(int slot = -1)
       autoScout_dropFromPool(slot);
       return(true);
    }
+
+   autoScout_trackHPAndPos(slot, unitID);
 
    // Route oracles to their dedicated state machine. They share the pool and
    // the Diverting handler with regular scouts but have their own
@@ -2169,6 +2331,8 @@ void autoScout_register(int planID = -1, int unitID = -1)
    gAutoScout_targetHerdID.add(-1);
    gAutoScout_fleeUntilMs.add(0);
    gAutoScout_fleeFromArea.add(-1);
+   gAutoScout_lastHP.add(kbUnitGetStatFloat(unitID, cUnitStatCurrHP));
+   gAutoScout_lastPos.add(kbUnitGetPosition(unitID));
 
    // Immediate first-tick: BFS + initial move now, instead of waiting up to
    // a full rule interval. Without this, the scout starts moving in whatever
@@ -2250,15 +2414,9 @@ active
    xsSetContextPlayer(cMyID);
    autoScout_initAreaArrays();
 
-   // Heat-map: refresh every tick (max-with-existing semantics; observation
-   // doesn't accumulate). Decay sparsely every cAutoScout_HeatCooldownInterval
-   // ticks so vanished threats fade naturally.
-   gAutoScout_heatCooldownCounter = gAutoScout_heatCooldownCounter + 1;
-   if (gAutoScout_heatCooldownCounter >= cAutoScout_HeatCooldownInterval)
-   {
-      autoScout_decayHeat();
-      gAutoScout_heatCooldownCounter = 0;
-   }
+   // Heat-map: full reset + recompute each tick. ADD semantics across
+   // observations so clusters pile up. Damage/death events stay in their
+   // own array and are layered on top inside updateHeatMap until expired.
    autoScout_updateHeatMap();
 
    for (int slot = gAutoScout_unitID.size() - 1; slot >= 0; slot = slot - 1)
