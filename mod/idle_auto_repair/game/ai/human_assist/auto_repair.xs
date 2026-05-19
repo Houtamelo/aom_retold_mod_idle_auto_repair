@@ -275,6 +275,7 @@ highFrequency
 priority 80
 active
 {
+   if (kbPlayerIsHuman(cMyID) == false) { return; }
    xsSetContextPlayer(cMyID);
    autoRepair_watchdog();
    xsSetContextPlayer(-1);
@@ -288,6 +289,7 @@ rule autoRepair
 minInterval 3
 active
 {
+   if (kbPlayerIsHuman(cMyID) == false) { return; }
    xsSetContextPlayer(cMyID);
    autoRepair_setupQueries();
 

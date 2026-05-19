@@ -3017,6 +3017,7 @@ rule autoScout_tickHeavy
 minInterval 1
 active
 {
+   if (kbPlayerIsHuman(cMyID) == false) { return; }
    xsSetContextPlayer(cMyID);
    autoScout_initAreaArrays();
    autoScout_updateHeatMap();
@@ -3028,6 +3029,7 @@ rule autoScout_tickFast
 minInterval 1
 active
 {
+   if (kbPlayerIsHuman(cMyID) == false) { return; }
    xsSetContextPlayer(cMyID);
    autoScout_initAreaArrays();
 
