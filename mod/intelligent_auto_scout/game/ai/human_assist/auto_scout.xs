@@ -2898,6 +2898,8 @@ bool autoScout_tickUnit(int slot = -1)
 void autoScout_register(int planID = -1, int unitID = -1)
 {
    if (planID < 0 || unitID < 0) { return; }
+   // AI players keep vanilla cPlanExplore behaviour -- don't hijack the plan.
+   if (kbPlayerIsHuman(cMyID) == false) { return; }
 
    // Park the cPlanExplore in cPlanStateIdle (23, from docs/MythTRConstants.txt).
    // Verified empirically (2026-05-13) that the engine respects this state and
@@ -2964,6 +2966,8 @@ void autoScout_pruneRedirectedHerds()
 
 void autoScout_homeMoveScan()
 {
+   // AI players use vanilla herd handling -- our auto-deliver is a mod addition.
+   if (kbPlayerIsHuman(cMyID) == false) { return; }
    // Short-circuit: with no TC there's nowhere to deliver herds. Skips the
    // owned-herd query entirely until we have a TC, at which point pending
    // herdables get redirected on the next tick.
@@ -3017,7 +3021,6 @@ rule autoScout_tickHeavy
 minInterval 1
 active
 {
-   if (kbPlayerIsHuman(cMyID) == false) { return; }
    xsSetContextPlayer(cMyID);
    autoScout_initAreaArrays();
    autoScout_updateHeatMap();
@@ -3029,7 +3032,6 @@ rule autoScout_tickFast
 minInterval 1
 active
 {
-   if (kbPlayerIsHuman(cMyID) == false) { return; }
    xsSetContextPlayer(cMyID);
    autoScout_initAreaArrays();
 

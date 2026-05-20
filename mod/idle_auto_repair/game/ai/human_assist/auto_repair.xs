@@ -106,6 +106,9 @@ bool autoRepair_unitCanRepairTarget(int unitID = -1, int buildingProtoID = -1)
 bool autoRepair_tryAssign(int unitID = -1, int builderType = -1, string kind = "Unknown")
 {
    if (unitID < 0) { return(false); }
+   // Auto-repair is a mod addition with no vanilla equivalent -- AI players
+   // keep whatever their own AI script does (which is nothing for repair).
+   if (kbPlayerIsHuman(cMyID) == false) { return(false); }
 
    // Restrict candidates to what THIS unit can see. LOS in AoMR is a circular
    // radius around the unit. The query's maxDistance filter is center-to-
@@ -230,6 +233,9 @@ bool autoRepair_tryAssign(int unitID = -1, int builderType = -1, string kind = "
 // Repair frames within the plan's normal flow.
 void autoRepair_watchdog()
 {
+   // Watchdog only manages plans created by our auto-repair, which never run
+   // for AI -- leave AI's vanilla cPlanRepair handling (if any) untouched.
+   if (kbPlayerIsHuman(cMyID) == false) { return; }
    int planCount = aiPlanGetNumberByType(cPlanRepair);
    for (int p = 0; p < planCount; p++)
    {
@@ -275,7 +281,6 @@ highFrequency
 priority 80
 active
 {
-   if (kbPlayerIsHuman(cMyID) == false) { return; }
    xsSetContextPlayer(cMyID);
    autoRepair_watchdog();
    xsSetContextPlayer(-1);
@@ -289,7 +294,6 @@ rule autoRepair
 minInterval 3
 active
 {
-   if (kbPlayerIsHuman(cMyID) == false) { return; }
    xsSetContextPlayer(cMyID);
    autoRepair_setupQueries();
 
