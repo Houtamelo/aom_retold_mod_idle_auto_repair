@@ -10,6 +10,10 @@ Source for the AoM:R mods I publish on the Age of Mythology Retold mod platform,
 
 - [`mod/intelligent_auto_repair_and_scout/`](mod/intelligent_auto_repair_and_scout/) — Combined-deploy variant of the two mods above. Both mods overlay the same `game/ai/human_assist/human_assist.xs` and so cannot be installed as separate local mods at the same time; this folder ships a single unified overlay so you can run both features together. See the combined mod's [README](mod/intelligent_auto_repair_and_scout/README.md) for the player-facing changelog spanning both features.
 
+- [`mod/human_assist_improvements/`](mod/human_assist_improvements/) — **Human Assist Improvements**. Bundled superset of Idle Auto-Repair and Intelligent Auto-Scout, and the canonical home for future human-assist features. Use this if you want both features in a single mod.
+
+> **Compatibility:** All four mods overlay the same `game/ai/human_assist/human_assist.xs`. Enable only one mod at a time. `Human Assist Improvements` is the recommended single-mod choice going forward; the three existing mods remain available for players who want only one feature.
+
 ## Other contents
 
 - `mod/aom_autorepair_test/` — historical proof-of-concept iterations from the auto-repair research; kept for reference, not deployed.

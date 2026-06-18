@@ -2,10 +2,11 @@
 #
 # deploy-mods.sh -- Copy mod source files into the AoMR local-mods folder.
 #
-# Synchronises all three local-deploy targets in one go:
+# Synchronises all four local-deploy targets in one go:
 #   - Idle Auto-Repair                       (auto_repair.xs + human_assist.xs)
 #   - Intelligent Auto-Scout                 (auto_scout.xs  + human_assist.xs)
 #   - Intelligent Auto-Repair and Scout      (auto_repair.xs + auto_scout.xs + unified human_assist.xs)
+#   - Human Assist Improvements              (auto_repair.xs + auto_scout.xs + unified human_assist.xs)
 #
 # Caller is responsible for ensuring AoMR is closed -- overwriting loaded
 # mod scripts mid-session can corrupt the running game.
@@ -45,6 +46,7 @@ deploy() {
 REPAIR_SRC="$SRC_ROOT/idle_auto_repair/game/ai/human_assist"
 SCOUT_SRC="$SRC_ROOT/intelligent_auto_scout/game/ai/human_assist"
 COMBINED_SRC="$SRC_ROOT/intelligent_auto_repair_and_scout/game/ai/human_assist"
+HUMAN_SRC="$SRC_ROOT/human_assist_improvements/game/ai/human_assist"
 
 echo "=== Idle Auto-Repair ==="
 deploy "$REPAIR_SRC/auto_repair.xs"   "$DEPLOY_ROOT/Idle Auto-Repair/game/ai/human_assist/auto_repair.xs"
@@ -58,5 +60,10 @@ echo "=== Intelligent Auto-Repair and Scout ==="
 deploy "$REPAIR_SRC/auto_repair.xs"        "$DEPLOY_ROOT/Intelligent Auto-Repair and Scout/game/ai/human_assist/auto_repair.xs"
 deploy "$SCOUT_SRC/auto_scout.xs"          "$DEPLOY_ROOT/Intelligent Auto-Repair and Scout/game/ai/human_assist/auto_scout.xs"
 deploy "$COMBINED_SRC/human_assist.xs"     "$DEPLOY_ROOT/Intelligent Auto-Repair and Scout/game/ai/human_assist/human_assist.xs"
+
+echo "=== Human Assist Improvements ==="
+deploy "$REPAIR_SRC/auto_repair.xs"        "$DEPLOY_ROOT/Human Assist Improvements/game/ai/human_assist/auto_repair.xs"
+deploy "$SCOUT_SRC/auto_scout.xs"          "$DEPLOY_ROOT/Human Assist Improvements/game/ai/human_assist/auto_scout.xs"
+deploy "$HUMAN_SRC/human_assist.xs"        "$DEPLOY_ROOT/Human Assist Improvements/game/ai/human_assist/human_assist.xs"
 
 echo "Done."
