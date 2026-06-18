@@ -8,3 +8,5 @@ tools/
 # OS / editor noise
 .DS_Store
 *.swp
+# Local AI runtime state
+.atl/

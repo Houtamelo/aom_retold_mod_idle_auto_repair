@@ -12,7 +12,9 @@ Source for the AoM:R mods I publish on the Age of Mythology Retold mod platform,
 
 - [`mod/human_assist_improvements/`](mod/human_assist_improvements/) — **Human Assist Improvements**. Bundled superset of Idle Auto-Repair and Intelligent Auto-Scout, and the canonical home for future human-assist features. Use this if you want both features in a single mod.
 
-> **Compatibility:** All four mods overlay the same `game/ai/human_assist/human_assist.xs`. Enable only one mod at a time. `Human Assist Improvements` is the recommended single-mod choice going forward; the three existing mods remain available for players who want only one feature.
+- [`mod/Extra Ai + AoModAi/`](mod/Extra%20Ai%20%2B%20AoModAi/) — **Extra Ai + AoModAi**. A curated port of the AI improvements from Garbhus's published mod 314139 "extra ai", distilled to the 22 files that contain intentional modder edits. Covers island/amphibious play, max-military economy, reduced resource bonus at higher difficulties, fewer suicide-wave attacks, and significant God Powers / upgrade logic fixes. The 5 vanilla-stale files that the source mod accidentally included are intentionally excluded so future base-game patches can reach those files normally. See the mod's [README](mod/Extra%20Ai%20%2B%20AoModAi/README.md) for the full file-by-file map.
+
+> **Compatibility:** The first four mods overlay the same `game/ai/human_assist/human_assist.xs` — enable only one of them at a time. `Human Assist Improvements` is the recommended single-mod choice going forward; the three existing mods remain available for players who want only one feature. `Extra Ai + AoModAi` overlays 22 different files under `game/ai/core/...` and is compatible with all four `human_assist_*` mods (no file overlap). It conflicts with the subscribed mod 314139 "extra ai" (same 22 files — enable only one of the two at a time).
 
 ## Other contents
 
@@ -21,6 +23,13 @@ Source for the AoM:R mods I publish on the Age of Mythology Retold mod platform,
 - `extracted/` — extracted reference files from the game install (proto.xml, doxygen, etc.) used during research.
 
 ## Changelog
+
+### Extra Ai + AoModAi
+
+**2026-06-18 — Initial release**
+- Curated port of Garbhus's published mod 314139 "extra ai", distilled to the 22 files with intentional modder edits. 5 vanilla-stale files the source mod shipped are intentionally excluded so future base-game patches can reach those files normally.
+- 22 files covering all five of Garbhus's stated themes: island/amphibious play, max-military economy, reduced resource bonus at higher difficulties, fewer suicide-wave attacks, and significant God Powers / upgrade logic fixes.
+- See the mod's [README](mod/Extra%20Ai%20%2B%20AoModAi/README.md) for the full file-by-file map and compatibility matrix.
 
 ### Intelligent Auto-Scout
 
