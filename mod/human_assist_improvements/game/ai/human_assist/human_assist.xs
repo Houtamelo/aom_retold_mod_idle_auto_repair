@@ -13,6 +13,7 @@ include "human_assist/human_assist_unit_queries.xs";
 include "human_assist/human_assist_resource_breakdown_system.xs";
 include "human_assist/auto_repair.xs"; // Idle Auto-Repair mod
 include "human_assist/auto_scout.xs";  // Intelligent Auto-Scout mod
+include "human_assist/auto_relic_delivery.xs"; // Auto-relic-delivery mod (D1 divergence from intelligent_auto_repair_and_scout — see openspec/specs/auto-relic-delivery/spec.md)
 
 mutable void setDistributionNumbers(int food = 0, int wood = 0, int gold = 0) {}
 
@@ -991,4 +992,9 @@ void main()
    }
    // The system starts off by default.
    disableVillagerAssist();
+
+   // Auto-relic-delivery registration. Intentionally diverges this 4th mod's
+   // human_assist.xs from the combined mod's copy (D1). See
+   // openspec/specs/auto-relic-delivery/spec.md.
+   autoRelicDelivery_register();
 }

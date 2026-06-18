@@ -88,6 +88,7 @@ echo "=== Human Assist Improvements ==="
 deploy "$REPAIR_SRC/auto_repair.xs"        "$DEPLOY_ROOT/Human Assist Improvements/game/ai/human_assist/auto_repair.xs"
 deploy "$SCOUT_SRC/auto_scout.xs"          "$DEPLOY_ROOT/Human Assist Improvements/game/ai/human_assist/auto_scout.xs"
 deploy "$HUMAN_SRC/human_assist.xs"        "$DEPLOY_ROOT/Human Assist Improvements/game/ai/human_assist/human_assist.xs"
+deploy "$HUMAN_SRC/auto_relic_delivery.xs" "$DEPLOY_ROOT/Human Assist Improvements/game/ai/human_assist/auto_relic_delivery.xs"
 
 echo "=== Extra Ai + AoModAi ==="
 EXTRA_AI_SRC="$SRC_ROOT/Extra Ai + AoModAi/game/ai"
