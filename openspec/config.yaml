@@ -1,0 +1,44 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Age of Mythology: Retold XS AI scripts (C-like scripting language loaded by the game engine). Bash deploy script only.
+  Architecture: Each mod overlays game/ai/human_assist/human_assist.xs with a feature include (auto_repair.xs / auto_scout.xs). The combined mod unifies both includes in its own human_assist.xs and reuses the feature source files at deploy time.
+  Testing: No automated test runner exists for XS. Verification is manual: syntax check via game load, deploy to local mods folder, and in-game aiEcho log inspection.
+  Style: Three-space indentation in XS, block headers with //======, semantic conventional commits.
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Note patch-maintenance impact on human_assist.xs overlay
+  specs:
+    - Use Given/When/Then for player-facing scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - Call out XS engine constraints and kb* API behavior
+  design:
+    - Include state-machine diagrams where relevant
+    - Document architecture decisions with rationale
+    - Note which files are shared across mods (auto_scout.xs, auto_repair.xs)
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+    - Mark manual verification steps explicitly
+  apply:
+    - Follow existing code patterns
+    - Never edit the running AoM:R game folder
+    - Update the combined mod's human_assist.xs when either feature's include/call site changes
+    tdd: false
+    test_command: ""
+  verify:
+    test_command: ""
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
+    - Preserve per-mod human_assist.xs overlay notes for patch maintenance
+
+strict_tdd: false
+testing:
+  runner: none
+  sandboxed_tdd: false
+  strict_tdd: false
+  verification_method: manual_deploy_and_ingame_log
