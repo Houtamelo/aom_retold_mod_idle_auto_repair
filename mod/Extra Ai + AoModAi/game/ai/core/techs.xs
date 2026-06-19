@@ -1370,97 +1370,18 @@ bool haveForcedEconomicTechnologyToResearch(ref int techID)
       techID = cTechChasingTheSun;
       return true;
    }
-   if (kbTechGetStatus(cTechWatchTower) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechWatchTower);
-      return true;
-   }
-   if (kbTechGetStatus(cTechTzompantliWatchTower) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechTzompantliWatchTower);
-      return true;
-   }
-   if (kbTechGetStatus(cTechCopperWeapons) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechCopperWeapons);
-      return true;
-   }
-   if (kbTechGetStatus(cTechCopperArmor) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechCopperArmor);
-      return true;
-   }
-    if (kbTechGetStatus(cTechCopperShields) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechCopperShields);
-      return true;
-   }
-   if (kbTechGetStatus(cTechBronzeWeapons) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechBronzeWeapons);
-      return true;
-   }
-   if (kbTechGetStatus(cTechBronzeArmor) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechBronzeArmor);
-      return true;
-   }
-   if (kbTechGetStatus(cTechBronzeShields) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechBronzeShields);
-      return true;
-   }
-   if (kbTechGetStatus(cTechIronWeapons) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechIronWeapons);
-      return true;
-   }
-   if (kbTechGetStatus(cTechIronArmor) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechIronArmor);
-      return true;
-   }
-   if (kbTechGetStatus(cTechIronShields) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechIronShields);
-      return true;
-   }
-   if (kbTechGetStatus(cTechBallistics) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechBallistics);
-      return true;
-   }
-   if (kbTechGetStatus(cTechBoilingOil) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechBoilingOil);
-      return true;
-   }
-   if (kbTechGetStatus(cTechTemiminaloyanTrials) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechTemiminaloyanTrials);
-      return true;
-   }
-   if (kbTechGetStatus(cTechCrenellations) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechCrenellations);
-      return true;
-   }
-   if (kbTechGetStatus(cTechGuardTower) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechGuardTower);
-      return true;
-   }
-    if (kbTechGetStatus(cTechBallistaTower) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechBallistaTower);
-      return true;
-   }
-    if (kbTechGetStatus(cTechCrossbowTower) == cTechStatusObtainable)
-   {
-      gMilitaryResearchPlanID = researchSimpleTech(cTechCrossbowTower);
-      return true;
-   }
-   
+   // AoModAi port (ISSUE-01 fix): The original port from Garbhus's classic AoM mod 314139
+   // added 15 "force-research" branches here (cTechWatchTower, cTechCopperWeapons, ..., 
+   // cTechCrossbowTower) that wrote `gMilitaryResearchPlanID = researchSimpleTech(cTechX)` 
+   // directly — bypassing the function's `ref int techID` output-parameter contract AND 
+   // contaminating the MILITARY manager's tracked plan ID with a research plan that the 
+   // economic manager never properly tracked or event-handler-attached. This caused 
+   // militaryUpgradeManager to repeatedly destroy-and-recreate the plan on every tick 
+   // (2-min safety-net timeout fire), making NO research ever progress. These techs 
+   // are still researched normally via the scoring path in `militaryUpgradeManager` 
+   // (haveForcedMilitaryTechnologyToResearch last-resort branch + scored evaluation) 
+   // and via dedicated monitors (`towerOffensiveUpgradeMonitor`, `wallUpgradeMonitor`).
+
    return false;
 }
 
