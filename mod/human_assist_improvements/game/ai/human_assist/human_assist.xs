@@ -996,5 +996,14 @@ void main()
    // Auto-relic-delivery registration. Intentionally diverges this 4th mod's
    // human_assist.xs from the combined mod's copy (D1). See
    // openspec/specs/auto-relic-delivery/spec.md.
+   //
+   // CRITICAL: disableVillagerAssist() leaves the XS context player at -1
+   // (its closing xsSetContextPlayer(-1)). Without restoring it here, any
+   // subsequent code that depends on the engine's active player context
+   // (aiEcho, kb*/ai* queries, etc.) would silently target no player. Restore
+   // cMyID before calling the auto-relic feature so its internal
+   // xsSetContextPlayer(cMyID) / xsSetContextPlayer(-1) save/restore pattern
+   // operates against the correct baseline.
+   xsSetContextPlayer(cMyID);
    autoRelicDelivery_register();
 }

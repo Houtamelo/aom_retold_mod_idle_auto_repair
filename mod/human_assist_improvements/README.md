@@ -4,7 +4,7 @@ Bundled superset of the Auto-Repair and Intelligent Auto-Scout mods, and the can
 
 - **Idle Auto-Repair** — idle units capable of repairing automatically walk to nearby damaged friendly buildings and repair them at normal resource cost. Covers villagers across every civilization and Norse soldier-builders.
 - **Intelligent Auto-Scout** — replaces the engine's auto-scout button on land scouts and Atlantean Oracles with a smarter exploration system: scouts spread across the map, divert to wild herdables, send claimed herds home, and stay away from enemy threats.
-- **Auto-relic-delivery** — when a human player's hero picks up a relic, it is automatically tasked once to the nearest player-owned temple with available relic space. Player orders always take priority: delivery only fires while the hero is idle, a single one-shot retry catches the pickup-animation edge case, and the feature tracks each `(heroID, relicID)` pair so the same relic never triggers twice. The runtime path uses `kbUnitGetContainedUnitByIndex(heroID, 0)` to read the carried relic ID, `kbUnitGetNumberContainedOfType(heroID, cUnitTypeRelic)` as the type-safe carrying check, and `kbRelicGetTechID(relicID)` to correlate the relic with the `cXSRelicPickedUpHandler` event payload.
+- **Auto-relic-delivery** — when a human player's hero picks up a relic, the mod detects the ground relic's disappearance on a 2-second poll, finds player-owned heroes within 10 meters of the relic's last position, and tasks the first idle, plan-free hero carrying that exact relic unit ID once to the nearest player-owned temple with available relic space. The feature tracks each `(heroID, relicID)` pair so the same relic never triggers twice, and retries for up to 4 ticks (~8 seconds) if the hero is still in the pickup animation or busy. Player orders always take priority after the retry window. The canonical architecture is documented in `openspec/changes/auto-relic-delivery-reinvestigation/design.md`.
 
 The individual mods' READMEs (see [Idle Auto-Repair](../idle_auto_repair/README.md) and [Intelligent Auto-Scout](../intelligent_auto_scout/README.md)) document the per-feature behaviour in full.
 
@@ -54,10 +54,6 @@ Launch the game, enable only **Human Assist Improvements**, and start a match.
 - [ ] **Auto-relic-delivery walkthrough (USER step).** With a hero and a temple, pick up a relic; verify the hero walks once to the nearest temple with space and deposits it. Issue a manual order right after pickup and confirm no second delivery order is issued. Fill the nearest temple and confirm a farther one is chosen.
 - [ ] **Rollback check.** If you need to revert this feature, delete `mod/human_assist_improvements/game/ai/human_assist/auto_relic_delivery.xs`, remove its include and `autoRelicDelivery_register()` call from the 4th mod's `human_assist.xs`, remove its deploy line in `scripts/deploy-mods.sh`, and revert the README edits.
 
-## Singleton-handler caveat
-
-`auto_relic_delivery.xs` registers AoM:R's single `cXSRelicPickedUpHandler` callback. If a future human-assist feature also needs to react to relic pickups, it must chain through `autoRelicDelivery_onPickedUp` rather than call `aiSetHandler(..., cXSRelicPickedUpHandler)` again — the engine only allows one handler per event type, and a second registration would replace (and break) this one.
-
 ## Patch maintenance
 
 `human_assist.xs` is a whole-file vanilla overlay. After any Age of Mythology Retold patch that touches that file:
@@ -84,9 +80,10 @@ Launch the game, enable only **Human Assist Improvements**, and start a match.
 ## Changelog
 
 **Auto-relic-delivery**
-- New `auto_relic_delivery.xs`: when a human player's hero picks up a relic, task it once to the nearest player-owned temple with available space. Tracks `(heroID, relicID)` pairs in append-only arrays using the engine's `kbUnitGetContainedUnitByIndex`, `kbRelicGetTechID`, and `kbUnitGetNumberContainedOfType` APIs; a one-shot retry catches pickup-animation timing and player orders always win.
-- Wired into the 4th mod's `human_assist.xs` with one `include` and one registration call. This intentionally breaks byte-identity with the combined mod's `human_assist.xs` (D1).
-- Documented the `cXSRelicPickedUpHandler` singleton caveat and patch-maintenance steps.
+- Rewrote `auto_relic_delivery.xs` to use a 2-second ground-relic poll instead of `cXSRelicPickedUpHandler`. Detects relic disappearances, queries player-owned heroes within 10 meters of the relic's last position, and delivers only when a hero carries the exact relic unit ID while idle and has no active AI plan.
+- Retains the `(heroID, relicID)` pair tracker for idempotency and adds a 4-tick pending-retry window (~8 seconds) for pickup-animation timing. Player orders take priority after the retry window.
+- The `autoRelicDelivery_register()` call in the 4th mod's `human_assist.xs` is unchanged; only the internals of `auto_relic_delivery.xs` changed.
+- Documented poll-based behavior and patch-maintenance steps.
 
 **Bootstrap — bundled Auto-Repair + Intelligent Auto-Scout**
 - Added `human_assist.xs` overlay that includes both feature files and registers the scout hook.
