@@ -75,7 +75,7 @@ Every 2 seconds (rule minInterval 2):
            (defensive loop over kbUnitGetNumberContained slots as fallback).
       iii. If carried relic ID equals the disappeared relic ID:
            - Require kbUnitGetActionType(heroID) == cActionTypeIdle.
-           - Require kbUnitGetPlanID(heroID) == cInvalidID (no active AI plan).
+           - Require kbUnitGetPlanID(heroID) == -1 (no active AI plan; -1 is the convention used throughout the shipped AoM:R AI; the reference doc's `cInvalidID` is not exposed to the XS runtime).
            - If both, find nearest non-full temple and aiTaskWorkUnit(heroID, templeID).
            - Add (heroID, relicID) to the tracker.
 4. Store the current snapshot for the next tick.
@@ -108,7 +108,7 @@ The separate 2-second one-shot `autoRelicDelivery_tickRetry` rule is **removed**
 | 2 | Polling interval fixed at 2 seconds. | Responsive enough for pickup-animation settling; low CPU cost. | 1 s (too frequent), 5 s (too sluggish), adaptive. |
 | 3 | Hero proximity radius fixed at 10 meters. | Covers pickup interaction distance and small animation drift; keeps query tight. | Configurable radius; 5 m; 15 m. |
 | 4 | Match hero to relic via `kbUnitGetContainedUnitByIndex(heroID, 0)`. | Direct unit-ID correlation prevents false positives. | `kbUnitGetNumberContained` only; `kbUnitGetContainer` inverse walk. |
-| 5 | Idle guard = `kbUnitGetActionType == cActionTypeIdle` **and** `kbUnitGetPlanID == cInvalidID`. | Maximizes "do not interrupt the player"; plan check is the conservative signal. | Action-type idle only; query-level idle filter. |
+| 5 | Idle guard = `kbUnitGetActionType == cActionTypeIdle` **and** `kbUnitGetPlanID == -1`. | Maximizes "do not interrupt the player"; plan check is the conservative signal. | Action-type idle only; query-level idle filter. |
 | 6 | Remove `aiSetHandler(..., cXSRelicPickedUpHandler)` registration. | Dead code for human players; simplifies ownership. | Keep for future engine changes. |
 | 7 | Retain `(heroID, relicID)` pair tracker with shifted semantics. | Still needed for idempotency across ticks and after manual deposits. | Per-relic boolean; timestamp-based dedupe. |
 | 8 | Remove the separate one-shot retry rule; retry happens in the main 2-second loop. | The poll already retries; a parallel rule adds no value. | Keep one-shot rule for explicit event-to-retry mapping. |
@@ -116,7 +116,7 @@ The separate 2-second one-shot `autoRelicDelivery_tickRetry` rule is **removed**
 
 ## Open questions
 
-1. What does `kbUnitGetPlanID(heroID)` return for a human hero under manual control? The check uses `cInvalidID` (docs/MythRMConstants.txt:16); an in-game smoke test should confirm.
+1. What does `kbUnitGetPlanID(heroID)` return for a human hero under manual control? The check uses `-1` (the convention used throughout the shipped AoM:R AI; `cInvalidID` from docs/MythRMConstants.txt:16 is not exposed to the runtime); an in-game smoke test should confirm.
 2. Does `kbUnitGetContainedUnitByIndex(heroID, 0)` return the relic immediately after the ground relic disappears, or do we need the defensive loop over all contained slots? The design includes the loop as a fallback, but smoke testing will tell us whether index 0 is sufficient.
 3. Is `kbUnitQuerySetMaximumDistance(..., 10.0)` interpreted as 10 meters in this query context? Expected, but should be logged and verified.
 
@@ -161,6 +161,6 @@ The separate 2-second one-shot `autoRelicDelivery_tickRetry` rule is **removed**
 - `extracted/doxygen/kbfuncs_8cpp.html:237` — `kbUnitGetContainedUnitByIndex`.
 - `extracted/doxygen/kbfuncs_8cpp.html:189` — `kbUnitGetPlanID`.
 - `extracted/doxygen/kbfuncs_8cpp.html:926` — `kbRelicGetTechID`.
-- `docs/MythRMConstants.txt:16` — `cInvalidID = -1`.
+- `kbUnitGetPlanID(unitID)` returns `-1` when the unit has no plan; the shipped AoM:R AI source uses `-1` literally (the `cInvalidID` defined in `docs/MythRMConstants.txt:16` is not exposed to the XS runtime).
 - `docs/MythRMConstants.txt:768` / `docs/MythTRConstants.txt:747` — `cUnitTypeRelic`.
 - `/home/houtamelo/.steam/steam/steamapps/common/Age of Mythology Retold/game/ai/core/setup.xs:181` — AI-only relic handler registration.

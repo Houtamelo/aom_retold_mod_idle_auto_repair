@@ -120,7 +120,7 @@ Justification: the new design is a single logical replacement of one file. Split
 
 ## Risks
 
-- `kbUnitGetPlanID(heroID)` semantics for manually controlled human heroes are unverified; if it returns something other than `cInvalidID`, deliveries may be suppressed.
+- `kbUnitGetPlanID(heroID)` semantics for manually controlled human heroes are unverified; if it returns a value other than `-1` (the convention used throughout the shipped AoM:R AI), deliveries may be suppressed.
 - `kbUnitGetContainedUnitByIndex(heroID, 0)` may not return the relic immediately on the disappearance tick, requiring the pending-retry list to age out correctly.
 - `kbUnitQuerySetMaximumDistance(..., 10.0)` radius is assumed to be in meters; if the engine interprets distance differently, the proximity query may miss carriers.
 - If `auto_relic_delivery.xs` is loaded by a different mod that also overlays `human_assist.xs`, the registration path could differ; this change is scoped to `Human Assist Improvements` only.

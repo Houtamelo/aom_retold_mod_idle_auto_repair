@@ -59,7 +59,7 @@ A disappearance is computed by a set difference on unit IDs between consecutive 
 | `autoRelicDelivery_setupTempleQuery()` | Preserved; ascending-distance temple query. |
 | `autoRelicDelivery_findHeroesInRange(vector pos)` | Resets the hero query to `pos` + 10 m, executes, and returns matching hero unit IDs as an `int[]`. |
 | `autoRelicDelivery_heroCarriesRelic(int heroID, int relicID)` | True if any contained unit of type `cUnitTypeRelic` equals `relicID`. Slot 0 fast path with defensive scan over `kbUnitGetNumberContained(heroID)` slots. |
-| `autoRelicDelivery_heroIsDeliverable(int heroID)` | True when `kbUnitGetActionType(heroID) == cActionTypeIdle` **and** `kbUnitGetPlanID(heroID) == cInvalidID`. |
+| `autoRelicDelivery_heroIsDeliverable(int heroID)` | True when `kbUnitGetActionType(heroID) == cActionTypeIdle` **and** `kbUnitGetPlanID(heroID) == -1`. |
 | `autoRelicDelivery_findNearestTempleWithSpace(int heroID)` | Nearest player-owned temple with `kbUnitGetNumberContained < cProtoStatMaxContained`, or -1. Emits `no temple with space -> skip` if none qualify. |
 | `autoRelicDelivery_handleDisappearance(int relicID, vector lastPos)` | For one disappeared relic: find nearby heroes, deliver to the first valid carrier. |
 | `autoRelicDelivery_register()` | Enables `autoRelicDelivery_scanRelics` only; preserves `xsSetContextPlayer(cMyID)` / `xsSetContextPlayer(-1)` defensive wrapper and the human-player guard. |
@@ -170,7 +170,7 @@ Worst-case complexity is `O(R² + D · H_r + S · T)`. For typical matches, this
 - **2-second latency.** Delivery can occur up to 2 seconds after pickup. The user accepted this cadence.
 - **Manual override ambiguity.** An idle hero after a manual pickup looks identical to an idle hero after the pickup animation. The feature will deliver in both cases; this is the intended tradeoff.
 - **Heavy relic maps.** Scenario-heavy maps could raise `R`; if logs show tick spikes, consider tuning.
-- **`kbUnitGetPlanID` semantics.** The no-plan guard assumes `cInvalidID` means no active AI plan for a human hero. This needs in-game verification.
+- **`kbUnitGetPlanID` semantics.** The no-plan guard compares against `-1`, the value `kbUnitGetPlanID` returns when the unit has no plan (this is the convention used throughout the shipped AoM:R AI source). The reference doc `docs/MythRMConstants.txt:16` declares `cInvalidID = -1`, but the constant is not exposed to the XS runtime; use `-1` literally. This needs in-game verification to confirm that a manually controlled human hero does not get assigned a plan ID while appearing idle.
 
 ## 10. References
 

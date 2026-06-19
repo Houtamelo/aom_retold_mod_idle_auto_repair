@@ -11,7 +11,8 @@
 //        meters of the relic's last-seen position.
 //     2. For each candidate, check if the hero carries that SPECIFIC relic
 //        unit ID (via kbUnitGetContainedUnitByIndex).
-//     3. If carrying, idle (cActionTypeIdle), and plan-free (cInvalidID),
+//     3. If carrying, idle (cActionTypeIdle), and plan-free (-1, the
+//        "no plan" return value of kbUnitGetPlanID),
 //        issue aiTaskWorkUnit(hero, nearestTempleWithSpace).
 //
 // No state is retained across ticks except the diff snapshot. Each tick is
@@ -132,11 +133,18 @@ bool autoRelicDelivery_heroCarriesRelic(int heroID = -1, int relicID = -1)
 }
 
 // True if the hero is idle and has no active AI plan.
+// True if the hero is idle and has no active AI plan. The plan check
+// compares against -1 because that is the value kbUnitGetPlanID returns
+// when the unit has no plan; the shipped AoM:R AI source uses -1
+// literally everywhere (see core/economy/economic_units.xs:138,
+// core/exploration.xs:655). The reference doc
+// docs/MythRMConstants.txt:16 declares `cInvalidID = -1` but the
+// constant is not actually exposed to the XS runtime.
 bool autoRelicDelivery_heroIsDeliverable(int heroID = -1)
 {
    if (heroID < 0) { return(false); }
    return(kbUnitGetActionType(heroID) == cActionTypeIdle
-          && kbUnitGetPlanID(heroID) == cInvalidID);
+          && kbUnitGetPlanID(heroID) == -1);
 }
 
 // Returns the player-owned temple with available relic space nearest to the

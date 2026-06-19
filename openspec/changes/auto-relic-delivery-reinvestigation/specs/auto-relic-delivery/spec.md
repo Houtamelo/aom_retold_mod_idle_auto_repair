@@ -31,7 +31,7 @@ SHALL enable a `rule ... minInterval 2` named `autoRelicDelivery_scanRelics` for
 
 ### Requirement: R3 Delivery guard
 
-SHALL issue a delivery order only when `kbUnitGetActionType(heroID) == cActionTypeIdle` and `kbUnitGetPlanID(heroID) == cInvalidID`.
+SHALL issue a delivery order only when `kbUnitGetActionType(heroID) == cActionTypeIdle` and `kbUnitGetPlanID(heroID) == -1`.
 (Previously: only required action-type idle and used a separate one-shot retry rule; retry rule is now removed.)
 
 #### Scenario: Idle and plan-free hero delivers
