@@ -247,8 +247,14 @@ inactive
    kbUnitQueryResetResults(gAutoRelic_relicQuery);
    int relicCount = kbUnitQueryExecute(gAutoRelic_relicQuery);
 
-   int[]    curRelicIDs       = default;
-   vector[] curRelicPositions = default;
+   // Local snapshot of current ground relics. Use `new int(0, 0)` /
+   // `new vector(0, cInvalidVector)` for local empty arrays; the
+   // shipped AoM:R XS runtime only accepts `= default` for `extern`
+   // globals, `static` class members, and parameter defaults — NOT
+   // for local variables inside function bodies (see
+   // core/exploration.xs for the canonical `new int(0, 0)` pattern).
+   int[]    curRelicIDs       = new int(0, 0);
+   vector[] curRelicPositions = new vector(0, cInvalidVector);
    for (int i = 0; i < relicCount; i = i + 1)
    {
       int relicID = kbUnitQueryGetResult(gAutoRelic_relicQuery, i);
