@@ -4,7 +4,7 @@ Bundled superset of the Auto-Repair and Intelligent Auto-Scout mods, and the can
 
 - **Idle Auto-Repair** — idle units capable of repairing automatically walk to nearby damaged friendly buildings and repair them at normal resource cost. Covers villagers across every civilization and Norse soldier-builders.
 - **Intelligent Auto-Scout** — replaces the engine's auto-scout button on land scouts and Atlantean Oracles with a smarter exploration system: scouts spread across the map, divert to wild herdables, send claimed herds home, and stay away from enemy threats.
-- **Auto-relic-delivery** — when a human player's hero picks up a relic, the mod detects the ground relic's disappearance on a 2-second poll, finds player-owned heroes within 10 meters of the relic's last position, and tasks the first idle, plan-free hero carrying that exact relic unit ID once to the nearest player-owned temple with available relic space. The feature tracks each `(heroID, relicID)` pair so the same relic never triggers twice, and retries for up to 4 ticks (~8 seconds) if the hero is still in the pickup animation or busy. Player orders always take priority after the retry window. The canonical architecture is documented in `openspec/changes/auto-relic-delivery-reinvestigation/design.md`.
+- **Auto-relic-delivery** — when a human player's hero picks up a relic, the mod detects the ground relic's disappearance on a 2-second poll, finds player-owned heroes within 10 meters of the relic's last position, and tasks the first idle, plan-free hero carrying that exact relic unit ID once to the nearest player-owned temple with available relic space. The three cases for a missing relic (other-player pickup, our-pickup-but-busy, our-pickup-and-idle) are exhaustive — stale carries and player overrides are not retried; if the player wants to keep the relic, an active order prevents delivery. The canonical architecture is documented in `openspec/changes/auto-relic-delivery-reinvestigation/design.md`.
 
 The individual mods' READMEs (see [Idle Auto-Repair](../idle_auto_repair/README.md) and [Intelligent Auto-Scout](../intelligent_auto_scout/README.md)) document the per-feature behaviour in full.
 
@@ -81,7 +81,7 @@ Launch the game, enable only **Human Assist Improvements**, and start a match.
 
 **Auto-relic-delivery**
 - Rewrote `auto_relic_delivery.xs` to use a 2-second ground-relic poll instead of `cXSRelicPickedUpHandler`. Detects relic disappearances, queries player-owned heroes within 10 meters of the relic's last position, and delivers only when a hero carries the exact relic unit ID while idle and has no active AI plan.
-- Retains the `(heroID, relicID)` pair tracker for idempotency and adds a 4-tick pending-retry window (~8 seconds) for pickup-animation timing. Player orders take priority after the retry window.
+- No cross-tick state beyond the diff snapshot. The three cases for a missing relic are exhaustive, so a `(heroID, relicID)` pair tracker and a pending-retry window are not needed; player orders prevent delivery for as long as they keep the hero busy.
 - The `autoRelicDelivery_register()` call in the 4th mod's `human_assist.xs` is unchanged; only the internals of `auto_relic_delivery.xs` changed.
 - Documented poll-based behavior and patch-maintenance steps.
 

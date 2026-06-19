@@ -1,12 +1,32 @@
 //==============================================================================
 // auto_relic_delivery.xs (Human Assist Improvements mod)
 //
-// Poll-based auto-relic-delivery for human players. Every 2 seconds we snapshot
-// all alive ground relics and compare unit IDs with the previous tick. Each
-// relic ID that disappears is treated as a probable pickup; we search player
-// heroes within 10 meters of the relic's last position and task the first hero
-// that carries the exact relic unit ID, is idle, and has no active AI plan to
-// the nearest player-owned temple with relic space.
+// Passive one-shot relic delivery for human players.
+//
+// Algorithm:
+//   Every 2 seconds, snapshot all ground relics via a player-0 query
+//   (cUnitTypeRelic, cUnitStateAlive) and diff against the previous tick.
+//   For each relic that was on the ground last tick but is not this tick:
+//     1. Query player-owned alive heroes within cAutoRelic_ProximityRadius
+//        meters of the relic's last-seen position.
+//     2. For each candidate, check if the hero carries that SPECIFIC relic
+//        unit ID (via kbUnitGetContainedUnitByIndex).
+//     3. If carrying, idle (cActionTypeIdle), and plan-free (cInvalidID),
+//        issue aiTaskWorkUnit(hero, nearestTempleWithSpace).
+//
+// No state is retained across ticks except the diff snapshot. Each tick is
+// independent. Stale carries or player overrides are not retried.
+//
+// The three cases for "missing relic" are exhaustive:
+//   - Picked up by another player: hero query filters by player ID, no
+//     candidate found, no action.
+//   - Picked up by our hero but hero is busy: idle check rejects, no action.
+//     Player commands take precedence.
+//   - Picked up by our hero, hero is idle: deliver.
+//
+// New ground relics that appear (temple destroyed, hero died and dropped) are
+// tracked in the snapshot but not acted on; if they later disappear the
+// missing-relic path handles them.
 //
 // This replaces the previous event-driven design based on
 // cXSRelicPickedUpHandler, which does not fire for human players.
@@ -19,48 +39,24 @@
 //     include "human_assist/auto_relic_delivery.xs";
 //==============================================================================
 
-// Maximum tracked (hero, relic) pairs. Hero counts are small (< 20 in a
-// typical match); 64 leaves comfortable headroom for scenario-editor spam.
-const int cAutoRelic_MaxTrackerPairs = 64;
+// Hero proximity radius, in meters.
+const float cAutoRelic_ProximityRadius = 10.0;
 
-// Pending-disappearance age-out, in scan ticks. Each tick is ~2 seconds.
-const int cAutoRelic_PendingMaxAge = 4;
+//==============================================================================
+// Queries and snapshot
+//==============================================================================
 
-// Shared queries.
-int gAutoRelic_heroQuery = -1;   // reusable hero proximity query
-int gAutoRelic_templeQuery = -1; // player-owned temples near a hero
-int gAutoRelic_relicQuery = -1;  // alive ground relics
+int gAutoRelic_relicQuery   = -1; // alive ground relics (player 0 / gaia)
+int gAutoRelic_heroQuery    = -1; // reusable hero proximity query
+int gAutoRelic_templeQuery  = -1; // player-owned temples
 
-// Previous-tick snapshot of ground relics.
+// Previous-tick snapshot of ground relics, used for the disappearance diff.
 extern int[]    gAutoRelic_prevRelicIDs       = default;
 extern vector[] gAutoRelic_prevRelicPositions = default;
-
-// Pending disappearances that failed delivery because the carrier was busy
-// (pickup animation or player override). Retried on subsequent ticks.
-extern int[]    gAutoRelic_pendingRelicIDs       = default;
-extern vector[] gAutoRelic_pendingRelicPositions = default;
-extern int[]    gAutoRelic_pendingAge            = default;
-// Parallel hero ID is stored so we can mark the pair triggered on age-out.
-extern int[]    gAutoRelic_pendingHeroIDs        = default;
-
-// Trigger-once tracker: parallel arrays indexed by slot. A pair is appended
-// the first time a delivery order is issued for that (heroID, relicID), so any
-// subsequent scan for the same pair is silently skipped.
-extern int[] gAutoRelic_heroID  = default;
-extern int[] gAutoRelic_relicID = default;
 
 //==============================================================================
 // Query setup
 //==============================================================================
-
-void autoRelicDelivery_setupHeroProximityQuery()
-{
-   if (gAutoRelic_heroQuery != -1) { return; }
-   gAutoRelic_heroQuery = kbUnitQueryCreate("autoRelic_heroProximity");
-   kbUnitQuerySetPlayerID(gAutoRelic_heroQuery, cMyID, false);
-   kbUnitQuerySetUnitType(gAutoRelic_heroQuery, cUnitTypeHero);
-   kbUnitQuerySetState(gAutoRelic_heroQuery, cUnitStateAlive);
-}
 
 void autoRelicDelivery_setupRelicQuery()
 {
@@ -70,6 +66,15 @@ void autoRelicDelivery_setupRelicQuery()
    kbUnitQuerySetPlayerID(gAutoRelic_relicQuery, 0, false);
    kbUnitQuerySetUnitType(gAutoRelic_relicQuery, cUnitTypeRelic);
    kbUnitQuerySetState(gAutoRelic_relicQuery, cUnitStateAlive);
+}
+
+void autoRelicDelivery_setupHeroProximityQuery()
+{
+   if (gAutoRelic_heroQuery != -1) { return; }
+   gAutoRelic_heroQuery = kbUnitQueryCreate("autoRelic_heroProximity");
+   kbUnitQuerySetPlayerID(gAutoRelic_heroQuery, cMyID, false);
+   kbUnitQuerySetUnitType(gAutoRelic_heroQuery, cUnitTypeHero);
+   kbUnitQuerySetState(gAutoRelic_heroQuery, cUnitStateAlive);
 }
 
 void autoRelicDelivery_setupTempleQuery()
@@ -83,98 +88,37 @@ void autoRelicDelivery_setupTempleQuery()
 }
 
 //==============================================================================
-// (heroID, relicID) trigger-once tracker helpers
+// Per-disappearance helpers
 //==============================================================================
 
-bool autoRelicDelivery_hasPair(int heroID = -1, int relicID = -1)
-{
-   if (heroID < 0 || relicID < 0) { return(false); }
-   int n = gAutoRelic_heroID.size();
-   for (int i = 0; i < n; i = i + 1)
-   {
-      if (gAutoRelic_heroID[i] == heroID && gAutoRelic_relicID[i] == relicID)
-      {
-         return(true);
-      }
-   }
-   return(false);
-}
-
-void autoRelicDelivery_addPair(int heroID = -1, int relicID = -1)
-{
-   if (heroID < 0 || relicID < 0) { return; }
-   if (gAutoRelic_heroID.size() >= cAutoRelic_MaxTrackerPairs)
-   {
-      aiEcho("autoRelicDelivery: tracker overflow, skipping pair (" + heroID + "," + relicID + ")");
-      return;
-   }
-   gAutoRelic_heroID.add(heroID);
-   gAutoRelic_relicID.add(relicID);
-}
-
-//==============================================================================
-// Relic-snapshot diff
-//==============================================================================
-
-int autoRelicDelivery_computeDisappearances(int[] prevIDs = default, vector[] prevPos = default,
-                                            int[] curIDs = default, vector[] curPos = default,
-                                            int[] outIDs = default, vector[] outPos = default)
-{
-   outIDs.clear();
-   outPos.clear();
-
-   int prevCount = prevIDs.size();
-   int curCount = curIDs.size();
-   for (int i = 0; i < prevCount; i = i + 1)
-   {
-      int candidateID = prevIDs[i];
-      bool found = false;
-      for (int j = 0; j < curCount; j = j + 1)
-      {
-         if (curIDs[j] == candidateID)
-         {
-            found = true;
-            break;
-         }
-      }
-      if (found == false)
-      {
-         outIDs.add(candidateID);
-         outPos.add(prevPos[i]);
-      }
-   }
-   return(outIDs.size());
-}
-
-//==============================================================================
-// Hero-carrier helpers
-//==============================================================================
-
-int[] autoRelicDelivery_findCarrierInRange(vector pos = cInvalidVector)
+// Returns the IDs of player-owned alive heroes within
+// cAutoRelic_ProximityRadius meters of the given position. The query is reset
+// and re-executed on each call so callers can pass any position.
+int[] autoRelicDelivery_findHeroesInRange(vector pos = cInvalidVector)
 {
    autoRelicDelivery_setupHeroProximityQuery();
 
    kbUnitQuerySetPosition(gAutoRelic_heroQuery, pos);
-   kbUnitQuerySetMaximumDistance(gAutoRelic_heroQuery, 10.0);
+   kbUnitQuerySetMaximumDistance(gAutoRelic_heroQuery, cAutoRelic_ProximityRadius);
    kbUnitQueryResetResults(gAutoRelic_heroQuery);
-
    kbUnitQueryExecute(gAutoRelic_heroQuery);
    return(kbUnitQueryGetResults(gAutoRelic_heroQuery));
 }
 
+// True if heroID carries the specific relic unit ID. Slot 0 fast path with a
+// defensive scan over all contained slots in case future hero types hold
+// relics in higher slots.
 bool autoRelicDelivery_heroCarriesRelic(int heroID = -1, int relicID = -1)
 {
    if (heroID < 0 || relicID < 0) { return(false); }
    if (kbUnitGetNumberContainedOfType(heroID, cUnitTypeRelic) <= 0) { return(false); }
 
-   // Fast path: slot 0 is the normal carrying slot for a hero.
    int slot0 = kbUnitGetContainedUnitByIndex(heroID, 0);
    if (slot0 == relicID && kbUnitIsType(slot0, cUnitTypeRelic) == true)
    {
       return(true);
    }
 
-   // Defensive: scan all contained slots.
    int count = kbUnitGetNumberContained(heroID);
    for (int i = 0; i < count; i = i + 1)
    {
@@ -187,6 +131,7 @@ bool autoRelicDelivery_heroCarriesRelic(int heroID = -1, int relicID = -1)
    return(false);
 }
 
+// True if the hero is idle and has no active AI plan.
 bool autoRelicDelivery_heroIsDeliverable(int heroID = -1)
 {
    if (heroID < 0) { return(false); }
@@ -194,10 +139,8 @@ bool autoRelicDelivery_heroIsDeliverable(int heroID = -1)
           && kbUnitGetPlanID(heroID) == cInvalidID);
 }
 
-//==============================================================================
-// Nearest temple with available relic space
-//==============================================================================
-
+// Returns the player-owned temple with available relic space nearest to the
+// hero, or -1 if none has space.
 int autoRelicDelivery_findNearestTempleWithSpace(int heroID = -1)
 {
    if (heroID < 0) { return(-1); }
@@ -226,23 +169,28 @@ int autoRelicDelivery_findNearestTempleWithSpace(int heroID = -1)
 }
 
 //==============================================================================
-// Issue delivery order and record the pair
+// Handle one disappeared relic: scan nearby heroes and deliver to the first
+// valid carrier.
 //==============================================================================
 
-void autoRelicDelivery_issueDelivery(int heroID = -1, int relicID = -1)
+void autoRelicDelivery_handleDisappearance(int relicID = -1, vector lastPos = cInvalidVector)
 {
-   if (heroID < 0 || relicID < 0) { return; }
-   if (autoRelicDelivery_hasPair(heroID, relicID) == true) { return; }
+   int[] heroes = autoRelicDelivery_findHeroesInRange(lastPos);
+   aiEcho("autoRelicDelivery: candidate heroes within 10m: " + heroes.size());
 
-   int templeID = autoRelicDelivery_findNearestTempleWithSpace(heroID);
-   if (templeID < 0)
+   for (int h = 0; h < heroes.size(); h = h + 1)
    {
+      int heroID = heroes[h];
+      if (autoRelicDelivery_heroCarriesRelic(heroID, relicID) == false) { continue; }
+      if (autoRelicDelivery_heroIsDeliverable(heroID) == false) { continue; }
+
+      int templeID = autoRelicDelivery_findNearestTempleWithSpace(heroID);
+      if (templeID < 0) { continue; }
+
+      aiEcho("autoRelicDelivery: hero " + heroID + " carrying target relic -> delivering to temple " + templeID);
+      aiTaskWorkUnit(heroID, templeID);
       return;
    }
-
-   aiEcho("autoRelicDelivery: hero " + heroID + " carrying target relic -> delivering to temple " + templeID);
-   aiTaskWorkUnit(heroID, templeID);
-   autoRelicDelivery_addPair(heroID, relicID);
 }
 
 //==============================================================================
@@ -269,9 +217,6 @@ void autoRelicDelivery_register()
    }
 
    aiEcho("autoRelicDelivery: enabling scan rule");
-
-   // Arrays declared with = default start at zero length. The tracker and
-   // snapshot arrays reset each game because globals are reloaded with the script.
    xsEnableRule("autoRelicDelivery_scanRelics");
 
    xsSetContextPlayer(-1);
@@ -289,13 +234,12 @@ inactive
    xsSetContextPlayer(cMyID);
 
    autoRelicDelivery_setupRelicQuery();
-   autoRelicDelivery_setupHeroProximityQuery();
 
-   // Snapshot current ground relics and their positions.
+   // Snapshot current ground relics.
    kbUnitQueryResetResults(gAutoRelic_relicQuery);
    int relicCount = kbUnitQueryExecute(gAutoRelic_relicQuery);
 
-   int[] curRelicIDs = default;
+   int[]    curRelicIDs       = default;
    vector[] curRelicPositions = default;
    for (int i = 0; i < relicCount; i = i + 1)
    {
@@ -306,182 +250,25 @@ inactive
 
    aiEcho("autoRelicDelivery: tick start (relicsOnGround=" + relicCount + ")");
 
-   // Detect relic IDs that were present last tick but are gone now.
-   int[] disappearedIDs = default;
-   vector[] disappearedPositions = default;
-   autoRelicDelivery_computeDisappearances(gAutoRelic_prevRelicIDs,
-                                           gAutoRelic_prevRelicPositions,
-                                           curRelicIDs,
-                                           curRelicPositions,
-                                           disappearedIDs,
-                                           disappearedPositions);
-
-   for (int i = 0; i < disappearedIDs.size(); i = i + 1)
+   // Find relics that disappeared since last tick and handle each one.
+   int prevCount = gAutoRelic_prevRelicIDs.size();
+   for (int i = 0; i < prevCount; i = i + 1)
    {
-      vector pos = disappearedPositions[i];
-      aiEcho("autoRelicDelivery: disappearance detected (relicID=" + disappearedIDs[i]
-             + ", pos=(" + pos.x + "," + pos.z + "))");
+      int prevID = gAutoRelic_prevRelicIDs[i];
+      bool found = false;
+      for (int j = 0; j < relicCount; j = j + 1)
+      {
+         if (curRelicIDs[j] == prevID) { found = true; break; }
+      }
+      if (found == true) { continue; }
+
+      vector prevPos = gAutoRelic_prevRelicPositions[i];
+      aiEcho("autoRelicDelivery: disappearance detected (relicID=" + prevID
+             + ", pos=(" + prevPos.x + "," + prevPos.z + "))");
+      autoRelicDelivery_handleDisappearance(prevID, prevPos);
    }
 
-   //--------------------------------------------------------------------------
-   // Age pending entries first; entries that reached max age are dropped and
-   // their (hero, relic) pair is marked triggered so we do not fight the player
-   // indefinitely.
-   //--------------------------------------------------------------------------
-   int pendingCount = gAutoRelic_pendingRelicIDs.size();
-   for (int i = 0; i < pendingCount; i = i + 1)
-   {
-      gAutoRelic_pendingAge[i] = gAutoRelic_pendingAge[i] + 1;
-   }
-
-   int[] newPendingIDs    = default;
-   vector[] newPendingPos = default;
-   int[] newPendingAge    = default;
-   int[] newPendingHero   = default;
-
-   for (int i = 0; i < pendingCount; i = i + 1)
-   {
-      int relicID = gAutoRelic_pendingRelicIDs[i];
-      vector pos  = gAutoRelic_pendingRelicPositions[i];
-      int age     = gAutoRelic_pendingAge[i];
-      int heroID  = gAutoRelic_pendingHeroIDs[i];
-
-      if (age >= cAutoRelic_PendingMaxAge)
-      {
-         aiEcho("autoRelicDelivery: pending relic " + relicID + " aged out after "
-                + age + " ticks");
-         if (heroID >= 0)
-         {
-            aiEcho("autoRelicDelivery: marking pair (" + heroID + "," + relicID
-                   + ") triggered after timeout");
-            autoRelicDelivery_addPair(heroID, relicID);
-         }
-         continue;
-      }
-
-      // Retry: look for a carrier near the relic's last known position.
-      int[] heroes = autoRelicDelivery_findCarrierInRange(pos);
-      int carrier = -1;
-      for (int h = 0; h < heroes.size(); h = h + 1)
-      {
-         if (autoRelicDelivery_heroCarriesRelic(heroes[h], relicID) == true)
-         {
-            carrier = heroes[h];
-            break;
-         }
-      }
-
-      if (carrier < 0)
-      {
-         // Carrier is no longer in range or has dropped the relic.
-         aiEcho("autoRelicDelivery: pending relic " + relicID + " carrier lost, dropping");
-         continue;
-      }
-
-      if (autoRelicDelivery_heroIsDeliverable(carrier) == true)
-      {
-         autoRelicDelivery_issueDelivery(carrier, relicID);
-         continue; // resolved; do not re-add to pending
-      }
-
-      // Still carrying but still not deliverable; keep pending.
-      newPendingIDs.add(relicID);
-      newPendingPos.add(pos);
-      newPendingAge.add(age);
-      newPendingHero.add(carrier);
-      aiEcho("autoRelicDelivery: pending relic " + relicID + " still not deliverable (hero "
-             + carrier + ")");
-   }
-
-   //--------------------------------------------------------------------------
-   // Process fresh disappearances.
-   //--------------------------------------------------------------------------
-   for (int i = 0; i < disappearedIDs.size(); i = i + 1)
-   {
-      int relicID = disappearedIDs[i];
-      vector pos  = disappearedPositions[i];
-
-      // Skip if this relic is already pending from an earlier tick.
-      bool alreadyPending = false;
-      for (int p = 0; p < newPendingIDs.size(); p = p + 1)
-      {
-         if (newPendingIDs[p] == relicID)
-         {
-            alreadyPending = true;
-            break;
-         }
-      }
-      if (alreadyPending == true) { continue; }
-
-      int[] heroes = autoRelicDelivery_findCarrierInRange(pos);
-      aiEcho("autoRelicDelivery: candidate heroes within 10m: " + heroes.size());
-
-      bool handled = false;
-      for (int h = 0; h < heroes.size(); h = h + 1)
-      {
-         int heroID = heroes[h];
-         if (autoRelicDelivery_heroCarriesRelic(heroID, relicID) == true)
-         {
-            if (autoRelicDelivery_heroIsDeliverable(heroID) == true)
-            {
-               autoRelicDelivery_issueDelivery(heroID, relicID);
-            }
-            else
-            {
-               int action = kbUnitGetActionType(heroID);
-               int planID = kbUnitGetPlanID(heroID);
-
-               if (action != cActionTypeIdle)
-               {
-                  aiEcho("autoRelicDelivery: hero " + heroID
-                         + " carrying target relic but not idle (action=" + action + ") -> skip");
-               }
-               else if (planID != cInvalidID)
-               {
-                  aiEcho("autoRelicDelivery: hero " + heroID
-                         + " carrying target relic but has active plan " + planID + " -> skip");
-               }
-
-               newPendingIDs.add(relicID);
-               newPendingPos.add(pos);
-               newPendingAge.add(0);
-               newPendingHero.add(heroID);
-            }
-            handled = true;
-            break; // first matching carrier wins
-         }
-         else if (kbUnitGetNumberContainedOfType(heroID, cUnitTypeRelic) > 0)
-         {
-            aiEcho("autoRelicDelivery: hero " + heroID + " carrying different relic -> skip");
-         }
-         else
-         {
-            aiEcho("autoRelicDelivery: hero " + heroID + " not carrying any relic -> skip");
-         }
-      }
-
-      // No hero in range: this is either a non-hero pickup or a scenario-script
-      // removal. Nothing to deliver and no pair to track.
-      if (handled == false && heroes.size() > 0)
-      {
-         // All nearby heroes were inspected and none carry this relic.
-      }
-   }
-
-   // Commit updated pending state.
-   gAutoRelic_pendingRelicIDs.clear();
-   gAutoRelic_pendingRelicPositions.clear();
-   gAutoRelic_pendingAge.clear();
-   gAutoRelic_pendingHeroIDs.clear();
-   for (int i = 0; i < newPendingIDs.size(); i = i + 1)
-   {
-      gAutoRelic_pendingRelicIDs.add(newPendingIDs[i]);
-      gAutoRelic_pendingRelicPositions.add(newPendingPos[i]);
-      gAutoRelic_pendingAge.add(newPendingAge[i]);
-      gAutoRelic_pendingHeroIDs.add(newPendingHero[i]);
-   }
-
-   // Save current snapshot for the next tick.
+   // Save current snapshot for next tick.
    gAutoRelic_prevRelicIDs.clear();
    gAutoRelic_prevRelicPositions.clear();
    for (int i = 0; i < curRelicIDs.size(); i = i + 1)
