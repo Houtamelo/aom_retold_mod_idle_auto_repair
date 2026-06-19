@@ -1249,7 +1249,7 @@ minInterval 10
    }
 
    // WAITING: require a first-ring wall plan before creating the second ring.
-   if (aiPlanGetNumber(cPlanBuildWall, -1, true) == 0)
+   if (aiPlanGetNumberByType(cPlanBuildWall) == 0)
    {
       return;
    }
