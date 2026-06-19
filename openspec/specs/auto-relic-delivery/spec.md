@@ -1,26 +1,106 @@
 # Auto-relic-delivery Specification
 
+> Source of truth updated by delta `auto-relic-delivery-reinvestigation` on 2026-06-19.
+
 ## Purpose
 
 Passive auto-relic-delivery for the `Human Assist Improvements` mod: when a human player's hero picks up a relic, task it once to the nearest player-owned temple with available space, without overriding manual orders.
 
 ## Requirements
 
-| ID | Requirement |
-|---|---|
-| R1 | Register a `cXSRelicPickedUpHandler` in `autoRelicDelivery_register()` called from `human_assist.xs::main()`; do NOT poll all heroes each tick. |
-| R2 | Track `(heroID, relicID)` pairs in append-only arrays as the active runtime path. The engine exposes `kbUnitGetContainedUnitByIndex(heroID, 0)` for the carried relic ID, `kbUnitGetNumberContainedOfType(heroID, cUnitTypeRelic)` for the type-safe carrying check, and `kbRelicGetTechID(relicID)` to correlate the relic with the `cXSRelicPickedUpHandler` `techID` payload. A per-hero state-machine fallback is NOT used. Re-trigger for a new `(heroID, relicID)` pair. |
-| R3 | Only issue when `kbUnitGetActionType(heroID) == cActionTypeIdle`; 1–2 s retry re-tests idle state and marks triggered on skip. |
-| R4 | Pick nearest temple with `kbUnitGetNumberContained(templeID) < kbPlayerGetProtoStatInt(...)`; no-op if none has space. |
-| R5 | Deliver with `aiTaskWorkUnit(heroID, templeID)`. |
-| R6 | Treat `kbUnitGetNumberContainedOfType(heroID, cUnitTypeRelic) > 0` as the carrying signal; verify `kbUnitGetContainedUnitByIndex(heroID, 0)` returns the relic unit ID in-game. |
-| R7 | Filter by `cUnitTypeHero`; culture-specific carriers out of scope. |
-| R8 | Guard all paths with `kbPlayerIsHuman(cMyID)`. |
-| R9 | Document singleton handler caveat in README and startup banner. |
-| R10 | Intentionally break bootstrap D1 byte-identity of fourth mod's `human_assist.xs`. |
-| R11 | Rollback removes the file, include/registration call, README additions, and deploy line. |
+### R1 Trigger mechanism
 
-## Scenarios
+SHALL enable a `rule ... minInterval 2` named `autoRelicDelivery_scanRelics` for ground-relic scans and SHALL NOT register `cXSRelicPickedUpHandler`.
+
+#### Scenario: Poll detects a pickup
+
+- GIVEN an idle hero near a ground relic
+- WHEN the relic unit ID disappears between two 2-second ticks
+- THEN `aiEcho` logs the disappeared relic unit ID
+
+#### Scenario: No handler registered
+
+- GIVEN `autoRelicDelivery_register()` runs for a human player
+- WHEN the body executes
+- THEN `aiSetHandler(..., cXSRelicPickedUpHandler)` is absent and the scan rule is active
+
+### R3 Delivery guard
+
+SHALL issue a delivery order only when `kbUnitGetActionType(heroID) == cActionTypeIdle` and `kbUnitGetPlanID(heroID) == -1`.
+
+#### Scenario: Idle and plan-free hero delivers
+
+- GIVEN a hero carries the disappeared relic within 10 meters
+- WHEN both checks pass
+- THEN the hero is tasked once to the nearest non-full temple
+
+#### Scenario: Player override suppresses delivery
+
+- GIVEN a hero has just picked up a relic
+- WHEN the player issues a manual order before the next tick
+- THEN no delivery order is issued on this or any subsequent tick; the relic stays with the hero
+
+### R4 Nearest temple with space
+
+SHALL pick the nearest player-owned temple where `kbUnitGetNumberContained(templeID) < kbPlayerGetProtoStatInt(...)`; no-op if none has space.
+
+### R5 Delivery order
+
+SHALL deliver with `aiTaskWorkUnit(heroID, templeID)`.
+
+### R6 Relic identification
+
+SHALL confirm carrying with `kbUnitGetNumberContainedOfType(heroID, cUnitTypeRelic) > 0`, retrieve `kbUnitGetContainedUnitByIndex(heroID, 0)`, and match it to the disappeared relic ID. It MAY scan slots up to `kbUnitGetNumberContained(heroID)` when slot 0 does not match.
+
+#### Scenario: Specific relic match delivers
+
+- GIVEN relic R disappeared and hero H is within 10 meters
+- WHEN `kbUnitGetContainedUnitByIndex(H, 0)` returns R
+- THEN delivery is issued once
+
+#### Scenario: Different relic skips delivery
+
+- GIVEN relic R disappeared and hero H carries relic S
+- WHEN the contained unit ID is S ≠ R
+- THEN no delivery order is issued for R
+
+### R7 Hero type filter
+
+SHALL filter by `cUnitTypeHero`; culture-specific carriers are out of scope.
+
+### R8 Human-player guard
+
+SHALL guard all paths with `kbPlayerIsHuman(cMyID)`.
+
+### R10 Bootstrap D1 divergence
+
+SHALL intentionally break bootstrap D1 byte-identity of the fourth mod's `human_assist.xs` by adding the include and registration call.
+
+### R11 Rollback
+
+SHALL remove the file, include/registration call, README additions, and deploy line on rollback.
+
+### R12 Ground-relic disappearance scan
+
+SHALL snapshot alive ground relic IDs and detect disappearances by comparing consecutive tick results.
+
+#### Scenario: Disappearance banner
+
+- GIVEN three relics exist on the ground
+- WHEN one unit ID is present in the prior tick but absent in the current tick
+- THEN `aiEcho` logs the disappeared unit ID and the remaining relics do not produce extra banners
+
+### R13 Hero proximity query
+
+SHALL query alive player heroes within 10 meters of a disappeared relic's last position using `kbUnitQuerySetMaximumDistance(..., 10.0)`.
+
+#### Scenario: Proximity radius filters heroes
+
+- GIVEN a disappeared relic's last position
+- WHEN one hero is 8 meters away and another is 15 meters away
+- THEN the 8-meter hero appears in results and the 15-meter hero does not
+
+## Cross-cutting scenarios
 
 All scenarios are MANUAL (deploy + `aiEcho`).
 
@@ -28,13 +108,13 @@ All scenarios are MANUAL (deploy + `aiEcho`).
 
 - **GIVEN** an idle hero with the mod enabled
 - **WHEN** the hero picks up a relic
-- **THEN** it is tasked once to the nearest non-full temple and `aiEcho` logs trigger
+- **THEN** it is tasked once to the nearest non-full temple and `aiEcho` logs the trigger
 
 ### B2 — Player overrides
 
 - **GIVEN** a hero just picked up relic R
 - **WHEN** the player issues a manual order before delivery
-- **THEN** feature does not override and the pair is marked triggered
+- **THEN** the feature does not override the order and the relic stays with the hero
 
 ### B3 — Sequential relic delivery
 
@@ -54,23 +134,11 @@ All scenarios are MANUAL (deploy + `aiEcho`).
 - **WHEN** a hero picks up a relic
 - **THEN** no order is issued and `aiEcho` logs "no temple with space"
 
-### B6 — Idle-check edge
-
-- **GIVEN** a hero is mid-pickup-animation at event fire
-- **WHEN** the scan and 1–2 s retry run
-- **THEN** scan skips; retry delivers if idle or skips permanently on manual order
-
 ### B7 — Carrying-relic API verification
 
 - **GIVEN** a hero cycled through pick-up → carry → deposit
 - **WHEN** `aiEcho` logs `kbUnitGetNumberContainedOfType(heroID, cUnitTypeRelic)` and `kbUnitGetContainedUnitByIndex(heroID, 0)` each phase
-- **THEN** `kbUnitGetNumberContainedOfType` is `> 0` while carrying and `== 0` after deposit, and `kbUnitGetContainedUnitByIndex` returns a valid relic unit ID while carrying whose `kbRelicGetTechID` matches the event payload
-
-### B8 — Handler singleton documentation
-
-- **GIVEN** `README.md` and the startup banner
-- **WHEN** a maintainer checks handler compatibility
-- **THEN** both state the singleton registration policy
+- **THEN** `kbUnitGetNumberContainedOfType` is `> 0` while carrying and `== 0` after deposit, and `kbUnitGetContainedUnitByIndex` returns the specific relic unit ID while carrying
 
 ### B9 — Existing mod regression
 
