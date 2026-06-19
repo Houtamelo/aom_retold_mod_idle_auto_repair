@@ -1082,7 +1082,13 @@ minInterval 10
 //==============================================================================
 // secondRingWallPlanMonitor helpers
 //==============================================================================
-#define debugSecondRing(msg) if (gDebugSecondRing == true) { aiEcho(msg); }
+void debugSecondRing(string message = "")
+{
+   if (gDebugSecondRing == true)
+   {
+      aiEcho(message);
+   }
+}
 
 int createSecondRingWallPlan(int baseID)
 {
