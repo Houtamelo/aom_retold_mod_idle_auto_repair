@@ -1153,7 +1153,8 @@ bool isBaseUnderSustainedAttack(int baseID = -1)
    {
       return false;
    }
-   return (xsGetTime() - gSecondRingAttackStartTime) > 25 * 1000;
+   int attackDuration = xsGetTime() - gSecondRingAttackStartTime;
+   return (attackDuration > 25 * 1000);
 }
 
 //==============================================================================
@@ -1219,11 +1220,14 @@ minInterval 10
       }
 
       // 12-minute lifetime cap.
-      if (gSecondRingWallStartTime != -1 &&
-          xsGetTime() - gSecondRingWallStartTime > 12 * 60 * 1000)
+      if (gSecondRingWallStartTime != -1)
       {
-         destroySecondRingWallPlan("12 minute lifetime expired");
-         return;
+         int lifetime = xsGetTime() - gSecondRingWallStartTime;
+         if (lifetime > 12 * 60 * 1000)
+         {
+            destroySecondRingWallPlan("12 minute lifetime expired");
+            return;
+         }
       }
 
       // Destroy the plan if the main base has been under attack for more than 25 s.
