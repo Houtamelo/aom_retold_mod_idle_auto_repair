@@ -1090,7 +1090,7 @@ void debugSecondRing(string message = "")
    }
 }
 
-int createSecondRingWallPlan(int baseID)
+int createSecondRingWallPlan(int baseID = -1)
 {
    int wallPlanID = aiPlanCreate(kbBaseGetNameByID(cMyID, baseID) + " 2nd Ring Wall", cPlanBuildWall, -1,
       gMilitaryBuildingsCategoryID);
@@ -1118,7 +1118,7 @@ int createSecondRingWallPlan(int baseID)
    return wallPlanID;
 }
 
-void destroySecondRingWallPlan(string reason)
+void destroySecondRingWallPlan(string reason = "")
 {
    if (gSecondRingWallPlanID != -1 && aiPlanGetIsIDValid(gSecondRingWallPlanID) == true)
    {
@@ -1131,7 +1131,7 @@ void destroySecondRingWallPlan(string reason)
    gSecondRingWallLastDestroyedTime = xsGetTime();
 }
 
-bool isBaseUnderSustainedAttack(int baseID)
+bool isBaseUnderSustainedAttack(int baseID = -1)
 {
    int baseIndex = gDefendTCBases.find(baseID);
    if (baseIndex == -1)
