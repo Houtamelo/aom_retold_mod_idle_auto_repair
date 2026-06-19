@@ -7,13 +7,28 @@
 
 //==============================================================================
 // isUnneededGodPowerDueToResources
+//
+// Returns true only when a resource-granting god power should be SKIPPED
+// (its added resources would be wasted). That is only ever the case on
+// INFINITE starting resources -- on any finite setting (standard / low /
+// medium / high) the powers remain valuable and must NOT be skipped.
+//
+// NOTE: the operator on cStartingResourcesCurrent is intentionally `!=`.
+// The base Retold AI ships this check as `==`, which inverts the function's
+// semantics and made the AI skip GreatHunt / Lure / Rain / Prosperity /
+// DwarvenMine / GaiaForest / PlentyVault / PeachBlossomSpring /
+// ProsperousSeeds on every standard game (ISSUE-03 from the 2026-06-19
+// playtest). This overlay corrects the inversion. Do NOT "fix" the operator
+// back to `==` -- that re-introduces ISSUE-03.
 //==============================================================================
 bool isUnneededGodPowerDueToResources(int protoPowerID = -1)
 {
-   if (cStartingResourcesCurrent == cStartingResourcesInfinite)
+   // Finite resources: resource powers are useful, do NOT skip.
+   if (cStartingResourcesCurrent != cStartingResourcesInfinite)
    {
       return false;
    }
+   // Infinite resources: skip resource-granting powers (their output is worthless).
    if (protoPowerID == cProtoPowerLure ||
        protoPowerID == cProtoPowerPlentyVault ||
        protoPowerID == cProtoPowerRain ||
