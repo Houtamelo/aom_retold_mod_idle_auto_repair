@@ -20,6 +20,28 @@ const int cMaxBuildPlansActive = 2;
 // Keep track of the start time where the militaryBuildingManager didn't want any more buildings.
 // This is then used to, after a delay, start expanding regardless.
 int startTimeNoExtraBuildingsNeeded = cMaxInt;
+// === AoModAi: layered walls state begin ===
+extern bool mRusher = false;
+extern int  gSecondRingWallPlanID = -1;
+extern int  gSecondRingWallStartTime = -1;
+extern int  gSecondRingWallLastDestroyedTime = -1;
+extern int  gSecondRingAttackStartTime = -1;
+extern bool gDebugSecondRing = true;
+// === AoModAi: layered walls state end ===
+//==============================================================================
+// === AoModAi: layered walls begin ===
+//==============================================================================
+// secondRingWallInit
+//==============================================================================
+rule secondRingWallInit
+inactive
+group defaultArchaicRules
+minInterval 1
+{
+   mRusher = (cPersonalityCurrent == cPersonalityAttacker);
+   xsDisableRule("secondRingWallInit");
+}
+
 //==============================================================================
 // militaryBuildingManager 
 //==============================================================================
@@ -1056,6 +1078,189 @@ minInterval 10
       }
    }
 }
+
+//==============================================================================
+// secondRingWallPlanMonitor helpers
+//==============================================================================
+#define debugSecondRing(msg) if (gDebugSecondRing == true) { aiEcho(msg); }
+
+int createSecondRingWallPlan(int baseID)
+{
+   int wallPlanID = aiPlanCreate(kbBaseGetNameByID(cMyID, baseID) + " 2nd Ring Wall", cPlanBuildWall, -1,
+      gMilitaryBuildingsCategoryID);
+   if (wallPlanID == -1)
+   {
+      debugSecondRing("Failed to create 2nd ring wall plan.");
+      return -1;
+   }
+   aiPlanSetVariableInt(wallPlanID, cBuildWallPlanWallType, 0, cBuildWallPlanWallTypeRing);
+   if (cMyCulture != cCultureNorse)
+   {
+      aiPlanAddUnitType(wallPlanID, cUnitTypeAbstractVillager, 1, 1, 1);
+   }
+   else
+   {
+      aiPlanAddUnitType(wallPlanID, cUnitTypeLogicalTypeNorseSoldierThatBuilds, 1, 1, 1);
+   }
+   aiPlanSetVariableVector(wallPlanID, cBuildWallPlanWallRingCenterPoint, 0, kbBaseGetLocation(cMyID, baseID));
+   aiPlanSetVariableFloat(wallPlanID, cBuildWallPlanWallRingRadius, 0, 50.0);
+   aiPlanSetVariableInt(wallPlanID, cBuildWallPlanNumberOfGates, 0, 50.0 * cTwoPi / 36.0);
+   aiPlanSetBaseID(wallPlanID, baseID);
+   aiPlanSetPriority(wallPlanID, 51);
+   gSecondRingWallStartTime = xsGetTime();
+   debugSecondRing("Created 2nd ring wall plan " + wallPlanID + " for base " + baseID + ".");
+   return wallPlanID;
+}
+
+void destroySecondRingWallPlan(string reason)
+{
+   if (gSecondRingWallPlanID != -1 && aiPlanGetIsIDValid(gSecondRingWallPlanID) == true)
+   {
+      aiPlanDestroy(gSecondRingWallPlanID);
+   }
+   debugSecondRing("Destroyed 2nd ring wall plan: " + reason);
+   gSecondRingWallPlanID = -1;
+   gSecondRingWallStartTime = -1;
+   gSecondRingAttackStartTime = -1;
+   gSecondRingWallLastDestroyedTime = xsGetTime();
+}
+
+bool isBaseUnderSustainedAttack(int baseID)
+{
+   int baseIndex = gDefendTCBases.find(baseID);
+   if (baseIndex == -1)
+   {
+      gSecondRingAttackStartTime = -1;
+      return false;
+   }
+   if (gEnemyPowerInBases[baseIndex] == 0)
+   {
+      gSecondRingAttackStartTime = -1;
+      return false;
+   }
+   if (gSecondRingAttackStartTime == -1)
+   {
+      gSecondRingAttackStartTime = xsGetTime();
+   }
+   // AoModAi's early-game exemption: don't cancel walls for minor pushes before 19 min.
+   if (xsGetTime() <= 19 * 60 * 1000)
+   {
+      return false;
+   }
+   return (xsGetTime() - gSecondRingAttackStartTime) > 25 * 1000;
+}
+
+//==============================================================================
+// secondRingWallPlanMonitor
+//==============================================================================
+rule secondRingWallPlanMonitor
+inactive
+group defaultClassicalRules
+minInterval 10
+{
+   if (checkStrategyFlag(cStrategyFlagBuildWalls) == false)
+   {
+      if (gSecondRingWallPlanID != -1)
+      {
+         destroySecondRingWallPlan("strategy wall flag disabled");
+      }
+      return;
+   }
+
+   int mainBaseID = kbBaseGetMainID(cMyID);
+   if (kbBaseGetIsIDValid(cMyID, mainBaseID) == false)
+   {
+      if (gSecondRingWallPlanID != -1)
+      {
+         destroySecondRingWallPlan("main base invalid");
+      }
+      return;
+   }
+
+   // Same area-group check used by wallManager.
+   if (gLandAreaGroupID != -1 &&
+       kbPathAreAreaGroupsConnected(gLandAreaGroupID, kbAreaGroupGetIDByPosition(kbBaseGetLocation(cMyID, mainBaseID)),
+       cPassabilityLand) == false)
+   {
+      if (gSecondRingWallPlanID != -1)
+      {
+         destroySecondRingWallPlan("main base unreachable");
+      }
+      return;
+   }
+
+   // Rusher delay gates the second ring.
+   if (mRusher == true &&
+       (kbGetAge() < cAge3 || xsGetTime() < 15 * 60 * 1000))
+   {
+      if (gSecondRingWallPlanID != -1)
+      {
+         destroySecondRingWallPlan("rusher delay");
+      }
+      debugSecondRing("Rusher delay active: waiting until Age 3 + 15 min.");
+      return;
+   }
+
+   // Maintain an existing second-ring plan.
+   if (gSecondRingWallPlanID != -1)
+   {
+      if (aiPlanGetIsIDValid(gSecondRingWallPlanID) == false)
+      {
+         debugSecondRing("2nd ring plan became invalid, resetting.");
+         gSecondRingWallPlanID = -1;
+         gSecondRingWallStartTime = -1;
+         return;
+      }
+
+      // 12-minute lifetime cap.
+      if (gSecondRingWallStartTime != -1 &&
+          xsGetTime() - gSecondRingWallStartTime > 12 * 60 * 1000)
+      {
+         destroySecondRingWallPlan("12 minute lifetime expired");
+         return;
+      }
+
+      // Destroy the plan if the main base has been under attack for more than 25 s.
+      if (isBaseUnderSustainedAttack(mainBaseID) == true)
+      {
+         destroySecondRingWallPlan("sustained attack");
+         return;
+      }
+
+      // Gating drop: destroy if resources or villagers fall below threshold.
+      if (kbResourceGet(cResourceGold) < 150.0 ||
+          kbUnitCount(cUnitTypeAbstractVillager, cMyID, cUnitStateAlive) < 10)
+      {
+         destroySecondRingWallPlan("gating no longer met");
+         return;
+      }
+
+      return;
+   }
+
+   // WAITING: require a first-ring wall plan before creating the second ring.
+   if (aiPlanGetNumber(cPlanBuildWall, -1, true) == 0)
+   {
+      return;
+   }
+
+   // Creation gating (AoModAi defaults).
+   if (kbGetAge() < cAge2) return;
+   if (xsGetTime() < 8 * 60 * 1000) return;
+   if (kbUnitCount(cUnitTypeAbstractVillager, cMyID, cUnitStateAlive) < 10) return;
+   if (kbResourceGet(cResourceGold) < 150.0) return;
+
+   // 60-second re-creation cooldown after a destruction.
+   if (gSecondRingWallLastDestroyedTime != -1 &&
+       xsGetTime() < gSecondRingWallLastDestroyedTime + 60 * 1000)
+   {
+      return;
+   }
+
+   gSecondRingWallPlanID = createSecondRingWallPlan(mainBaseID);
+}
+
+// === AoModAi: layered walls end ===
 
 //==============================================================================
 // templeMonitor
