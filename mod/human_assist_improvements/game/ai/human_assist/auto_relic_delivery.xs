@@ -1,20 +1,19 @@
 //==============================================================================
 // auto_relic_delivery.xs (Human Assist Improvements mod)
 //
-// Passive one-shot relic delivery for human players. When a hero picks up a
-// relic, it is automatically tasked once to the nearest player-owned temple
-// that still has relic space. Player commands always win: delivery only fires
-// while the hero is idle, and a single one-shot retry catches the pickup-
-// animation edge case without continuous polling.
+// Poll-based auto-relic-delivery for human players. Every 2 seconds we snapshot
+// all alive ground relics and compare unit IDs with the previous tick. Each
+// relic ID that disappears is treated as a probable pickup; we search player
+// heroes within 10 meters of the relic's last position and task the first hero
+// that carries the exact relic unit ID, is idle, and has no active AI plan to
+// the nearest player-owned temple with relic space.
 //
-// Prior versions fell back to a per-hero state machine because it was believed
-// AoM:R exposed no way to obtain the relic unit ID carried by a hero. A re-
-// investigation of the engine KB docs revealed it does:
-//     kbUnitGetContainedUnitByIndex(heroID, 0) -> relic unit ID
-//     kbUnitGetNumberContainedOfType(heroID, cUnitTypeRelic) -> carrying check
-//     kbRelicGetTechID(relicID) -> techID payload from cXSRelicPickedUpHandler
-// This implementation therefore uses the ideal (heroID, relicID) pair tracker
-// as the active runtime path.
+// This replaces the previous event-driven design based on
+// cXSRelicPickedUpHandler, which does not fire for human players.
+//
+// Canonical architecture and requirements:
+//   openspec/changes/auto-relic-delivery-reinvestigation/design.md
+//   openspec/changes/auto-relic-delivery-reinvestigation/specs/auto-relic-delivery/spec.md
 //
 // Loaded from human_assist.xs via:
 //     include "human_assist/auto_relic_delivery.xs";
@@ -24,39 +23,53 @@
 // typical match); 64 leaves comfortable headroom for scenario-editor spam.
 const int cAutoRelic_MaxTrackerPairs = 64;
 
-// One-shot retry cadence, in seconds. Fires only after a pickup event that
-// could not immediately deliver because the carrying hero was still busy.
-const int cAutoRelic_RetryInterval = 2;
+// Pending-disappearance age-out, in scan ticks. Each tick is ~2 seconds.
+const int cAutoRelic_PendingMaxAge = 4;
 
-// Lazy-created shared queries.
-int gAutoRelic_heroQuery = -1;   // alive heroes (kept broad for retry visibility)
+// Shared queries.
+int gAutoRelic_heroQuery = -1;   // reusable hero proximity query
 int gAutoRelic_templeQuery = -1; // player-owned temples near a hero
+int gAutoRelic_relicQuery = -1;  // alive ground relics
+
+// Previous-tick snapshot of ground relics.
+extern int[]    gAutoRelic_prevRelicIDs       = default;
+extern vector[] gAutoRelic_prevRelicPositions = default;
+
+// Pending disappearances that failed delivery because the carrier was busy
+// (pickup animation or player override). Retried on subsequent ticks.
+extern int[]    gAutoRelic_pendingRelicIDs       = default;
+extern vector[] gAutoRelic_pendingRelicPositions = default;
+extern int[]    gAutoRelic_pendingAge            = default;
+// Parallel hero ID is stored so we can mark the pair triggered on age-out.
+extern int[]    gAutoRelic_pendingHeroIDs        = default;
 
 // Trigger-once tracker: parallel arrays indexed by slot. A pair is appended
 // the first time a delivery order is issued for that (heroID, relicID), so any
-// subsequent event or retry for the same pair is silently skipped.
+// subsequent scan for the same pair is silently skipped.
 extern int[] gAutoRelic_heroID  = default;
 extern int[] gAutoRelic_relicID = default;
-
-// One-shot retry state, armed when a pickup event fires while every carrying
-// hero is still in the pickup animation (or has been manually ordered).
-extern bool gAutoRelic_retryPending  = false;
 
 //==============================================================================
 // Query setup
 //==============================================================================
 
-void autoRelicDelivery_setupHeroQuery()
+void autoRelicDelivery_setupHeroProximityQuery()
 {
    if (gAutoRelic_heroQuery != -1) { return; }
-   gAutoRelic_heroQuery = kbUnitQueryCreate("autoRelic_aliveHeroes");
+   gAutoRelic_heroQuery = kbUnitQueryCreate("autoRelic_heroProximity");
    kbUnitQuerySetPlayerID(gAutoRelic_heroQuery, cMyID, false);
    kbUnitQuerySetUnitType(gAutoRelic_heroQuery, cUnitTypeHero);
    kbUnitQuerySetState(gAutoRelic_heroQuery, cUnitStateAlive);
-   // Note: we do NOT set cActionTypeIdle on the query. The retry logic must
-   // see carrying-but-busy heroes (pickup animation or player override) so it
-   // can either wait or mark the pair triggered. Delivery itself still only
-   // fires when kbUnitGetActionType(heroID) == cActionTypeIdle.
+}
+
+void autoRelicDelivery_setupRelicQuery()
+{
+   if (gAutoRelic_relicQuery != -1) { return; }
+   gAutoRelic_relicQuery = kbUnitQueryCreate("autoRelic_relicsOnGround");
+   // Ground relics are owned by gaia (player 0).
+   kbUnitQuerySetPlayerID(gAutoRelic_relicQuery, 0, false);
+   kbUnitQuerySetUnitType(gAutoRelic_relicQuery, cUnitTypeRelic);
+   kbUnitQuerySetState(gAutoRelic_relicQuery, cUnitStateAlive);
 }
 
 void autoRelicDelivery_setupTempleQuery()
@@ -100,6 +113,88 @@ void autoRelicDelivery_addPair(int heroID = -1, int relicID = -1)
 }
 
 //==============================================================================
+// Relic-snapshot diff
+//==============================================================================
+
+int autoRelicDelivery_computeDisappearances(int[] prevIDs = default, vector[] prevPos = default,
+                                            int[] curIDs = default, vector[] curPos = default,
+                                            int[] outIDs = default, vector[] outPos = default)
+{
+   outIDs.clear();
+   outPos.clear();
+
+   int prevCount = prevIDs.size();
+   int curCount = curIDs.size();
+   for (int i = 0; i < prevCount; i = i + 1)
+   {
+      int candidateID = prevIDs[i];
+      bool found = false;
+      for (int j = 0; j < curCount; j = j + 1)
+      {
+         if (curIDs[j] == candidateID)
+         {
+            found = true;
+            break;
+         }
+      }
+      if (found == false)
+      {
+         outIDs.add(candidateID);
+         outPos.add(prevPos[i]);
+      }
+   }
+   return(outIDs.size());
+}
+
+//==============================================================================
+// Hero-carrier helpers
+//==============================================================================
+
+int[] autoRelicDelivery_findCarrierInRange(vector pos = cInvalidVector)
+{
+   autoRelicDelivery_setupHeroProximityQuery();
+
+   kbUnitQuerySetPosition(gAutoRelic_heroQuery, pos);
+   kbUnitQuerySetMaximumDistance(gAutoRelic_heroQuery, 10.0);
+   kbUnitQueryResetResults(gAutoRelic_heroQuery);
+
+   kbUnitQueryExecute(gAutoRelic_heroQuery);
+   return(kbUnitQueryGetResults(gAutoRelic_heroQuery));
+}
+
+bool autoRelicDelivery_heroCarriesRelic(int heroID = -1, int relicID = -1)
+{
+   if (heroID < 0 || relicID < 0) { return(false); }
+   if (kbUnitGetNumberContainedOfType(heroID, cUnitTypeRelic) <= 0) { return(false); }
+
+   // Fast path: slot 0 is the normal carrying slot for a hero.
+   int slot0 = kbUnitGetContainedUnitByIndex(heroID, 0);
+   if (slot0 == relicID && kbUnitIsType(slot0, cUnitTypeRelic) == true)
+   {
+      return(true);
+   }
+
+   // Defensive: scan all contained slots.
+   int count = kbUnitGetNumberContained(heroID);
+   for (int i = 0; i < count; i = i + 1)
+   {
+      int containedID = kbUnitGetContainedUnitByIndex(heroID, i);
+      if (containedID == relicID && kbUnitIsType(containedID, cUnitTypeRelic) == true)
+      {
+         return(true);
+      }
+   }
+   return(false);
+}
+
+bool autoRelicDelivery_heroIsDeliverable(int heroID = -1)
+{
+   if (heroID < 0) { return(false); }
+   return(kbUnitGetActionType(heroID) == cActionTypeIdle
+          && kbUnitGetPlanID(heroID) == cInvalidID);
+}
+
+//==============================================================================
 // Nearest temple with available relic space
 //==============================================================================
 
@@ -126,7 +221,7 @@ int autoRelicDelivery_findNearestTempleWithSpace(int heroID = -1)
       }
    }
 
-   aiEcho("autoRelicDelivery: no temple with space for hero " + heroID);
+   aiEcho("autoRelicDelivery: no temple with space -> skip");
    return(-1);
 }
 
@@ -142,116 +237,12 @@ void autoRelicDelivery_issueDelivery(int heroID = -1, int relicID = -1)
    int templeID = autoRelicDelivery_findNearestTempleWithSpace(heroID);
    if (templeID < 0)
    {
-      // Per spec requirement 4: no-op if no temple has space. The pair is NOT
-      // recorded, so a future event (or retry after a temple is built) can
-      // still fire for this (hero, relic).
       return;
    }
 
-   aiEcho("autoRelicDelivery: delivering hero " + heroID + " -> temple " + templeID
-      + " (relic " + relicID + ")");
+   aiEcho("autoRelicDelivery: hero " + heroID + " carrying target relic -> delivering to temple " + templeID);
    aiTaskWorkUnit(heroID, templeID);
    autoRelicDelivery_addPair(heroID, relicID);
-}
-
-//==============================================================================
-// Core scan: find idle carrying heroes and deliver, with retry fallback
-//==============================================================================
-
-void autoRelicDelivery_scanAndDeliver(bool isRetry = false, int eventTechID = -1)
-{
-   // Guard all paths for human players only.
-   if (kbPlayerIsHuman(cMyID) == false) { return; }
-
-   autoRelicDelivery_setupHeroQuery();
-   kbUnitQueryResetResults(gAutoRelic_heroQuery);
-
-   // Query every alive hero so we can detect carrying-but-busy heroes
-   // (pickup animation or player override) for the one-shot retry.
-   int heroCount = kbUnitQueryExecute(gAutoRelic_heroQuery);
-   bool carryingButBusy = false;
-
-   for (int i = 0; i < heroCount; i = i + 1)
-   {
-      int heroID = kbUnitQueryGetResult(gAutoRelic_heroQuery, i);
-      if (heroID < 0) { continue; }
-
-      // Type-safe carrying check: only count contained units of type Relic.
-      if (kbUnitGetNumberContainedOfType(heroID, cUnitTypeRelic) <= 0)
-      {
-         continue;
-      }
-
-      // Retrieve the actual relic unit ID carried by this hero.
-      int relicID = kbUnitGetContainedUnitByIndex(heroID, 0);
-      if (relicID < 0)
-      {
-         aiEcho("autoRelicDelivery: hero " + heroID + " reports a relic but kbUnitGetContainedUnitByIndex returned " + relicID);
-         continue;
-      }
-
-      // Defensive correlation against the event payload. If this carrier does
-      // not match the pickup event's techID, skip it and let a later event
-      // handle it. Correlation is skipped on retry (eventTechID == -1) because
-      // multiple rapid-fire events can overwrite the single retry slot.
-      if (eventTechID >= 0 && kbRelicGetTechID(relicID) != eventTechID)
-      {
-         aiEcho("autoRelicDelivery: techID mismatch for hero " + heroID + " relic " + relicID
-            + " (eventTechID=" + eventTechID + ", relicTechID=" + kbRelicGetTechID(relicID)
-            + "), skipping");
-         continue;
-      }
-
-      // One-shot guard: never issue a second delivery order for the same pair.
-      if (autoRelicDelivery_hasPair(heroID, relicID) == true)
-      {
-         continue;
-      }
-
-      int action = kbUnitGetActionType(heroID);
-      if (action != cActionTypeIdle)
-      {
-         // Carrying but busy. During the immediate event scan this is usually
-         // the pickup animation, so arm the one-shot retry. During the retry
-         // scan, treat it as a player override and mark the pair triggered
-         // so the feature does not fight the player's order later.
-         if (isRetry == false)
-         {
-            carryingButBusy = true;
-         }
-         else
-         {
-            aiEcho("autoRelicDelivery: player override detected for hero " + heroID + " relic " + relicID);
-            autoRelicDelivery_addPair(heroID, relicID);
-         }
-         continue;
-      }
-
-      // Idle, carrying, and not yet handled: issue one delivery order.
-      autoRelicDelivery_issueDelivery(heroID, relicID);
-   }
-
-   // Arm one-shot retry if an event fired while a carrying hero was busy.
-   if (isRetry == false && carryingButBusy == true)
-   {
-      gAutoRelic_retryPending = true;
-      xsEnableRule("autoRelicDelivery_tickRetry");
-      aiEcho("autoRelicDelivery: pickup event while hero busy, arming retry");
-   }
-}
-
-//==============================================================================
-// XS event handler for cXSRelicPickedUpHandler
-//==============================================================================
-
-void autoRelicDelivery_onPickedUp(int techID = -1)
-{
-   if (kbPlayerIsHuman(cMyID) == false) { return; }
-
-   aiEcho("autoRelicDelivery: relic picked up event (techID=" + techID + ")");
-   xsSetContextPlayer(cMyID);
-   autoRelicDelivery_scanAndDeliver(false, techID);
-   xsSetContextPlayer(-1);
 }
 
 //==============================================================================
@@ -260,41 +251,244 @@ void autoRelicDelivery_onPickedUp(int techID = -1)
 
 void autoRelicDelivery_register()
 {
+   // CRITICAL: human_assist.xs::main() calls disableVillagerAssist() immediately
+   // before us, and that function ends with xsSetContextPlayer(-1). Set the
+   // context explicitly so diagnostic banners and rule enablement land in the
+   // human player's context, then restore to -1 on exit.
+   xsSetContextPlayer(cMyID);
+
+   aiEcho("autoRelicDelivery: register() called cMyID=" + cMyID
+          + " kbPlayerIsHuman=" + kbPlayerIsHuman(cMyID));
+
    // AI players keep vanilla behaviour; this is a human-assist mod feature.
-   if (kbPlayerIsHuman(cMyID) == false) { return; }
-
-   aiEcho("autoRelicDelivery: registering handler");
-
-   // Arrays declared with = default start at zero length. The tracker resets
-   // each game because globals are reloaded with the script.
-   gAutoRelic_retryPending = false;
-
-   // cXSRelicPickedUpHandler is exclusive: only one handler function may be
-   // registered for this event type. Future human-assist features that need it
-   // should extend autoRelicDelivery_onPickedUp rather than call aiSetHandler
-   // again. This caveat is documented in README.md.
-   aiSetHandler("autoRelicDelivery_onPickedUp", cXSRelicPickedUpHandler);
-}
-
-//==============================================================================
-// One-shot retry rule
-//==============================================================================
-
-rule autoRelicDelivery_tickRetry
-minInterval 2
-inactive
-{
-   if (gAutoRelic_retryPending == false)
+   if (kbPlayerIsHuman(cMyID) == false)
    {
-      xsDisableRule("autoRelicDelivery_tickRetry");
+      aiEcho("autoRelicDelivery: skipping registration (AI player context)");
+      xsSetContextPlayer(-1);
       return;
    }
 
-   xsSetContextPlayer(cMyID);
-   aiEcho("autoRelicDelivery: retry scan");
-   autoRelicDelivery_scanAndDeliver(true, -1);
+   aiEcho("autoRelicDelivery: enabling scan rule");
 
-   gAutoRelic_retryPending = false;
+   // Arrays declared with = default start at zero length. The tracker and
+   // snapshot arrays reset each game because globals are reloaded with the script.
+   xsEnableRule("autoRelicDelivery_scanRelics");
+
    xsSetContextPlayer(-1);
-   xsDisableRule("autoRelicDelivery_tickRetry");
+}
+
+//==============================================================================
+// Core poll rule: 2-second ground-relic scan
+//==============================================================================
+
+rule autoRelicDelivery_scanRelics
+minInterval 2
+inactive
+{
+   if (kbPlayerIsHuman(cMyID) == false) { return; }
+   xsSetContextPlayer(cMyID);
+
+   autoRelicDelivery_setupRelicQuery();
+   autoRelicDelivery_setupHeroProximityQuery();
+
+   // Snapshot current ground relics and their positions.
+   kbUnitQueryResetResults(gAutoRelic_relicQuery);
+   int relicCount = kbUnitQueryExecute(gAutoRelic_relicQuery);
+
+   int[] curRelicIDs = default;
+   vector[] curRelicPositions = default;
+   for (int i = 0; i < relicCount; i = i + 1)
+   {
+      int relicID = kbUnitQueryGetResult(gAutoRelic_relicQuery, i);
+      curRelicIDs.add(relicID);
+      curRelicPositions.add(kbUnitGetPosition(relicID));
+   }
+
+   aiEcho("autoRelicDelivery: tick start (relicsOnGround=" + relicCount + ")");
+
+   // Detect relic IDs that were present last tick but are gone now.
+   int[] disappearedIDs = default;
+   vector[] disappearedPositions = default;
+   autoRelicDelivery_computeDisappearances(gAutoRelic_prevRelicIDs,
+                                           gAutoRelic_prevRelicPositions,
+                                           curRelicIDs,
+                                           curRelicPositions,
+                                           disappearedIDs,
+                                           disappearedPositions);
+
+   for (int i = 0; i < disappearedIDs.size(); i = i + 1)
+   {
+      vector pos = disappearedPositions[i];
+      aiEcho("autoRelicDelivery: disappearance detected (relicID=" + disappearedIDs[i]
+             + ", pos=(" + pos.x + "," + pos.z + "))");
+   }
+
+   //--------------------------------------------------------------------------
+   // Age pending entries first; entries that reached max age are dropped and
+   // their (hero, relic) pair is marked triggered so we do not fight the player
+   // indefinitely.
+   //--------------------------------------------------------------------------
+   int pendingCount = gAutoRelic_pendingRelicIDs.size();
+   for (int i = 0; i < pendingCount; i = i + 1)
+   {
+      gAutoRelic_pendingAge[i] = gAutoRelic_pendingAge[i] + 1;
+   }
+
+   int[] newPendingIDs    = default;
+   vector[] newPendingPos = default;
+   int[] newPendingAge    = default;
+   int[] newPendingHero   = default;
+
+   for (int i = 0; i < pendingCount; i = i + 1)
+   {
+      int relicID = gAutoRelic_pendingRelicIDs[i];
+      vector pos  = gAutoRelic_pendingRelicPositions[i];
+      int age     = gAutoRelic_pendingAge[i];
+      int heroID  = gAutoRelic_pendingHeroIDs[i];
+
+      if (age >= cAutoRelic_PendingMaxAge)
+      {
+         aiEcho("autoRelicDelivery: pending relic " + relicID + " aged out after "
+                + age + " ticks");
+         if (heroID >= 0)
+         {
+            aiEcho("autoRelicDelivery: marking pair (" + heroID + "," + relicID
+                   + ") triggered after timeout");
+            autoRelicDelivery_addPair(heroID, relicID);
+         }
+         continue;
+      }
+
+      // Retry: look for a carrier near the relic's last known position.
+      int[] heroes = autoRelicDelivery_findCarrierInRange(pos);
+      int carrier = -1;
+      for (int h = 0; h < heroes.size(); h = h + 1)
+      {
+         if (autoRelicDelivery_heroCarriesRelic(heroes[h], relicID) == true)
+         {
+            carrier = heroes[h];
+            break;
+         }
+      }
+
+      if (carrier < 0)
+      {
+         // Carrier is no longer in range or has dropped the relic.
+         aiEcho("autoRelicDelivery: pending relic " + relicID + " carrier lost, dropping");
+         continue;
+      }
+
+      if (autoRelicDelivery_heroIsDeliverable(carrier) == true)
+      {
+         autoRelicDelivery_issueDelivery(carrier, relicID);
+         continue; // resolved; do not re-add to pending
+      }
+
+      // Still carrying but still not deliverable; keep pending.
+      newPendingIDs.add(relicID);
+      newPendingPos.add(pos);
+      newPendingAge.add(age);
+      newPendingHero.add(carrier);
+      aiEcho("autoRelicDelivery: pending relic " + relicID + " still not deliverable (hero "
+             + carrier + ")");
+   }
+
+   //--------------------------------------------------------------------------
+   // Process fresh disappearances.
+   //--------------------------------------------------------------------------
+   for (int i = 0; i < disappearedIDs.size(); i = i + 1)
+   {
+      int relicID = disappearedIDs[i];
+      vector pos  = disappearedPositions[i];
+
+      // Skip if this relic is already pending from an earlier tick.
+      bool alreadyPending = false;
+      for (int p = 0; p < newPendingIDs.size(); p = p + 1)
+      {
+         if (newPendingIDs[p] == relicID)
+         {
+            alreadyPending = true;
+            break;
+         }
+      }
+      if (alreadyPending == true) { continue; }
+
+      int[] heroes = autoRelicDelivery_findCarrierInRange(pos);
+      aiEcho("autoRelicDelivery: candidate heroes within 10m: " + heroes.size());
+
+      bool handled = false;
+      for (int h = 0; h < heroes.size(); h = h + 1)
+      {
+         int heroID = heroes[h];
+         if (autoRelicDelivery_heroCarriesRelic(heroID, relicID) == true)
+         {
+            if (autoRelicDelivery_heroIsDeliverable(heroID) == true)
+            {
+               autoRelicDelivery_issueDelivery(heroID, relicID);
+            }
+            else
+            {
+               int action = kbUnitGetActionType(heroID);
+               int planID = kbUnitGetPlanID(heroID);
+
+               if (action != cActionTypeIdle)
+               {
+                  aiEcho("autoRelicDelivery: hero " + heroID
+                         + " carrying target relic but not idle (action=" + action + ") -> skip");
+               }
+               else if (planID != cInvalidID)
+               {
+                  aiEcho("autoRelicDelivery: hero " + heroID
+                         + " carrying target relic but has active plan " + planID + " -> skip");
+               }
+
+               newPendingIDs.add(relicID);
+               newPendingPos.add(pos);
+               newPendingAge.add(0);
+               newPendingHero.add(heroID);
+            }
+            handled = true;
+            break; // first matching carrier wins
+         }
+         else if (kbUnitGetNumberContainedOfType(heroID, cUnitTypeRelic) > 0)
+         {
+            aiEcho("autoRelicDelivery: hero " + heroID + " carrying different relic -> skip");
+         }
+         else
+         {
+            aiEcho("autoRelicDelivery: hero " + heroID + " not carrying any relic -> skip");
+         }
+      }
+
+      // No hero in range: this is either a non-hero pickup or a scenario-script
+      // removal. Nothing to deliver and no pair to track.
+      if (handled == false && heroes.size() > 0)
+      {
+         // All nearby heroes were inspected and none carry this relic.
+      }
+   }
+
+   // Commit updated pending state.
+   gAutoRelic_pendingRelicIDs.clear();
+   gAutoRelic_pendingRelicPositions.clear();
+   gAutoRelic_pendingAge.clear();
+   gAutoRelic_pendingHeroIDs.clear();
+   for (int i = 0; i < newPendingIDs.size(); i = i + 1)
+   {
+      gAutoRelic_pendingRelicIDs.add(newPendingIDs[i]);
+      gAutoRelic_pendingRelicPositions.add(newPendingPos[i]);
+      gAutoRelic_pendingAge.add(newPendingAge[i]);
+      gAutoRelic_pendingHeroIDs.add(newPendingHero[i]);
+   }
+
+   // Save current snapshot for the next tick.
+   gAutoRelic_prevRelicIDs.clear();
+   gAutoRelic_prevRelicPositions.clear();
+   for (int i = 0; i < curRelicIDs.size(); i = i + 1)
+   {
+      gAutoRelic_prevRelicIDs.add(curRelicIDs[i]);
+      gAutoRelic_prevRelicPositions.add(curRelicPositions[i]);
+   }
+
+   xsSetContextPlayer(-1);
 }
