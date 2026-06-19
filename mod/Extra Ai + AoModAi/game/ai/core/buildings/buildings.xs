@@ -1197,7 +1197,7 @@ minInterval 10
 
    // Rusher delay gates the second ring.
    if (mRusher == true &&
-       (kbGetAge() < cAge3 || xsGetTime() < 15 * 60 * 1000))
+       (kbPlayerGetAge(cMyID) < cAge3 || xsGetTime() < 15 * 60 * 1000))
    {
       if (gSecondRingWallPlanID != -1)
       {
@@ -1251,7 +1251,7 @@ minInterval 10
    }
 
    // Creation gating (AoModAi defaults).
-   if (kbGetAge() < cAge2) return;
+   if (kbPlayerGetAge(cMyID) < cAge2) return;
    if (xsGetTime() < 8 * 60 * 1000) return;
    if (kbUnitCount(cUnitTypeAbstractVillager, cMyID, cUnitStateAlive) < 10) return;
    if (kbResourceGet(cResourceGold) < 150.0) return;
