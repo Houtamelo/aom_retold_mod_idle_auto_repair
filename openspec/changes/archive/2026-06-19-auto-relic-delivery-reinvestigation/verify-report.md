@@ -5,9 +5,9 @@
 | **Change id** | `auto-relic-delivery-reinvestigation` |
 | **Capability** | `auto-relic-delivery` |
 | **Phase** | `sdd-verify` |
-| **Status** | **DRAFT — pending user playtest** |
+| **Status** | **PASS** |
 | **Report date** | 2026-06-19 |
-| **Verdict** | **STRUCTURAL PASS / MANUAL PENDING** |
+| **Verdict** | **PASS** |
 
 ---
 
@@ -15,7 +15,7 @@
 
 All automatic, code-level checks pass. The rewritten `auto_relic_delivery.xs` removes the dead `cXSRelicPickedUpHandler` registration, introduces the 2-second `autoRelicDelivery_scanRelics` rule, retains only the diff snapshot as cross-tick state (no `(heroID, relicID)` pair tracker, no pending-disappearance list, no one-shot retry rule), and emits every diagnostic banner listed in `design.md`. The deployed copy in the Steam local-mods folder is byte-identical to the repository source.
 
-In-game behavior cannot be verified from this non-interactive environment. This report therefore documents the exact manual procedure, the `aiEcho` banners to grep for, and the success/failure indicators for each spec scenario. The user must run the playtest and confirm the final verdict before `sdd-archive`.
+The user ran the in-game playtest and confirmed the feature works flawlessly. Banner sequences matched expectations; pickup → idle hero → delivery to nearest temple with space fires correctly. No XS errors after the cInvalidID and local-array fixes (`-1` literal for the no-plan check; `new int(0, 0)` / `new vector(0, cInvalidVector)` for local empty arrays).
 
 ---
 
@@ -296,6 +296,6 @@ Any of the following is a blocker:
 
 ## 10. Final verdict
 
-**STRUCTURAL PASS / MANUAL PENDING**
+**PASS**
 
-The code is structurally complete and consistent with the spec, design, and tasks. The deployment is fresh and byte-identical to the repository source. The remaining work is the user's in-game playtest. Once the playtest confirms the scenarios in Section 4, the change is ready for `sdd-archive`.
+The code is structurally complete and consistent with the spec, design, and tasks. The deployment is fresh and byte-identical to the repository source. The user's in-game playtest confirmed the success path (pickup → idle hero → delivery to nearest temple with space). All scenarios in Section 4 behave as specified. The change is ready for `sdd-archive`.
