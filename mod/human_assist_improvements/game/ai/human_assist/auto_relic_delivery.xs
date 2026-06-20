@@ -8,7 +8,12 @@
 //   (cUnitTypeRelic, cUnitStateAlive) and diff against the previous tick.
 //   For each relic that was on the ground last tick but is not this tick:
 //     1. Query player-owned alive heroes within cAutoRelic_ProximityRadius
-//        meters of the relic's last-seen position.
+//        meters of the relic's last-seen position. TWO queries are merged
+//        (with dedup) to cover the full hero unit-type spectrum:
+//          - cUnitTypeLogicalTypeHealable: 154/159 hero units (Miko, all
+//            Major/Minor/Villager hero subtypes, most of the Chinese roster).
+//          - cUnitTypeHero: the 5 unhealable military heroes
+//            (SonOfOsiris, Regent, QianKunQuan, Shogun, BloodMasterQianKunQuan).
 //     2. For each candidate, check if the hero carries that SPECIFIC relic
 //        unit ID (via kbUnitGetContainedUnitByIndex).
 //     3. If carrying, idle (cActionTypeIdle), and plan-free (-1, the
@@ -47,9 +52,19 @@ const float cAutoRelic_ProximityRadius = 10.0;
 // Queries and snapshot
 //==============================================================================
 
-int gAutoRelic_relicQuery   = -1; // alive ground relics (player 0 / gaia)
-int gAutoRelic_heroQuery    = -1; // reusable hero proximity query
-int gAutoRelic_templeQuery  = -1; // player-owned temples
+int gAutoRelic_relicQuery    = -1; // alive ground relics (player 0 / gaia)
+int gAutoRelic_healableQuery = -1; // alive player-owned heroes with
+                                   // LogicalTypeHealable unittype (catches Miko
+                                   // and 153 other non-military + healable
+                                   // heroes that cUnitTypeHero misses).
+int gAutoRelic_heroQuery      = -1; // alive player-owned heroes with bare
+                                   // cUnitTypeHero unittype (catches the 5
+                                   // unhealable military heroes: SonOfOsiris,
+                                   // Regent, QianKunQuan, Shogun,
+                                   // BloodMasterQianKunQuan). The two queries
+                                   // overlap on heroes that have both
+                                   // unittypes; the caller dedups.
+int gAutoRelic_templeQuery    = -1; // player-owned temples
 
 // Previous-tick snapshot of ground relics, used for the disappearance diff.
 extern int[]    gAutoRelic_prevRelicIDs       = default;
@@ -78,6 +93,19 @@ void autoRelicDelivery_setupHeroProximityQuery()
    kbUnitQuerySetState(gAutoRelic_heroQuery, cUnitStateAlive);
 }
 
+void autoRelicDelivery_setupHealableQuery()
+{
+   if (gAutoRelic_healableQuery != -1) { return; }
+   gAutoRelic_healableQuery = kbUnitQueryCreate("autoRelic_healableHeroes");
+   kbUnitQuerySetPlayerID(gAutoRelic_healableQuery, cMyID, false);
+   // LogicalTypeHealable is the proto unittype that 154/159 hero units carry
+   // (verified in extracted/gameplay/proto.xml). It catches Mikos, Atlantean
+   // villager-heroes, the Minor/Major/Villager hero subtypes, and most of the
+   // Chinese roster — none of which cUnitTypeHero matches.
+   kbUnitQuerySetUnitType(gAutoRelic_healableQuery, cUnitTypeLogicalTypeHealable);
+   kbUnitQuerySetState(gAutoRelic_healableQuery, cUnitStateAlive);
+}
+
 void autoRelicDelivery_setupTempleQuery()
 {
    if (gAutoRelic_templeQuery != -1) { return; }
@@ -93,17 +121,61 @@ void autoRelicDelivery_setupTempleQuery()
 //==============================================================================
 
 // Returns the IDs of player-owned alive heroes within
-// cAutoRelic_ProximityRadius meters of the given position. The query is reset
-// and re-executed on each call so callers can pass any position.
+// cAutoRelic_ProximityRadius meters of the given position. Two queries are
+// used to cover the full hero unit-type spectrum:
+//
+//   1. cUnitTypeLogicalTypeHealable (154 hero units): catches Mikos, Atlantean
+//      villager-heroes, Major/Minor/Villager hero subtypes, and most of the
+//      Chinese roster. cUnitTypeHero does NOT match these.
+//
+//   2. cUnitTypeHero (5 specific unhealable military heroes): SonOfOsiris,
+//      Regent, QianKunQuan, Shogun, BloodMasterQianKunQuan. These are the
+//      only hero units without LogicalTypeHealableHero in the proto.
+//
+// Results are merged with a dedup step because the two queries overlap on
+// heroes that have both `Hero` and `LogicalTypeHealableHero` unittype tags.
 int[] autoRelicDelivery_findHeroesInRange(vector pos = cInvalidVector)
 {
+   autoRelicDelivery_setupHealableQuery();
    autoRelicDelivery_setupHeroProximityQuery();
 
+   kbUnitQuerySetPosition(gAutoRelic_healableQuery, pos);
+   kbUnitQuerySetMaximumDistance(gAutoRelic_healableQuery, cAutoRelic_ProximityRadius);
    kbUnitQuerySetPosition(gAutoRelic_heroQuery, pos);
    kbUnitQuerySetMaximumDistance(gAutoRelic_heroQuery, cAutoRelic_ProximityRadius);
+
+   kbUnitQueryResetResults(gAutoRelic_healableQuery);
    kbUnitQueryResetResults(gAutoRelic_heroQuery);
+   kbUnitQueryExecute(gAutoRelic_healableQuery);
    kbUnitQueryExecute(gAutoRelic_heroQuery);
-   return(kbUnitQueryGetResults(gAutoRelic_heroQuery));
+
+   int[] healableHeroes = kbUnitQueryGetResults(gAutoRelic_healableQuery);
+   int[] bareHeroes     = kbUnitQueryGetResults(gAutoRelic_heroQuery);
+
+   int[] allHeroes = new int(0, 0);
+   int[] seen      = new int(0, 0);
+   for (int i = 0; i < healableHeroes.size(); i = i + 1)
+   {
+      autoRelicDelivery_addUnique(allHeroes, seen, healableHeroes[i]);
+   }
+   for (int i = 0; i < bareHeroes.size(); i = i + 1)
+   {
+      autoRelicDelivery_addUnique(allHeroes, seen, bareHeroes[i]);
+   }
+   return(allHeroes);
+}
+
+// Appends unitID to `list` only if it is not already present in `seen`.
+// Both arrays are mutated in place (XS arrays are reference types).
+void autoRelicDelivery_addUnique(int[] list = default, int[] seen = default, int unitID = -1)
+{
+   if (unitID < 0) { return; }
+   for (int i = 0; i < seen.size(); i = i + 1)
+   {
+      if (seen[i] == unitID) { return; }
+   }
+   seen.add(unitID);
+   list.add(unitID);
 }
 
 // True if heroID carries the specific relic unit ID. Slot 0 fast path with a
@@ -132,7 +204,6 @@ bool autoRelicDelivery_heroCarriesRelic(int heroID = -1, int relicID = -1)
    return(false);
 }
 
-// True if the hero is idle and has no active AI plan.
 // True if the hero is idle and has no active AI plan. The plan check
 // compares against -1 because that is the value kbUnitGetPlanID returns
 // when the unit has no plan; the shipped AoM:R AI source uses -1

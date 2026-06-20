@@ -187,6 +187,19 @@ Run these in AoM:R after deploying. After each test, run `bash scripts/extract-a
 - **Success criteria:** No `delivering to temple` banner. The relic stays with the hero; the player can deliver manually once a temple has space.
 - **Failure indicators:** A delivery banner fires (would indicate the temple-capacity check is broken).
 
+### 4.9 Miko (and other non-military hero types) deliver
+
+- **Spec:** This was a gap discovered after the original spec was written; the Miko is a non-military Japanese hero unit that does not match `cUnitTypeHero` but is matched by `cUnitTypeLogicalTypeHealable` (the proto unittype shared by 154/159 hero units — see `extracted/gameplay/proto.xml`).
+- **Setup:** Play as Japanese (the civ with Mikos). Build a Shrine, train a Miko, place a Gaia-owned relic within 10 m of the Miko, build a temple with relic space.
+- **Action:** Order the Miko to pick up the relic; do not issue further orders.
+- **Expected banners:**
+  1. `autoRelicDelivery: tick start (relicsOnGround=1)` before pickup.
+  2. `autoRelicDelivery: disappearance detected (relicID=..., pos=(...,...))`.
+  3. `autoRelicDelivery: candidate heroes within 10m: 1` (the Miko is now caught by the healable query).
+  4. `autoRelicDelivery: hero ... carrying target relic -> delivering to temple ...`.
+- **Success criteria:** The Miko walks once to the nearest non-full temple and deposits the relic. This is the scenario the original `cUnitTypeHero` filter missed.
+- **Failure indicators:** `candidate heroes within 10m: 0` (the healable query isn't resolving in `kbUnitQuerySetUnitType`); or no `delivering to temple` banner (carrying check or idle guard failing).
+
 ---
 
 ## 5. Cross-reference table
@@ -200,6 +213,7 @@ Run these in AoM:R after deploying. After each test, run `bash scripts/extract-a
 | `#specific-relic-match-delivers` | `heroCarriesRelic` ID check → delivery | `autoRelicDelivery: hero ... carrying target relic -> delivering to temple` | PENDING MANUAL |
 | `#disappearance-banner` | diff loop in `scanRelics` | `autoRelicDelivery: disappearance detected (relicID=` | ✅ PASS (structural) |
 | `#proximity-radius-filters-heroes` | `findHeroesInRange` sets `kbUnitQuerySetMaximumDistance(..., 10.0)` | `autoRelicDelivery: candidate heroes within 10m:` | PENDING MANUAL |
+| `#miko-and-other-non-military-heroes` | `findHeroesInRange` queries both `cUnitTypeLogicalTypeHealable` and `cUnitTypeHero`, then dedups | `autoRelicDelivery: hero ... carrying target relic -> delivering to temple` (for a Japanese Miko) | PENDING MANUAL |
 
 ---
 
@@ -214,6 +228,8 @@ The same risks flagged during `sdd-apply` remain unconfirmed until in-game measu
 | **Gaia player filter** | The ground-relic query uses `kbUnitQuerySetPlayerID(gAutoRelic_relicQuery, 0, false)`. If scenario-editor relics are owned by a different player, they will be ignored. | Place a Gaia-owned relic (default) and confirm `tick start (relicsOnGround=N)` includes it. If testing player-owned relics, expect no detection by design. |
 | **10 m unit interpretation** | `kbUnitQuerySetMaximumDistance(..., 10.0)` is assumed to be meters. If the engine uses a different unit, the proximity query may miss or over-include heroes. | Test 4.7: a hero at 8 m must be listed, a hero at 15 m must not. Repeat with 11 m as the boundary if results are ambiguous. |
 | **Manual-pickup-while-idle fights the player** | The accepted cost-benefit tradeoff: a player who manually picks up a relic while their hero is idle will receive a delivery order. | Verify scenario 4.3 with a natural pickup, then try a manual pickup of a different relic while the hero is idle. The hero will be sent to the temple — this is intended. |
+| **Two hero queries may overlap on heroes that have BOTH `Hero` and `LogicalTypeHealableHero` unittype tags** | The dedup step in `findHeroesInRange` ensures each hero is checked once for relic carrying, but a duplicate `delivering to temple` banner would indicate a bug in the dedup. | Trigger several pickups with different hero types (Greek Ajax, Norse Hersir, Japanese Miko, Atlantean villager-hero). Confirm the per-relic `delivering to temple` banner fires exactly once per (hero, relic) pair. |
+| **`cUnitTypeLogicalTypeHealable` in a unit-type query has no shipped-AI precedent** | If the engine doesn't resolve logical types in `kbUnitQuerySetUnitType`, the healable query returns 0 results. The `cUnitTypeHero` query would still catch the 5 unhealable military heroes, so the worst case is a regression to the previous "Miko missed" state — not a complete failure. | Pick up a relic with a Japanese Miko. Confirm `candidate heroes within 10m: 1` (or more) and `delivering to temple` fires. If 0 candidates, the healable query isn't working and the fix needs to switch to per-proto enumeration. |
 
 ---
 

@@ -92,7 +92,7 @@ SHALL snapshot alive ground relic IDs and detect disappearances by comparing con
 
 ### R13 Hero proximity query
 
-SHALL query alive player heroes within 10 meters of a disappeared relic's last position using `kbUnitQuerySetMaximumDistance(..., 10.0)`.
+SHALL query alive player heroes within 10 meters of a disappeared relic's last position using `kbUnitQuerySetMaximumDistance(..., 10.0)`. SHALL use two merged (deduplicated) queries — one filtering on `cUnitTypeLogicalTypeHealable` (the proto unittype shared by 154/159 hero units, including Miko, Atlantean villager-heroes, and most of the Chinese roster) and one filtering on `cUnitTypeHero` (the 5 unhealable military heroes that lack the healable tag: SonOfOsiris, Regent, QianKunQuan, Shogun, BloodMasterQianKunQuan) — so that all 159 hero unit-types are reachable by the scan.
 
 #### Scenario: Proximity radius filters heroes
 

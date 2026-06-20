@@ -35,6 +35,8 @@ for each disappeared relic R at lastPos:
    │
    ▼
 heroes = findHeroesInRange(lastPos, 10.0)
+   │     (queries cUnitTypeLogicalTypeHealable AND cUnitTypeHero,
+   │      merged with dedup to cover all 159 hero unit-types)
    │
    ▼
 for each candidate hero H:
@@ -55,9 +57,10 @@ A disappearance is computed by a set difference on unit IDs between consecutive 
 | Function | Responsibility |
 |---|---|
 | `autoRelicDelivery_setupRelicQuery()` | Creates the persistent `relicsOnGround` query (`cUnitTypeRelic`, `cUnitStateAlive`, player 0 / gaia). |
-| `autoRelicDelivery_setupHeroProximityQuery()` | Creates a reusable hero query (`cUnitTypeHero`, `cUnitStateAlive`, `cMyID`); position and radius are reset per call. |
+| `autoRelicDelivery_setupHealableQuery()` | Creates a reusable player-owned hero query (`cUnitTypeLogicalTypeHealable`, `cUnitStateAlive`). Catches 154/159 hero units including Miko, Major/Minor/Villager hero subtypes, and most of the Chinese roster. `cUnitTypeHero` does not match these. |
+| `autoRelicDelivery_setupHeroProximityQuery()` | Creates a reusable player-owned hero query (`cUnitTypeHero`, `cUnitStateAlive`). Catches the 5 unhealable military heroes that don't have `LogicalTypeHealableHero` in the proto: `SonOfOsiris`, `Regent`, `QianKunQuan`, `Shogun`, `BloodMasterQianKunQuan`. |
 | `autoRelicDelivery_setupTempleQuery()` | Preserved; ascending-distance temple query. |
-| `autoRelicDelivery_findHeroesInRange(vector pos)` | Resets the hero query to `pos` + 10 m, executes, and returns matching hero unit IDs as an `int[]`. |
+| `autoRelicDelivery_findHeroesInRange(vector pos)` | Resets BOTH `gAutoRelic_healableQuery` and `gAutoRelic_heroQuery` to `pos` + 10 m, executes them, and merges the results with a dedup step. The two queries overlap on heroes that have both `Hero` and `LogicalTypeHealableHero` unittype tags; the dedup ensures each hero is checked once for relic carrying. |
 | `autoRelicDelivery_heroCarriesRelic(int heroID, int relicID)` | True if any contained unit of type `cUnitTypeRelic` equals `relicID`. Slot 0 fast path with defensive scan over `kbUnitGetNumberContained(heroID)` slots. |
 | `autoRelicDelivery_heroIsDeliverable(int heroID)` | True when `kbUnitGetActionType(heroID) == cActionTypeIdle` **and** `kbUnitGetPlanID(heroID) == -1`. |
 | `autoRelicDelivery_findNearestTempleWithSpace(int heroID)` | Nearest player-owned temple with `kbUnitGetNumberContained < cProtoStatMaxContained`, or -1. Emits `no temple with space -> skip` if none qualify. |
