@@ -195,10 +195,10 @@ Run these in AoM:R after deploying. After each test, run `bash scripts/extract-a
 - **Expected banners:**
   1. `autoRelicDelivery: tick start (relicsOnGround=1)` before pickup.
   2. `autoRelicDelivery: disappearance detected (relicID=..., pos=(...,...))`.
-  3. `autoRelicDelivery: candidate heroes within 10m: 1` (the Miko is now caught by the healable query).
+  3. `autoRelicDelivery: candidate units within 10m: 1` (or more, including the Miko).
   4. `autoRelicDelivery: hero ... carrying target relic -> delivering to temple ...`.
 - **Success criteria:** The Miko walks once to the nearest non-full temple and deposits the relic. This is the scenario the original `cUnitTypeHero` filter missed.
-- **Failure indicators:** `candidate heroes within 10m: 0` (the healable query isn't resolving in `kbUnitQuerySetUnitType`); or no `delivering to temple` banner (carrying check or idle guard failing).
+- **Failure indicators:** `candidate units within 10m: 0` (the unit query isn't matching anything); or no `delivering to temple` banner (carrying check or idle guard failing).
 
 ---
 
@@ -212,8 +212,8 @@ Run these in AoM:R after deploying. After each test, run `bash scripts/extract-a
 | `#player-override-suppresses-delivery` | `handleDisappearance` skips when `heroIsDeliverable` is false | absence of `delivering to temple` for that hero/relic | PENDING MANUAL |
 | `#specific-relic-match-delivers` | `heroCarriesRelic` ID check → delivery | `autoRelicDelivery: hero ... carrying target relic -> delivering to temple` | PENDING MANUAL |
 | `#disappearance-banner` | diff loop in `scanRelics` | `autoRelicDelivery: disappearance detected (relicID=` | ✅ PASS (structural) |
-| `#proximity-radius-filters-heroes` | `findHeroesInRange` sets `kbUnitQuerySetMaximumDistance(..., 10.0)` | `autoRelicDelivery: candidate heroes within 10m:` | PENDING MANUAL |
-| `#miko-and-other-non-military-heroes` | `findHeroesInRange` queries both `cUnitTypeLogicalTypeHealable` and `cUnitTypeHero`, then dedups | `autoRelicDelivery: hero ... carrying target relic -> delivering to temple` (for a Japanese Miko) | PENDING MANUAL |
+| `#proximity-radius-filters-heroes` | `findUnitsInRange` sets `kbUnitQuerySetMaximumDistance(..., 10.0)` | `autoRelicDelivery: candidate units within 10m:` | PENDING MANUAL |
+| `#miko-and-other-non-military-heroes` | `findUnitsInRange` queries `cUnitTypeUnit = 889` (broadest unit tag, present on Miko + all hero types + non-hero units) | `autoRelicDelivery: candidate units within 10m: 1` (or more, including non-carriers) followed by `autoRelicDelivery: hero ... carrying target relic -> delivering to temple` (for a Japanese Miko) | PENDING MANUAL |
 
 ---
 
