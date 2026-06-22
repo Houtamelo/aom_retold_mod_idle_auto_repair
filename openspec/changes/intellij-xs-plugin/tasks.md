@@ -136,6 +136,7 @@
 - **Can stand alone?** yes — depends on 0.1 and runs best after 0.3.
 
 ### 1.1 Vendored engine resources + API indexes
+- [x] Completed
 - **Files touched:**
   - `tools/intellij-xs-plugin/src/main/resources/syscalls.json` (vendored from `extracted/xs.vsix/extension/syscalls/syscalls.json`)
   - `tools/intellij-xs-plugin/src/main/resources/aiplans.json` (vendored from `extracted/xs.vsix/extension/constants/aiplans.json`)

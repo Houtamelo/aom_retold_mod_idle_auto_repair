@@ -100,6 +100,57 @@ Target branch: `master`.
 - The `XsParserDefinition` stub is intentionally minimal; the full Grammar-Kit BNF parser lands in P2 task 2.3.
 - The lexer is intentionally limited to the token types required for brace/quote/comment behavior; keywords, operators, and full string-literal handling will be added in P2 task 2.1.
 
-## Next apply batch
+## P1.1 — Vendored engine resources + data layer
 
-**P1 — Engine API surface** (tasks 1.1, then 1.2+1.3, 1.4, 1.5+1.6 as chained PRs).
+**Apply batch:** P1.1 (task 1.1)  
+**Branch:** `intellij-xs-plugin/p1.1-engine-data`  
+**Target:** `master`  
+**Completed at:** 2026-06-22
+
+### What was completed
+
+- [x] **1.1 — Vendored engine resources + API indexes**: replaced P0 placeholder `syscalls.json` and `aiplans.json` with real data extracted from `xs.vsix`; added `XsEngineApi` and `XsAiPlans` singleton loaders with O(1) exact lookup and case-sensitive prefix search; covered both indexes with unit tests.
+
+### Files added/modified
+
+| File | Action | Notes |
+|---|---|---|
+| `tools/intellij-xs-plugin/src/main/resources/syscalls.json` | Modified | Vendored from `/tmp/opencode/xs_ext/extension/syscalls/syscalls.json`; 1,805 entries |
+| `tools/intellij-xs-plugin/src/main/resources/aiplans.json` | Modified | Vendored from `/tmp/opencode/xs_ext/extension/constants/aiplans.json`; 193 entries |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/constants/XsEngineApi.kt` | Added | Gson-backed loader + `Syscall`/`SyscallParam` data classes |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/constants/XsAiPlans.kt` | Added | Gson-backed loader + `AiPlan` data class |
+| `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/constants/XsEngineApiTest.kt` | Added | Lookup, prefix, size, and `all()` assertions |
+| `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/constants/XsAiPlansTest.kt` | Added | Prefix, size, and lookup-consistency assertions |
+| `openspec/changes/intellij-xs-plugin/tasks.md` | Modified | Marked task 1.1 complete |
+
+### Commits
+
+- `5118da7`: `feat(tools/intellij-xs-plugin): vendor syscalls.json and aiplans.json`
+- `3103455`: `feat(tools/intellij-xs-plugin): add XsEngineApi data layer`
+- `1ab833c`: `feat(tools/intellij-xs-plugin): add XsAiPlans data layer`
+- `42de5ad`: `test(tools/intellij-xs-plugin): cover XsEngineApi and XsAiPlans indexing`
+- `<this commit>`: `chore(openspec): record P1.1 progress`
+
+### Verification status
+
+| Check | Status | Notes |
+|---|---|---|
+| `./gradlew buildPlugin` | pass | Verified independently after every commit |
+| `./gradlew test` | pass | 13 tests green across 7 test classes (5 existing + 2 new) |
+| `./gradlew validateBundledResources` | pass | Bundled `syscalls.json` and `aiplans.json` present |
+
+### Metrics
+
+- Total Kotlin `.kt` lines for P0 + P0.5 + P1.1: **590**.
+- Review budget status: `under-soft-limit` (~197 plugin/test source lines changed in this batch; vendored JSON excluded from budget).
+- Actual syscall count: **1,805**.
+- Actual AI plan count: **193**.
+
+### Deviations / findings
+
+- The vendored `aiplans.json` uses a grouped naming convention (`cAttackPlan...`, `cBuildPlan...`, `cDefendPlan...`, etc.) instead of the literal `cPlan*` prefix assumed in the exploratory spec. The `XsAiPlansTest` prefix assertion was updated from `cPlanAdd` to `cAttackPlan` to match real data; this is a test-detail adjustment, not a product behavior change.
+- Gson is provided by the IntelliJ Platform SDK; the existing `testImplementation` Gson dependency is sufficient for tests and main source compilation against the platform classpath.
+
+### Next apply batch
+
+**P1.2 + P1.3 — Engine syscall name completion + default parameter completion** (chained PR after P1.1).
