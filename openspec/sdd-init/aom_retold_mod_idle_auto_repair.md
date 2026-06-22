@@ -193,6 +193,6 @@ No existing `openspec/` directory was present before this run.
 2. **Shared source files.** `auto_scout.xs` and `auto_repair.xs` are reused by the combined mod at deploy time. Any change to those files affects both the standalone and combined packages; update `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/human_assist.xs` only when the hook wiring itself changes.
 3. **Vanilla overlay risk.** `human_assist.xs` in each mod is a copy of a vanilla engine file. Future game patches may invalidate the overlay; patch-maintenance notes are part of the READMEs and should be reflected in rollback plans.
 4. **No CI / build / lint.** There is no automated gate. Verification artifacts (screenshots, aiEcho logs, match replays) become the audit trail.
-5. **No AGENTS.md or project-level convention file.** Downstream agents should follow the observed three-space XS style and Conventional Commits.
+5. **AGENTS.md exists at the project root** as the canonical agent-facing context file (stack, XS language references, mod layout, shared-file rule, deploy/verify workflow). Downstream agents should read it first; it defers to this report for deeper SDD context.
 6. **Skill resolution.** The `.atl/skill-registry.md` cache is current; prefer loading skills by exact path before work. No project-local skills exist.
 7. **Next step recommendation.** Because the project is established and already has a documented change workflow, the next step for a new change is `sdd-new` (propose a change). If the change is large or uncertain, route through `sdd-explore` first.
