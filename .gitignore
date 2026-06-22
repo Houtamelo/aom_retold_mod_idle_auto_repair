@@ -3,7 +3,8 @@
 extracted/
 
 # CryBar tools (download, not source).
-tools/
+tools/*
+!tools/intellij-xs-plugin/
 
 # OS / editor noise
 .DS_Store
