@@ -5,6 +5,7 @@ plugins {
     id("java")
     id("org.jetbrains.kotlin.jvm") version "2.0.21"
     id("org.jetbrains.intellij.platform") version "2.2.1"
+    id("org.jetbrains.grammarkit") version "2022.3.2"
 }
 
 group = "com.aomr"
@@ -34,6 +35,14 @@ kotlin {
     jvmToolchain(21)
 }
 
+sourceSets {
+    main {
+        java {
+            srcDir("src/main/gen")
+        }
+    }
+}
+
 tasks {
     withType<JavaCompile> {
         sourceCompatibility = "21"
@@ -43,6 +52,21 @@ tasks {
     patchPluginXml {
         sinceBuild.set(providers.gradleProperty("pluginSinceBuild"))
         untilBuild.set(providers.gradleProperty("pluginUntilBuild"))
+    }
+
+    generateLexer {
+        sourceFile.set(file("src/main/kotlin/com/aomr/xs/psi/XsLexer.flex"))
+        targetDir.set("src/main/gen/com/aomr/xs/psi")
+        targetClass.set("XsLexer")
+        purgeOldFiles.set(true)
+    }
+
+    compileJava {
+        dependsOn(generateLexer)
+    }
+
+    compileKotlin {
+        dependsOn(generateLexer)
     }
 
     val validateBundledResources by registering {
