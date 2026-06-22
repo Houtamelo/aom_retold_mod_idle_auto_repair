@@ -1,0 +1,20 @@
+<idea-plugin>
+    <id>com.aomr.xs</id>
+    <name>XS Language Support</name>
+    <vendor>aomr</vendor>
+
+    <description><![CDATA[
+        <p>Language support for Age of Mythology: Retold XS scripts.</p>
+    ]]></description>
+
+    <idea-version since-build="242" until-build="252.*"/>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>org.jetbrains.plugins.textmate</depends>
+    <depends optional="true">com.intellij.modules.rider</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileTypeFactory implementation="com.aomr.xs.XsFileTypeFactory"/>
+        <textmate.bundleProvider implementation="com.aomr.xs.textmate.XsTextMateBundleProvider"/>
+    </extensions>
+</idea-plugin>
