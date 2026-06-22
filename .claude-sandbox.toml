@@ -1,0 +1,8 @@
+# claude-sandbox config — see `claude-sandbox docs`
+
+name = "documents-projects-aom_retold_mod"
+
+[[mount]]
+host = "~/.steam/steam/steamapps/"
+container = "~/.steam/steam/steamapps/"
+ro = false
