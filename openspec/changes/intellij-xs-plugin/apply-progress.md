@@ -42,6 +42,14 @@ None — P0 is a clean, complete batch.
 - `FileTypeFactory` is used because the task explicitly requested it, and it is deprecated in modern IntelliJ Platform. It is suppressed with `@file:Suppress("DEPRECATION")`; a future cleanup can migrate to the `<fileType>` extension point.
 - `syscalls.json` and `aiplans.json` are intentionally empty JSON arrays as P0 placeholders so the bundled-resource guard passes. They will be replaced with vendored data in P1 and P4.
 
+## PR status
+
+Branch `intellij-xs-plugin/p0-scaffold` has been pushed to `origin`. A GitHub PR was **not created from the sandbox** because `gh` is not installed and no `GITHUB_TOKEN`/`GH_TOKEN` is present. Open the PR manually at:
+
+`https://github.com/Houtamelo/aom_retold_mod_idle_auto_repair/pull/new/intellij-xs-plugin/p0-scaffold`
+
+Target branch: `master`.
+
 ## Next apply batch
 
 **P1 — Engine API surface** (tasks 1.1, then 1.2+1.3, 1.4, 1.5+1.6 as chained PRs).
