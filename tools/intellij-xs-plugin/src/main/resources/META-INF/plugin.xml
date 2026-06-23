@@ -17,11 +17,13 @@
     <extensions defaultExtensionNs="com.intellij">
         <fileTypeFactory implementation="com.aomr.xs.XsFileTypeFactory"/>
         <textmate.bundleProvider implementation="com.aomr.xs.textmate.XsTextMateBundleProvider"/>
+        <lang.ast.factory language="XS" implementationClass="com.aomr.xs.psi.XsASTFactory"/>
         <lang.parserDefinition language="XS" implementationClass="com.aomr.xs.psi.XsParserDefinition"/>
         <lang.braceMatcher language="XS" implementationClass="com.aomr.xs.editor.XsBraceMatcher"/>
         <lang.quoteHandler language="XS" implementationClass="com.aomr.xs.editor.XsQuoteHandler"/>
         <lang.commenter language="XS" implementationClass="com.aomr.xs.editor.XsCommenter"/>
         <completion.contributor language="XS" implementationClass="com.aomr.xs.completion.XsCompletionContributor"/>
         <lang.documentationProvider language="XS" implementationClass="com.aomr.xs.documentation.XsDocumentationProvider"/>
+        <lang.parameterInfoHandler language="XS" implementationClass="com.aomr.xs.parameterInfo.XsParameterInfoHandler"/>
     </extensions>
 </idea-plugin>
