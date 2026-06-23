@@ -1,6 +1,7 @@
 # Extracted vanilla game data — reference only, not part of the mod.
 # Re-extract from Data.bar with CryBar.Cli when needed.
-extracted/
+extracted/*
+!extracted/xs.vsix
 
 # CryBar tools (download, not source).
 tools/
