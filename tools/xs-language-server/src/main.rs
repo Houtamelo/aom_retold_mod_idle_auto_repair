@@ -1,6 +1,8 @@
 use tower_lsp::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 
+mod diagnostics;
+mod parser;
 mod server;
 
 use server::XsLanguageServer;

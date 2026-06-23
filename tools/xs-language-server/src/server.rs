@@ -7,6 +7,8 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info};
 
+use crate::{diagnostics, parser};
+
 /// Holds the parsed-but-not-yet-processed text of every document the client
 /// has opened. Populated by `did_open` / `did_change`, cleared by `did_close`.
 #[derive(Default)]
@@ -84,21 +86,18 @@ impl LanguageServer for XsLanguageServer {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text;
-        debug!("did_open: {} ({} bytes)", uri, text.len());
+        let version = params.text_document.version;
+        debug!("did_open: {} ({} bytes, v{})", uri, text.len(), version);
         {
             let mut docs = self.documents.lock().await;
-            docs.open(uri.clone(), text);
+            docs.open(uri.clone(), text.clone());
         }
-        self.client
-            .log_message(
-                MessageType::INFO,
-                format!("opened {} (will report diagnostics in Day 4-5)", uri),
-            )
-            .await;
+        self.publish_diagnostics(&uri, &text, version).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
+        let version = params.text_document.version;
         // FULL sync: only one change with the entire new text.
         let text = params
             .content_changes
@@ -106,9 +105,12 @@ impl LanguageServer for XsLanguageServer {
             .next()
             .map(|c| c.text)
             .unwrap_or_default();
-        debug!("did_change: {} ({} bytes)", uri, text.len());
-        let mut docs = self.documents.lock().await;
-        docs.change(&uri, text);
+        debug!("did_change: {} ({} bytes, v{})", uri, text.len(), version);
+        {
+            let mut docs = self.documents.lock().await;
+            docs.change(&uri, text.clone());
+        }
+        self.publish_diagnostics(&uri, &text, version).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -116,5 +118,35 @@ impl LanguageServer for XsLanguageServer {
         debug!("did_close: {}", uri);
         let mut docs = self.documents.lock().await;
         docs.close(&uri);
+    }
+}
+
+impl XsLanguageServer {
+    /// Parse `text` as XS and publish any parse errors as LSP diagnostics.
+    /// An empty `Vec` (clean parse) is also published so clients clear
+    /// stale diagnostics for this URI.
+    async fn publish_diagnostics(&self, uri: &Url, text: &str, version: i32) {
+        let diagnostics = match parser::parse(text) {
+            Some(tree) => diagnostics::collect_diagnostics(&tree, text),
+            None => vec![Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("xs-language-server".to_string()),
+                message: "internal error: failed to install XS language".to_string(),
+                related_information: None,
+                tags: None,
+                data: None,
+            }],
+        };
+        debug!(
+            "publish_diagnostics: {} ({} issue(s))",
+            uri,
+            diagnostics.len()
+        );
+        self.client
+            .publish_diagnostics(uri.clone(), diagnostics, Some(version))
+            .await;
     }
 }

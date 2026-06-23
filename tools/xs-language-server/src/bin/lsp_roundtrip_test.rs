@@ -18,6 +18,7 @@ const INITIALIZED: &str =
     r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
 const DID_OPEN: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/test.xs","languageId":"xs","version":1,"text":"rule test\nminInterval 5\nactive\n{\n   aiEcho(\"hello\");\n}"}}}"#;
 const DID_CHANGE: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/test.xs","version":2},"contentChanges":[{"text":"rule test2\nactive\n{\n   aiEcho(\"changed\");\n}"}]}}"#;
+const DID_OPEN_BAD: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/bad.xs","languageId":"xs","version":1,"text":"rule brokenRule\nminInterval 5\nactive\n{\n   int x = ;\n   aiEcho(\"hello\n}\n\nvoid unclosed(int a\n{\n}\n"}}}"#;
 const SHUTDOWN: &str = r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#;
 const EXIT: &str = r#"{"jsonrpc":"2.0","method":"exit"}"#;
 
@@ -119,7 +120,7 @@ fn main() {
 
     // Write the full message sequence (including exit) so the server
     // processes everything and exits, flushing stdout.
-    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_CHANGE, SHUTDOWN, EXIT] {
+    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, SHUTDOWN, EXIT] {
         eprintln!("[test] writing {} bytes", frame(msg).len());
         stdin
             .write_all(frame(msg).as_bytes())
@@ -201,6 +202,29 @@ fn main() {
     } else {
         println!("FAIL: shutdown response missing or malformed:");
         println!("  {}", shutdown_resp);
+        all_pass = false;
+    }
+
+    // Look for at least one publishDiagnostics notification in the raw bytes.
+    // (We parsed only id-tagged messages above; notifications don't have ids
+    // so they were skipped. The raw bytes should still contain them.)
+    let raw = String::from_utf8_lossy(&all_bytes);
+    let has_clean_diag = raw.contains("\"file:///tmp/test.xs\"")
+        && raw.contains("textDocument/publishDiagnostics");
+    let has_bad_diag = raw.contains("\"file:///tmp/bad.xs\"")
+        && raw.contains("Parse error");
+
+    if has_clean_diag {
+        println!("PASS: clean-file diagnostics published (expected empty)");
+    } else {
+        println!("FAIL: missing diagnostics notification for /tmp/test.xs");
+        all_pass = false;
+    }
+
+    if has_bad_diag {
+        println!("PASS: malformed-file diagnostics published with parse errors");
+    } else {
+        println!("FAIL: missing diagnostics notification for /tmp/bad.xs");
         all_pass = false;
     }
 
