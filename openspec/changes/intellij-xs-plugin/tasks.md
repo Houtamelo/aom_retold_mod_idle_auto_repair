@@ -198,6 +198,7 @@
 - **Can stand alone?** yes — depends on 1.1.
 
 ### 1.5 Parameter info handler
+- [x] Completed
 - **Files touched:**
   - `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/parameterInfo/XsParameterInfoHandler.kt`
   - `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/parameterInfo/XsParameterInfoTest.kt`
@@ -212,6 +213,7 @@
 - **Can stand alone?** yes — depends on 1.1.
 
 ### 1.6 Engine syscall go-to-definition stubs
+- [x] Completed
 - **Files touched:**
   - `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/navigation/XsEngineReferenceContributor.kt`
   - `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/navigation/XsEngineStubGenerator.kt`

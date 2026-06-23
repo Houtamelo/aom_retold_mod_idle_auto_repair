@@ -260,3 +260,71 @@ Target branch: `master`.
 ### Next apply batch
 
 **P1.5 + P1.6 — Parameter info handler + engine syscall go-to-definition stubs**.
+
+## P1.5+P1.6 — Parameter info + engine stubs
+
+**Apply batch:** P1.5 + P1.6 (combined into one PR)  
+**Branch:** `intellij-xs-plugin/p1.5-parameter-info-and-stubs`  
+**Target:** `master`  
+**Completed at:** 2026-06-23
+
+### What was completed
+
+- [x] **1.5 — Parameter info handler**: implemented `XsParameterInfoHandler` implementing `ParameterInfoHandler<PsiElement, XsEngineApi.Syscall>`; reused `XsCallContextDetector` for PSI-less call-site detection; registered in `plugin.xml`; renders `returnType name(...)` with the current parameter bolded; handles missing closing paren and unknown identifiers.
+- [x] **1.6 — Engine syscall go-to-definition stubs**: implemented `XsEngineStubGenerator` producing cached `LightVirtualFile` stubs; implemented `XsEngineReferenceContributor` with `XsEngineReference`; added `XsIdentifier`/`XsASTFactory` so custom-language identifier leaves consult `ReferenceProvidersRegistry`; registered the reference contributor in `plugin.xml`.
+
+### Files added/modified
+
+| File | Action | Notes |
+|---|---|---|
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/parameterInfo/XsParameterInfoHandler.kt` | Added | Parameter info handler for engine syscalls |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/completion/XsCallContextDetector.kt` | Added | Shared PSI-less call-site detector |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/completion/XsCompletionContributor.kt` | Modified | Delegates call-site/context detection to XsCallContextDetector |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/navigation/XsEngineStubGenerator.kt` | Added | In-memory LightVirtualFile stub generator |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/navigation/XsEngineReferenceContributor.kt` | Added | Reference contributor for syscall identifiers |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/psi/XsIdentifier.kt` | Added | Identifier leaf that supports contributed references |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/psi/XsASTFactory.kt` | Added | AST factory creating XsIdentifier leaves |
+| `tools/intellij-xs-plugin/src/main/resources/META-INF/plugin.xml` | Modified | Registered parameterInfoHandler and psi.referenceContributor |
+| `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/parameterInfo/XsParameterInfoTest.kt` | Added | 6 parameter-info scenarios |
+| `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/navigation/XsEngineNavigationTest.kt` | Added | 5 navigation/cache scenarios |
+| `tools/intellij-xs-plugin/build.gradle.kts` | Modified | `forkEvery = 1` to avoid fixture lifecycle hang |
+
+### Commits
+
+- `ca117d5`: `feat(tools/intellij-xs-plugin): add XsParameterInfoHandler for engine syscalls`
+- `d826f9c`: `feat(tools/intellij-xs-plugin): add engine stub generator and reference contributor`
+- `8e74fe6`: `test(tools/intellij-xs-plugin): cover parameter info and engine stub navigation`
+- `<this commit>`: `chore(openspec): record P1.5+1.6 progress`
+
+### Verification status
+
+| Check | Status | Notes |
+|---|---|---|
+| `./gradlew buildPlugin` | pass | Produces `intellij-xs-plugin-0.1.0.zip` |
+| `./gradlew test` | pass | 32 tests green (21 existing + 6 `XsParameterInfoTest` + 5 `XsEngineNavigationTest`) |
+| `./gradlew validateBundledResources` | pass | Guard still passes |
+
+### Metrics
+
+- P1.5+P1.6 plugin/test/build lines changed: **687 insertions, 129 deletions**.
+- Review budget status: `under-soft-limit`.
+- Cumulative Kotlin `.kt` lines for the whole plugin: **1,611** (main + test source).
+
+### Deviations / findings
+
+- The `psi.referenceContributor` extension point requires `implementation` (not `implementationClass`) and the `language="XS"` attribute for the keyed registry.
+- Engine syscalls have no source file in the workspace; navigation relies on a custom `XsIdentifier` leaf that explicitly delegates to `ReferenceProvidersRegistry`, because standard `LeafPsiElement` does not consult contributed reference providers for custom languages.
+- `XsEngineStubGenerator` caches `LightVirtualFile` instances by syscall name; the cache is per-classloader (singleton via companion object) for the plugin runtime.
+- Multiple `BasePlatformTestCase` fixture classes hang in the same JVM in this headless sandbox, so `build.gradle.kts` sets `forkEvery = 1`.
+
+## P1 phase complete
+
+All four P1 PRs have landed:
+
+1. **P1.1** — `intellij-xs-plugin/p1.1-engine-data` (vendored syscalls/aiplans + data layer).
+2. **P1.2+P1.3** — `intellij-xs-plugin/p1.2-engine-completion` (syscall name + default parameter completion).
+3. **P1.4** — `intellij-xs-plugin/p1.4-hover-docs` (hover documentation provider).
+4. **P1.5+P1.6** — `intellij-xs-plugin/p1.5-parameter-info-and-stubs` (this batch).
+
+The engine API surface is complete: engine syscalls auto-complete, insert defaults on `(`/`,`, show hover docs, highlight the active parameter, and open an in-memory stub on `Ctrl+B`.
+
