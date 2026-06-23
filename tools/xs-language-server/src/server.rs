@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info};
 
-use crate::{completion, diagnostics, engine_api, parser};
+use crate::{completion, diagnostics, engine_api, parser, word};
 
 /// Holds the parsed-but-not-yet-processed text of every document the client
 /// has opened. Populated by `did_open` / `did_change`, cleared by `did_close`.
@@ -78,6 +78,16 @@ impl LanguageServer for XsLanguageServer {
                     ]),
                     ..Default::default()
                 }),
+                // Week 2: hover returns the syscall signature + help as
+                // Markdown. No options (no work-done progress, no dynamic
+                // registration) — keep it simple until clients ask for more.
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                // Week 2: go-to-definition resolves engine-API symbols to
+                // a virtual `xs-stub://engine/<name>` URI (range 0:0-0:0
+                // since stubs have no real source position). No
+                // linkSupport yet — that comes when we have real workspace
+                // symbols.
+                definition_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -140,6 +150,73 @@ impl LanguageServer for XsLanguageServer {
         debug!("completion: {} item(s) at {:?}", items.len(), params.text_document_position.position);
         Ok(Some(CompletionResponse::Array(items)))
     }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let Some(ident) = word::identifier_at_cursor(&text, pos.line, pos.character) else {
+            debug!("hover: no identifier at {:?}", pos);
+            return Ok(None);
+        };
+
+        let markdown = if let Some(s) = self.engine.find_syscall(&ident) {
+            format_hover_syscall(s)
+        } else if let Some(c) = self.engine.find_aiplan(&ident) {
+            format_hover_aiplan(c)
+        } else {
+            debug!("hover: identifier `{ident}` not in engine API");
+            return Ok(None);
+        };
+
+        debug!("hover: `{ident}` -> {} chars of markdown", markdown.len());
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: markdown,
+            }),
+            range: None,
+        }))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let Some(ident) = word::identifier_at_cursor(&text, pos.line, pos.character) else {
+            debug!("definition: no identifier at {:?}", pos);
+            return Ok(None);
+        };
+
+        if self.engine.find_syscall(&ident).is_none()
+            && self.engine.find_aiplan(&ident).is_none()
+        {
+            debug!("definition: identifier `{ident}` not in engine API");
+            return Ok(None);
+        }
+
+        // Virtual URI — these stubs don't have a real source position, so
+        // we use 0:0-0:0. Clients will show a synthetic file for this URI.
+        let stub_uri = format!("xs-stub://engine/{ident}");
+        let location = Location {
+            uri: Url::parse(&stub_uri)
+                .map_err(|e| tower_lsp::jsonrpc::Error::internal_error())?,
+            range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+        };
+        debug!("definition: `{ident}` -> {stub_uri}");
+        Ok(Some(GotoDefinitionResponse::Scalar(location)))
+    }
 }
 
 impl XsLanguageServer {
@@ -170,4 +247,30 @@ impl XsLanguageServer {
             .publish_diagnostics(uri.clone(), diagnostics, Some(version))
             .await;
     }
+}
+
+/// Format a syscall as a Markdown hover card.
+fn format_hover_syscall(s: &engine_api::Syscall) -> String {
+    let params = s
+        .params
+        .iter()
+        .map(|p| format!("{} {}", p.ty, p.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let signature = format!("{} {}({})", s.return_type, s.name, params);
+    let mut md = format!("```xs\n{}\n```\n", signature);
+    if !s.help.is_empty() {
+        // Indent multi-paragraph help so it renders as a single block under
+        // the code fence.
+        md.push_str(&s.help);
+        md.push('\n');
+    }
+    md
+}
+
+/// Format an AI-plan constant as a Markdown hover card.
+fn format_hover_aiplan(c: &engine_api::AiplanConstant) -> String {
+    let signature = format!("const {} {} = {}", c.variable_type, c.name, c.variable_value);
+    let md = format!("```xs\n{}\n```\n", signature);
+    md
 }

@@ -20,6 +20,10 @@ const DID_OPEN: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","para
 const DID_CHANGE: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/test.xs","version":2},"contentChanges":[{"text":"rule test2\nactive\n{\n   aiEcho(\"changed\");\n}"}]}}"#;
 const DID_OPEN_BAD: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/bad.xs","languageId":"xs","version":1,"text":"rule brokenRule\nminInterval 5\nactive\n{\n   int x = ;\n   aiEcho(\"hello\n}\n\nvoid unclosed(int a\n{\n}\n"}}}"#;
 const COMPLETION_AI: &str = r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///tmp/test.xs"},"position":{"line":4,"character":6}}}"#;
+// Hover and go-to-definition at the same position — col 6 is on the 'c'
+// of "aiEcho" in the test file (line 4 = `   aiEcho("hello");`).
+const HOVER_AI: &str = r#"{"jsonrpc":"2.0","id":4,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///tmp/test.xs"},"position":{"line":4,"character":6}}}"#;
+const DEFINITION_AI: &str = r#"{"jsonrpc":"2.0","id":5,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///tmp/test.xs"},"position":{"line":4,"character":6}}}"#;
 const SHUTDOWN: &str = r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#;
 const EXIT: &str = r#"{"jsonrpc":"2.0","method":"exit"}"#;
 
@@ -121,7 +125,7 @@ fn main() {
 
     // Write the full message sequence (including exit) so the server
     // processes everything and exits, flushing stdout.
-    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, COMPLETION_AI, SHUTDOWN, EXIT] {
+    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, COMPLETION_AI, HOVER_AI, DEFINITION_AI, SHUTDOWN, EXIT] {
         eprintln!("[test] writing {} bytes", frame(msg).len());
         stdin
             .write_all(frame(msg).as_bytes())
@@ -140,6 +144,8 @@ fn main() {
     let mut init_resp = None;
     let mut shutdown_resp = None;
     let mut completion_resp = None;
+    let mut hover_resp = None;
+    let mut definition_resp = None;
 
     // Read everything from stdout, then parse.
     stdout.read_to_end(&mut all_bytes).expect("read stdout to end");
@@ -160,6 +166,10 @@ fn main() {
                         shutdown_resp = Some(msg);
                     } else if id == 3 && completion_resp.is_none() {
                         completion_resp = Some(msg);
+                    } else if id == 4 && hover_resp.is_none() {
+                        hover_resp = Some(msg);
+                    } else if id == 5 && definition_resp.is_none() {
+                        definition_resp = Some(msg);
                     }
                 }
             }
@@ -169,8 +179,8 @@ fn main() {
             }
         }
     }
-    eprintln!("[test] init_resp: {}, shutdown_resp: {}, completion_resp: {}",
-        init_resp.is_some(), shutdown_resp.is_some(), completion_resp.is_some());
+    eprintln!("[test] init_resp: {}, shutdown_resp: {}, completion_resp: {}, hover_resp: {}, definition_resp: {}",
+        init_resp.is_some(), shutdown_resp.is_some(), completion_resp.is_some(), hover_resp.is_some(), definition_resp.is_some());
 
     let init_resp = init_resp.expect("initialize response");
     eprintln!("[test] got initialize response");
@@ -178,6 +188,10 @@ fn main() {
     eprintln!("[test] got shutdown response");
     let completion_resp = completion_resp.expect("completion response");
     eprintln!("[test] got completion response");
+    let hover_resp = hover_resp.expect("hover response");
+    eprintln!("[test] got hover response");
+    let definition_resp = definition_resp.expect("definition response");
+    eprintln!("[test] got definition response");
 
     let stderr_text = std::fs::read_to_string("/tmp/xs_lsp_server_stderr.log")
         .unwrap_or_else(|e| format!("(failed to read stderr log: {e})"));
@@ -247,6 +261,40 @@ fn main() {
     } else {
         println!("FAIL: completion did not return expected aiEcho* items (count={completion_count})");
         println!("  completion response: {}", completion_resp);
+        all_pass = false;
+    }
+
+    // Hover: the response should contain a `contents.value` field with
+    // "aiEcho" (the identifier name), a Markdown code fence (the signature),
+    // AND a recognizable XS return type or primitive type name.
+    let hover_raw = hover_resp.to_string();
+    let has_hover_name = hover_raw.contains("aiEcho");
+    let has_hover_signature = hover_raw.contains("```xs");
+    // Accept any common XS type token as a proxy for "the signature rendered
+    // something". aiEcho's actual signature is `void aiEcho(string text)`.
+    let has_hover_type = hover_raw.contains("void ")
+        || hover_raw.contains("int ")
+        || hover_raw.contains("string ")
+        || hover_raw.contains("bool ")
+        || hover_raw.contains("float ")
+        || hover_raw.contains("vector ");
+    if has_hover_name && has_hover_signature && has_hover_type {
+        println!("PASS: hover returned aiEcho signature (Markdown with name + code fence + type token)");
+    } else {
+        println!("FAIL: hover did not return expected content (name={has_hover_name}, fence={has_hover_signature}, type={has_hover_type})");
+        println!("  hover response: {}", hover_resp);
+        all_pass = false;
+    }
+
+    // Definition: the response should be a `GotoDefinitionResponse::Scalar`
+    // whose `Location.uri` is "xs-stub://engine/aiEcho".
+    let def_raw = definition_resp.to_string();
+    let has_stub_uri = def_raw.contains("xs-stub://engine/aiEcho");
+    if has_stub_uri {
+        println!("PASS: definition returned xs-stub://engine/aiEcho");
+    } else {
+        println!("FAIL: definition did not return xs-stub://engine/aiEcho");
+        println!("  definition response: {}", definition_resp);
         all_pass = false;
     }
 

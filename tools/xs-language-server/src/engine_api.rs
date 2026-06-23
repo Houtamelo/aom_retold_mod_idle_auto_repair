@@ -120,6 +120,16 @@ impl EngineApi {
             .iter()
             .filter(move |c| c.name.starts_with(prefix))
     }
+
+    /// Exact-match lookup by name.
+    pub fn find_syscall(&self, name: &str) -> Option<&Syscall> {
+        self.syscalls.iter().find(|s| s.name == name)
+    }
+
+    /// Exact-match lookup by name.
+    pub fn find_aiplan(&self, name: &str) -> Option<&AiplanConstant> {
+        self.aiplans.iter().find(|c| c.name == name)
+    }
 }
 
 /// Wrap in `Arc` so the server can hand the same data to multiple async
