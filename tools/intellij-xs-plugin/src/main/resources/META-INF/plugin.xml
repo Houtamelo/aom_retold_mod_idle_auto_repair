@@ -25,5 +25,6 @@
         <completion.contributor language="XS" implementationClass="com.aomr.xs.completion.XsCompletionContributor"/>
         <lang.documentationProvider language="XS" implementationClass="com.aomr.xs.documentation.XsDocumentationProvider"/>
         <lang.parameterInfoHandler language="XS" implementationClass="com.aomr.xs.parameterInfo.XsParameterInfoHandler"/>
+        <psi.referenceContributor language="XS" implementation="com.aomr.xs.navigation.XsEngineReferenceContributor"/>
     </extensions>
 </idea-plugin>
