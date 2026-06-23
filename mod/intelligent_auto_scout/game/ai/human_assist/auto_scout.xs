@@ -72,12 +72,23 @@ const int cAutoScout_MaxCorridorHops = 8;
 // cActionTypeIdleStatBonusFull), replace this magic number with that.
 const int cAutoScout_OracleSaturatedActionType = 37;
 
-// Plan-state integer for cPlanStateIdle (from docs/MythTRConstants.txt).
-// Setting this on a cPlanExplore at registration tells the engine "this
-// plan is parked, don't iterate" while keeping the plan alive as a UI
+// Plan-state integer for cPlanStateIdle (from docs/MythTRConstants.txt:3166).
+// Setting this on a cPlanExplore parks the plan while keeping it alive as a UI
 // marker. The visible state for an active cPlanExplore is cPlanStateExplore
-// (value 6); cPlanStateIdle (value 23) is what we set after registration.
+// (value 6, docs/MythTRConstants.txt:3149); cPlanStateIdle (value 23) is used
+// only when the mod explicitly parks the plan (herd divert, flee, Oracle LOS dip).
 const int cAutoScout_PlanStateIdle = 23;
+
+// New lifecycle modes for engine-explore migration. Stored in gAutoScout_planState[].
+// These are separate from the unit-behavior enum (cAutoScoutState_*) above.
+const int cAutoScout_PlanStateActive       = 0;
+const int cAutoScout_PlanStateParkedDivert = 1;
+const int cAutoScout_PlanStateParkedFlee   = 2;
+const int cAutoScout_PlanStatePausedOracle = 3;
+
+// Number of tick rules between full BFS/filter/assign recomputations for a
+// scout that is already active. Un-park transitions always recompute immediately.
+const int cAutoScout_AssignmentInterval = 5;
 
 // Cold-start value for the dynamic gAutoScout_maxOracleLOS cache. Used until
 // any oracle is observed in the saturated action state (action ==
@@ -411,6 +422,18 @@ extern float gAutoScout_maxOracleLOS = cAutoScout_OracleColdCacheMaxLOS;
 // by the heuristic to enumerate every oracle (toggled-on AND not), so player-
 // controlled oracles still influence target-area selection.
 extern int gAutoScout_oracleQuery = -1;
+
+// Engine-explore migration: per-slot plan lifecycle mode.
+// Orthogonal to the existing cAutoScoutState_* unit-behavior enum.
+extern int[] gAutoScout_planState      = default;
+// Per-slot tick counter used to throttle the BFS/filter/assign pipeline.
+extern int[] gAutoScout_assignmentTick = default;
+// Per-proto max-LOS cache used by the Oracle LOS monitor.
+extern float[] gAutoScout_oracleMaxLOS = default;
+
+// Area-type filter used by helperExploreStartingSurroundings. Kept empty so
+// kbAreaGetIDsByPositionAndRange falls back to any passable land area.
+extern int[] areaLandScoutTypes = default;
 
 float floatClamp01(float value = 0.0) {
     if (value < 0.0) { value = 0.0; }
@@ -1158,6 +1181,198 @@ float autoScout_effectiveDanger(int areaID = -1)
 bool autoScout_areaIsDangerous(int areaID = -1)
 {
    return(autoScout_effectiveDanger(areaID) > cAutoScout_DangerHardSkip);
+}
+
+//------------------------------------------------------------------------------
+// Engine-explore area-ID assignment helpers (ported from POC)
+//------------------------------------------------------------------------------
+
+void autoScout_explorePlanAssignAreas(int planID = -1, ref int[] areaIDs)
+{
+   int areaCount = areaIDs.size();
+   int currIndex = aiPlanGetVariableInt(planID, cExplorePlanExploreAreaIDsCurrentIndex, 0);
+   aiPlanSetNumberVariableValues(planID, cExplorePlanExploreAreaIDs, areaCount, true);
+   for (int i = 0; i < areaCount; i = i + 1)
+   {
+      aiPlanSetVariableInt(planID, cExplorePlanExploreAreaIDs, i, areaIDs[i]);
+   }
+   aiEcho("autoScout: assigned " + areaCount + " area IDs to plan " + planID
+      + " (currentIndex=" + currIndex + ")");
+}
+
+void autoScout_removeExploredAreas(ref int[] areas)
+{
+   for (int i = areas.size() - 1; i >= 0; i = i - 1)
+   {
+      int areaID = areas[i];
+      if (kbAreaGetPercentExplored(areaID) >= 1.0)
+      {
+         areas.removeIndex(i);
+         aiEcho("autoScout:   AreaID " + areaID + " is already fully explored.");
+      }
+      else
+      {
+         aiEcho("autoScout:   Added areaID " + areaID + " to the plan to explore.");
+      }
+   }
+}
+
+bool autoScout_helperExploreStartingSurroundings(int planID = -1)
+{
+   static int[] areasToScout = default;
+   static bool firstRun = true;
+   static bool fullyExploredStartingSurroundings = false;
+
+   if (fullyExploredStartingSurroundings == true)
+   {
+      return(false);
+   }
+
+   if (firstRun == true)
+   {
+      firstRun = false;
+      vector startingPosition = kbPlayerGetStartingPosition(cMyID);
+      if (startingPosition == cInvalidVector)
+      {
+         int mainBaseID = kbBaseGetMainID(cMyID);
+         if (mainBaseID != -1)
+         {
+            startingPosition = kbBaseGetLocation(cMyID, mainBaseID);
+         }
+      }
+      if (kbGetIsLocationOnMap(startingPosition) == false)
+      {
+         fullyExploredStartingSurroundings = true;
+         return(false);
+      }
+      areasToScout = kbAreaGetIDsByPositionAndRange(startingPosition, 130.0, areaLandScoutTypes, true, cPassabilityLand);
+   }
+
+   autoScout_removeExploredAreas(areasToScout);
+
+   if (areasToScout.size() == 0)
+   {
+      aiEcho("autoScout: starting surroundings fully explored.");
+      fullyExploredStartingSurroundings = true;
+      return(false);
+   }
+
+   autoScout_explorePlanAssignAreas(planID, areasToScout);
+   return(true);
+}
+
+bool autoScout_helperExploreFarAreas(int planID = -1, vector scoutPos = cInvalidVector)
+{
+   aiEcho("autoScout: helperExploreFarAreas for plan " + planID + " at center " + scoutPos);
+   int areaGroupID = kbAreaGroupGetIDByPosition(scoutPos);
+   if (areaGroupID < 0)
+   {
+      aiEchoWarning("autoScout: couldn't find a valid area group for scout position " + scoutPos);
+      return(false);
+   }
+
+   int areasCount = kbAreaGroupGetNumberAreas(areaGroupID);
+   int[] areasToScout = new int(0, -1);
+   for (int i = 0; i < areasCount; i = i + 1)
+   {
+      areasToScout.add(kbAreaGroupGetAreaID(areaGroupID, i));
+   }
+
+   autoScout_removeExploredAreas(areasToScout);
+
+   if (areasToScout.size() <= 0)
+   {
+      aiEcho("autoScout: no far areas to scout at position " + scoutPos);
+      return(false);
+   }
+
+   autoScout_explorePlanAssignAreas(planID, areasToScout);
+   return(true);
+}
+
+bool autoScout_exploreCurrentArea(int unitID = -1, int planID = -1)
+{
+   int areaID = kbAreaGetIDByPosition(kbUnitGetPosition(unitID));
+   if (areaID < 0 || kbAreaGetPercentExplored(areaID) >= 1.0)
+   {
+      return(false);
+   }
+
+   int[] areasToScout = new int(0, -1);
+   areasToScout.add(areaID);
+   autoScout_explorePlanAssignAreas(planID, areasToScout);
+   return(true);
+}
+
+int autoScout_exploreNeighborAreas(int unitID = -1, int planID = -1)
+{
+   vector unitPos = kbUnitGetPosition(unitID);
+   int areaID = kbAreaGetIDByPosition(unitPos);
+   int unitProto = kbUnitGetProtoUnitID(unitID);
+
+   int[] areasToScout = new int(0, -1);
+   areasToScout.add(areaID);
+
+   int borderCount = kbAreaGetNumberBorderAreas(areaID);
+   for (int i = 0; i < borderCount; i = i + 1)
+   {
+      int borderAreaID = kbAreaGetBorderAreaID(areaID, i);
+      vector borderCenter = kbAreaGetCenter(borderAreaID);
+      if (kbCanPath(unitPos, borderCenter, unitProto, 1.0, -1) == false)
+      {
+         aiEcho("autoScout: skipping border area " + borderAreaID + " for unit " + unitID
+            + " because kbCanPath failed (pathing / engine-area mismatch)");
+         continue;
+      }
+      areasToScout.add(borderAreaID);
+   }
+
+   autoScout_removeExploredAreas(areasToScout);
+
+   if (areasToScout.size() <= 0)
+   {
+      return(0);
+   }
+
+   autoScout_explorePlanAssignAreas(planID, areasToScout);
+
+   for (int i = 0; i < areasToScout.size(); i = i + 1)
+   {
+      aiEcho("autoScout: exploreNeighborAreas added area " + areasToScout[i] + " for unit " + unitID);
+   }
+   return(areasToScout.size());
+}
+
+void autoScout_filterDangerousAreas(ref int[] areas, int unitID = -1)
+{
+   autoScout_initAreaArrays();
+   for (int i = areas.size() - 1; i >= 0; i = i - 1)
+   {
+      int areaID = areas[i];
+      if (areaID < 0 || areaID >= gAutoScout_areaClaim.size())
+      {
+         areas.removeIndex(i);
+         aiEcho("autoScout: dropping invalid area " + areaID);
+         continue;
+      }
+      if (autoScout_areaIsDangerous(areaID) == true)
+      {
+         areas.removeIndex(i);
+         aiEcho("autoScout: dropping dangerous area " + areaID + " for unit " + unitID);
+         continue;
+      }
+      if (gAutoScout_areaClaim[areaID] != 0 && gAutoScout_areaClaim[areaID] != unitID)
+      {
+         areas.removeIndex(i);
+         aiEcho("autoScout: dropping claimed area " + areaID + " for unit " + unitID);
+         continue;
+      }
+      if (gAutoScout_areaSelfScouted[areaID] == 1)
+      {
+         areas.removeIndex(i);
+         aiEcho("autoScout: dropping self-scouted area " + areaID + " for unit " + unitID);
+      }
+   }
 }
 
 // Add areaID to the blacklist (or bump its expiry if already present).
@@ -2251,6 +2466,94 @@ int autoScout_findNextArea(int scoutUnitID = -1)
    }
    autoScout_diag_log(scoutUnitID, -1);
    return(-1);
+}
+
+//------------------------------------------------------------------------------
+// Engine-explore migration: ranked area list builder and lifecycle helpers
+//------------------------------------------------------------------------------
+
+void autoScout_buildAreaListForUnit(int unitID = -1, ref int[] result)
+{
+   result.clear();
+   vector unitPos = kbUnitGetPosition(unitID);
+   int unitProto = kbUnitGetProtoUnitID(unitID);
+   if (kbGetIsLocationOnMap(unitPos) == false) { return; }
+
+   // BFS path first (start -> ... -> target).
+   int targetArea = autoScout_findNextArea(unitID);
+   if (targetArea >= 0 && gAutoScout_bfsResultLen > 0)
+   {
+      int len = gAutoScout_bfsResultLen;
+      if (len > gAutoScout_bfsResultPath.size()) { len = gAutoScout_bfsResultPath.size(); }
+      for (int i = 0; i < len; i = i + 1)
+      {
+         result.add(gAutoScout_bfsResultPath[i]);
+      }
+      return;
+   }
+
+   // Fallback: current area plus reachable border areas.
+   int currentArea = kbAreaGetIDByPosition(unitPos);
+   if (currentArea >= 0) { result.add(currentArea); }
+   int borderCount = kbAreaGetNumberBorderAreas(currentArea);
+   int areaCount = kbAreaGetNumber();
+   for (int i = 0; i < borderCount; i = i + 1)
+   {
+      int borderAreaID = kbAreaGetBorderAreaID(currentArea, i);
+      if (borderAreaID < 0 || borderAreaID >= areaCount) { continue; }
+      vector borderCenter = kbAreaGetCenter(borderAreaID);
+      if (kbCanPath(unitPos, borderCenter, unitProto, 1.0, -1) == true)
+      {
+         result.add(borderAreaID);
+      }
+      else
+      {
+         aiEcho("autoScout: buildAreaListForUnit skipping border area " + borderAreaID
+            + " for unit " + unitID + " (kbCanPath failed)");
+      }
+   }
+}
+
+void autoScout_claimAndAssignAreas(int planID = -1, int unitID = -1, ref int[] areas)
+{
+   int slot = autoScout_findSlotForUnit(unitID);
+   autoScout_releaseClaim(slot);
+   int count = areas.size();
+   if (count <= 0)
+   {
+      aiEcho("autoScout: no areas to scout for unit " + unitID + " plan " + planID);
+      return;
+   }
+
+   autoScout_initAreaArrays();
+   for (int i = 0; i < count; i = i + 1)
+   {
+      int areaID = areas[i];
+      if (areaID >= 0 && areaID < gAutoScout_areaClaim.size())
+      {
+         gAutoScout_areaClaim[areaID] = unitID;
+      }
+   }
+
+   if (slot >= 0)
+   {
+      gAutoScout_targetAreaID[slot] = areas[0];
+      gAutoScout_targetWaypoint[slot] = kbAreaGetCenter(areas[0]);
+   }
+
+   autoScout_explorePlanAssignAreas(planID, areas);
+}
+
+// R8 HIGH: Every un-park path MUST recompute and reassign the area list before
+// setting the engine plan back to cPlanStateExplore. This helper centralises
+// that ordering so no resume can reuse stale/consumed area IDs.
+void autoScout_unparkAndReassignAreas(int planID = -1, int unitID = -1)
+{
+   int[] areas = new int(0, -1);
+   autoScout_buildAreaListForUnit(unitID, areas);
+   autoScout_removeExploredAreas(areas);
+   autoScout_filterDangerousAreas(areas, unitID);
+   autoScout_claimAndAssignAreas(planID, unitID, areas);
 }
 
 //------------------------------------------------------------------------------
