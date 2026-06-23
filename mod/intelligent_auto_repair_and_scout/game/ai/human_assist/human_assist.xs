@@ -106,13 +106,20 @@ void enableAutoScouting(int unitID = -1)
     // No looping for anyone; area list is consumed once and refilled by the mod.
     aiPlanSetVariableBool(planID, cExplorePlanDoLoops, 0, false);
 
-    if (kbUnitIsType(unitID, cUnitTypeAbstractOracle) == true)
-    {
-       // Stand still if less or equal than 80% of surrounding tiles are explored
-       // (engine hint; explicit LOS monitor owns the <50% pause / 100% resume).
-       aiPlanSetVariableFloat(planID, cExplorePlanStopLOSPercentage, 0, 0.8);
-    }
-    autoScout_register(planID, unitID); // Intelligent Auto-Scout mod (no-op for AI players)
+     if (kbUnitIsType(unitID, cUnitTypeAbstractOracle) == true)
+     {
+        // Stand still if less or equal than 80% of surrounding tiles are explored
+        // (engine hint; explicit LOS monitor owns the <50% pause / 100% resume).
+        aiPlanSetVariableFloat(planID, cExplorePlanStopLOSPercentage, 0, 0.8);
+     }
+
+     // Active engine-knob audit:
+     //   DoLoops=false for all scouts (area list refilled by the mod).
+     //   StopLOSPercentage=0.8 for Oracles only.
+     //   AvoidingAttackedAreas is NOT set; danger is handled by the heat-map
+     //   area-list filter in auto_scout.xs.
+
+     autoScout_register(planID, unitID); // Intelligent Auto-Scout mod (no-op for AI players)
    aiPlanSetFlag(planID, cPlanFlagNoMoreUnits, true);
    aiPlanSetFlag(planID, cPlanFlagRequiresAllNeedUnits, true);
    xsSetContextPlayer(-1);
