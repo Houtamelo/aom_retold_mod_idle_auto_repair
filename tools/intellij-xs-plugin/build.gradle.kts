@@ -95,5 +95,9 @@ tasks {
 
     test {
         dependsOn(validateBundledResources)
+        // Each fixture test class uses its own IDE sandbox; forking avoids
+        // a platform lifecycle hang when multiple BasePlatformTestCase classes
+        // run in the same JVM in this headless environment.
+        forkEvery = 1
     }
 }
