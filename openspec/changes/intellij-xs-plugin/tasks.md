@@ -184,6 +184,7 @@
 - **Can stand alone?** yes — extends 1.2; can ship together as one PR.
 
 ### 1.4 Hover documentation provider
+- [x] Completed
 - **Files touched:**
   - `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/documentation/XsDocumentationProvider.kt`
   - `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/documentation/XsHoverTest.kt`

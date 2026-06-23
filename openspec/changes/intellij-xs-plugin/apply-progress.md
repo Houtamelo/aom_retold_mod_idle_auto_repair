@@ -210,3 +210,53 @@ Target branch: `master`.
 ### Next apply batch
 
 **P1.4 — Hover documentation provider**.
+
+## P1.4 — Hover documentation
+
+**Apply batch:** P1.4 (task 1.4)  
+**Branch:** `intellij-xs-plugin/p1.4-hover-docs`  
+**Target:** `master`  
+**Completed at:** 2026-06-23
+
+### What was completed
+
+- [x] **1.4 — Hover documentation provider**: implemented `XsDocumentationProvider` implementing `com.intellij.lang.documentation.DocumentationProvider`; registered it in `plugin.xml`; renders signature, help paragraph, parameter list (with defaults), and source filename for known engine syscalls; returns `null` for unknown identifiers; substitutes `(no help available)` for blank `help` text.
+- Added `XsHoverTest` with 5 assertions covering `aiEcho`, `kbUnitCount`, unknown identifier, empty-help placeholder, and <100 ms performance for 1,000 `generateDoc` calls.
+
+### Files added/modified
+
+| File | Action | Notes |
+|---|---|---|
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/documentation/XsDocumentationProvider.kt` | Added | PSI-agnostic hover documentation provider |
+| `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/documentation/XsHoverTest.kt` | Added | 5 hover/performance test scenarios |
+| `tools/intellij-xs-plugin/src/main/resources/META-INF/plugin.xml` | Modified | Registered `lang.documentationProvider` |
+| `openspec/changes/intellij-xs-plugin/tasks.md` | Modified | Marked task 1.4 complete |
+
+### Commits
+
+- `85b3eea`: `feat(tools/intellij-xs-plugin): add XsDocumentationProvider for engine syscalls`
+- `e974617`: `test(tools/intellij-xs-plugin): cover engine syscall hover documentation`
+- `<this commit>`: `chore(openspec): record P1.4 progress`
+
+### Verification status
+
+| Check | Status | Notes |
+|---|---|---|
+| `./gradlew buildPlugin` | pass | Produces `intellij-xs-plugin-0.1.0.zip` |
+| `./gradlew test` | pass | 21 tests green (16 existing + 5 new `XsHoverTest`) |
+| `./gradlew validateBundledResources` | pass | Guard still passes |
+
+### Metrics
+
+- P1.4 plugin/test source lines added: ~166 changed Kotlin lines.
+- Total Kotlin `.kt` lines for the whole plugin: **1,130**.
+- Review budget status: `under-soft-limit`.
+
+### Deviations / findings
+
+- The vendored `syscalls.json` contains no entries with truly blank `help` text, so the empty-help placeholder test exercises the rendering path with a synthetic syscall.
+- A fixture-based `BasePlatformTestCase` implementation of `XsHoverTest` passed in isolation but hit an "Indexing timeout" during `setUp` when the full test suite ran. The test was rewritten as lightweight plain JUnit 4 tests that instantiate `LeafPsiElement`s directly; this avoids heavy fixture lifecycle overhead while still covering the provider's rendering and lookup logic.
+
+### Next apply batch
+
+**P1.5 + P1.6 — Parameter info handler + engine syscall go-to-definition stubs**.
