@@ -562,6 +562,8 @@ void autoScout_dropFromPool(int slot = -1)
    gAutoScout_unitID.removeIndex(slot);
    gAutoScout_planID.removeIndex(slot);
    gAutoScout_state.removeIndex(slot);
+   gAutoScout_planState.removeIndex(slot);
+   gAutoScout_assignmentTick.removeIndex(slot);
    gAutoScout_targetAreaID.removeIndex(slot);
    gAutoScout_targetWaypoint.removeIndex(slot);
    gAutoScout_workSteps.removeIndex(slot);
@@ -2547,13 +2549,15 @@ void autoScout_claimAndAssignAreas(int planID = -1, int unitID = -1, ref int[] a
 // R8 HIGH: Every un-park path MUST recompute and reassign the area list before
 // setting the engine plan back to cPlanStateExplore. This helper centralises
 // that ordering so no resume can reuse stale/consumed area IDs.
-void autoScout_unparkAndReassignAreas(int planID = -1, int unitID = -1)
+// Returns true when a non-empty area list was assigned, false otherwise.
+bool autoScout_unparkAndReassignAreas(int planID = -1, int unitID = -1)
 {
    int[] areas = new int(0, -1);
    autoScout_buildAreaListForUnit(unitID, areas);
    autoScout_removeExploredAreas(areas);
    autoScout_filterDangerousAreas(areas, unitID);
    autoScout_claimAndAssignAreas(planID, unitID, areas);
+   return(areas.size() > 0);
 }
 
 //------------------------------------------------------------------------------
@@ -3195,6 +3199,32 @@ bool autoScout_tickUnit(int slot = -1)
 }
 
 //------------------------------------------------------------------------------
+// Plan lifecycle helpers (engine-explore migration)
+//------------------------------------------------------------------------------
+
+void autoScout_parkPlan(int planID = -1)
+{
+   aiPlanSetState(planID, cPlanStateIdle);
+   aiEcho("autoScout: parking plan " + planID);
+}
+
+// R8 HIGH: assignments happen before reactivation so the engine never resumes
+// with a stale/consumed cExplorePlanExploreAreaIDs list.
+void autoScout_unparkPlan(int planID = -1, int unitID = -1)
+{
+   if (autoScout_unparkAndReassignAreas(planID, unitID) == true)
+   {
+      aiPlanSetState(planID, cPlanStateExplore);
+      aiEcho("autoScout: un-parking plan " + planID + " unit " + unitID);
+   }
+   else
+   {
+      aiEcho("autoScout: not un-parking plan " + planID + " unit " + unitID
+         + " (no areas to scout)");
+   }
+}
+
+//------------------------------------------------------------------------------
 // Public registration (called from human_assist.xs::enableAutoScouting)
 //------------------------------------------------------------------------------
 
@@ -3204,17 +3234,15 @@ void autoScout_register(int planID = -1, int unitID = -1)
    // AI players keep vanilla cPlanExplore behaviour -- don't hijack the plan.
    if (kbPlayerIsHuman(cMyID) == false) { return; }
 
-   // Park the cPlanExplore in cPlanStateIdle (23, from docs/MythTRConstants.txt).
-   // Verified empirically (2026-05-13) that the engine respects this state and
-   // does NOT drive the unit while leaving the plan alive as the UI marker.
-   // Applies to BOTH oracles and regular scouts so the state machine has full
-   // control without per-tick override. The cPlanStateIdle is not Done/Failed,
-   // so the plan is not auto-destroyed.
-   aiPlanSetState(planID, cAutoScout_PlanStateIdle);
-
    gAutoScout_unitID.add(unitID);
    gAutoScout_planID.add(planID);
+   // The unit-behavior enum (cAutoScoutState_*) is kept separate from the
+   // engine-plan lifecycle mode stored in gAutoScout_planState[].
    gAutoScout_state.add(cAutoScoutState_Idle);
+   // Registration leaves the engine plan active so it consumes the area list
+   // we write below. cPlanStateIdle is only used by parkPlan/unparkPlan.
+   gAutoScout_planState.add(cAutoScout_PlanStateActive);
+   gAutoScout_assignmentTick.add(0);
    gAutoScout_targetAreaID.add(-1);
    gAutoScout_targetWaypoint.add(cInvalidVector);
    gAutoScout_workSteps.add(0);
@@ -3230,12 +3258,12 @@ void autoScout_register(int planID = -1, int unitID = -1)
       gAutoScout_corridorAreas.add(-1);
    }
 
-   // Immediate first-tick: BFS + initial move now, instead of waiting up to
-   // a full rule interval. Without this, the scout starts moving in whatever
-   // direction the engine plan briefly chose before NumberOfLoops=0 kicked in.
    autoScout_initAreaArrays();
    int slot = gAutoScout_unitID.size() - 1;
-   autoScout_tickUnit(slot);
+   // Seed the engine plan with a fresh area list and activate it immediately.
+   autoScout_unparkPlan(planID, unitID);
+   aiEcho("autoScout: registered slot=" + slot + " unit=" + unitID
+      + " plan=" + planID + " mode=active");
 }
 
 //------------------------------------------------------------------------------
