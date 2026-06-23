@@ -60,3 +60,32 @@ class XsEngineNavigationTest : BasePlatformTestCase() {
         )
     }
 }
+
+/**
+ * Closes verify-report gap: the generated engine stub's virtual file name
+ * clearly identifies it as a generated documentation view.
+ */
+class XsEngineStubNameTest : BasePlatformTestCase() {
+
+    override fun getTestDataPath(): String = "src/test/testData"
+
+    fun testEngineStubHasDescriptiveName() {
+        myFixture.configureByText(XsFileType.INSTANCE, "void test() { aiE<caret>cho(\"hi\"); }")
+        val reference = myFixture.file.findReferenceAt(myFixture.caretOffset)
+            ?: error("Expected a reference on aiEcho")
+        val target = reference.resolve()
+            ?: error("Expected aiEcho to resolve to a generated stub")
+
+        val file = target.containingFile
+        assertTrue(
+            "Stub file should be a LightVirtualFile",
+            file.virtualFile is LightVirtualFile
+        )
+
+        val name = file.virtualFile.name
+        assertTrue(
+            "Stub filename should mark it as generated (got '$name')",
+            name.contains("[XS Engine Stub]")
+        )
+    }
+}

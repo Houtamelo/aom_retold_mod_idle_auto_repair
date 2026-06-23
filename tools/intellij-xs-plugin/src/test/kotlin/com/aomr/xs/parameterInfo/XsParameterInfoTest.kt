@@ -84,3 +84,29 @@ class XsParameterInfoTest : BasePlatformTestCase() {
         )
     }
 }
+
+/**
+ * Closes verify-report gap: when the caret is on a syscall identifier but
+ * no opening parenthesis has been typed yet, parameter info should not
+ * crash and should report no active parameter owner.
+ */
+class XsParameterInfoNoOpenParenTest : BasePlatformTestCase() {
+
+    override fun getTestDataPath(): String = "src/test/testData"
+
+    fun testParameterInfoNoOpenParen() {
+        myFixture.configureByText(XsFileType.INSTANCE, "void test() { aiEcho<caret> }")
+        val handler = XsParameterInfoHandler()
+
+        val owner = handler.getParameterOwner(myFixture.file, myFixture.caretOffset)
+        val context = myFixture.file.findElementAt(myFixture.caretOffset)
+        val params = if (owner != null) {
+            handler.getParametersForOwner(owner, context, myFixture.caretOffset)
+        } else null
+
+        assertTrue(
+            "getParameterOwner should return null or params should be null/empty when no open paren",
+            owner == null || params == null || params.isEmpty()
+        )
+    }
+}

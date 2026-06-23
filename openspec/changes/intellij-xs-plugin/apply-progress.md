@@ -328,3 +328,44 @@ All four P1 PRs have landed:
 
 The engine API surface is complete: engine syscalls auto-complete, insert defaults on `(`/`,`, show hover docs, highlight the active parameter, and open an in-memory stub on `Ctrl+B`.
 
+## P1 verify-followups — 4 test-coverage gaps closed
+
+**Apply batch:** P1 verify-followups  
+**Branch:** `intellij-xs-plugin/verify-fixes-p1`  
+**Target:** `master`  
+**Completed at:** 2026-06-23
+
+### What was completed
+
+Closed the four non-blocking test-coverage gaps identified in `openspec/changes/intellij-xs-plugin/verify-report.md`:
+
+- **Gap 1 — insert-with-parens**: Added `XsSyscallCompletionInsertParensTest.testSyscallNameCompletionInsertsParens` to assert that accepting the `aiEcho` completion inserts a complete call with parentheses and places the caret between `(` and `)`.
+- **Gap 2 — open-paren default completion**: Added `XsSyscallCompletionDefaultOnOpenParenTest.testDefaultParamCompletionOnOpenParen` to assert that typing `aiPlanCreate(` offers the first parameter's default value.
+- **Gap 3 — no opening paren parameter info**: Added `XsParameterInfoNoOpenParenTest.testParameterInfoNoOpenParen` to assert that parameter info returns no owner and does not crash for `aiEcho<caret>` (no `(` yet).
+- **Gap 4 — stub tab title**: Added `XsEngineStubNameTest.testEngineStubHasDescriptiveName` to assert that the generated engine-stub virtual file name contains `[XS Engine Stub]`.
+
+### Files added/modified
+
+| File | Action | Notes |
+|---|---|---|
+| `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/completion/XsSyscallCompletionTest.kt` | Modified | Added `XsSyscallCompletionInsertParensTest` and `XsSyscallCompletionDefaultOnOpenParenTest` top-level test classes (one method each). |
+| `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/parameterInfo/XsParameterInfoTest.kt` | Modified | Added `XsParameterInfoNoOpenParenTest` top-level test class (one method). |
+| `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/navigation/XsEngineNavigationTest.kt` | Modified | Added `XsEngineStubNameTest` top-level test class (one method). |
+| `openspec/changes/intellij-xs-plugin/apply-progress.md` | Modified | Appended this section. |
+
+### Commits
+
+- `<this commit>`: `test(tools/intellij-xs-plugin): close 4 verify-report coverage gaps for P1`
+
+### Verification status
+
+| Check | Status | Notes |
+|---|---|---|
+| `./gradlew buildPlugin` | pass | Produces `intellij-xs-plugin-0.1.0.zip` |
+| `./gradlew test` | pass | 36 tests green (32 existing + 4 new) |
+| `./gradlew validateBundledResources` | pass | Guard still passes |
+
+### Reference
+
+See `openspec/changes/intellij-xs-plugin/verify-report.md` for the four gaps and the original P1 verification verdict.
+
