@@ -10,6 +10,7 @@
     <idea-version since-build="242" until-build="252.*"/>
 
     <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.lang</depends>
     <depends>org.jetbrains.plugins.textmate</depends>
     <depends optional="true">com.intellij.modules.rider</depends>
 
@@ -20,5 +21,6 @@
         <lang.braceMatcher language="XS" implementationClass="com.aomr.xs.editor.XsBraceMatcher"/>
         <lang.quoteHandler language="XS" implementationClass="com.aomr.xs.editor.XsQuoteHandler"/>
         <lang.commenter language="XS" implementationClass="com.aomr.xs.editor.XsCommenter"/>
+        <completion.contributor language="XS" implementationClass="com.aomr.xs.completion.XsCompletionContributor"/>
     </extensions>
 </idea-plugin>
