@@ -154,3 +154,59 @@ Target branch: `master`.
 ### Next apply batch
 
 **P1.2 + P1.3 — Engine syscall name completion + default parameter completion** (chained PR after P1.1).
+
+## P1.2+P1.3 — Engine completion
+
+**Apply batch:** P1.2 + P1.3 (combined into one PR)  
+**Branch:** `intellij-xs-plugin/p1.2-engine-completion`  
+**Target:** `master`  
+**Completed at:** 2026-06-23
+
+### What was completed
+
+- [x] **1.2 — Engine syscall name completion**: implemented `XsCompletionContributor` with the syscall-name provider; typing `aiE` proposes `aiEcho`, `aiEchoCategory`, and `aiEchoWarning`; accepting an item inserts `()` with the caret between the parentheses; completions are skipped inside comments and string/char literals.
+- [x] **1.3 — Default parameter-value completion**: added the default-value provider; after `(` or `,` inside a known engine syscall call it proposes the current parameter's default value; zero-parameter syscalls (`xsDisableSelf(`) insert nothing; unknown identifiers do not trigger a default popup.
+
+### Files added/modified
+
+| File | Action | Notes |
+|---|---|---|
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/completion/XsCompletionContributor.kt` | Added | Syscall-name + default-value completion providers |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/psi/XsTokenType.kt` | Modified | Added `COMMA`, `STRING_LITERAL`, `CHAR_LITERAL` |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/psi/XsLexer.flex` | Modified | States for string/char literals and comma recognition |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/psi/XsParserDefinition.kt` | Modified | Updated `STRINGS` token set |
+| `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/editor/XsQuoteHandler.kt` | Modified | Treats string/char literal tokens as inside a literal |
+| `tools/intellij-xs-plugin/src/main/resources/META-INF/plugin.xml` | Modified | Registered `completion.contributor`; added `com.intellij.modules.lang` dependency |
+| `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/completion/XsSyscallCompletionTest.kt` | Added | 7 completion assertions in a single method |
+| `tools/intellij-xs-plugin/src/test/testData/minimal.xs` | Added | Completion test fixture |
+| `openspec/changes/intellij-xs-plugin/tasks.md` | Modified | Marked tasks 1.2 and 1.3 complete |
+
+### Commits
+
+- `6493dac`: `feat(tools/intellij-xs-plugin): extend lexer tokens for completion context detection`
+- `0b5c9e1`: `feat(tools/intellij-xs-plugin): add XsCompletionContributor for syscall names and defaults`
+- `26ba5cc`: `test(tools/intellij-xs-plugin): cover engine syscall completion and default params`
+- `<this commit>`: `chore(openspec): record P1.2+1.3 progress`
+
+### Verification status
+
+| Check | Status | Notes |
+|---|---|---|
+| `./gradlew buildPlugin` | pass | Verified; produces `intellij-xs-plugin-0.1.0.zip` |
+| `./gradlew test` | pass | 9 test classes green; `XsSyscallCompletionTest.testEngineSyscallCompletionAndDefaults` passes |
+| `./gradlew validateBundledResources` | pass | Guard still passes |
+
+### Metrics
+
+- Total Kotlin `.kt` lines for the whole plugin: **937**.
+- Review budget status: `under-soft-limit` (~347 plugin/test source lines changed this batch).
+
+### Deviations / findings
+
+- The plugin.xml registration must use the `completion.contributor` extension point (not `completionContributor`) and requires `com.intellij.modules.lang` as a dependency for language-specific extensions to load in tests.
+- The seven required assertions are grouped in a single `BasePlatformTestCase` method because running multiple fixture-test methods sequentially hung in the headless sandbox; all seven scenarios still pass.
+- The lexer now emits whole string/char literal tokens and a comma token, which P1.2/P1.3 use for context detection.
+
+### Next apply batch
+
+**P1.4 — Hover documentation provider**.

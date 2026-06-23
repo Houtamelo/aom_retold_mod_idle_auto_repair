@@ -154,6 +154,7 @@
 - **Can stand alone?** yes — prerequisite for P1 tasks and P4 AI-plan completion.
 
 ### 1.2 Engine syscall name completion
+- [x] Completed
 - **Files touched:**
   - `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/completion/XsCompletionContributor.kt` (syscall-name branch)
   - `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/completion/XsSyscallCompletionTest.kt`
@@ -169,6 +170,7 @@
 - **Can stand alone?** yes — depends on 1.1.
 
 ### 1.3 Default parameter-value completion on `(` / `,`
+- [x] Completed
 - **Files touched:**
   - `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/completion/XsCompletionContributor.kt` (parameter-value branch)
   - `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/completion/XsSyscallCompletionTest.kt` (additional assertions)
