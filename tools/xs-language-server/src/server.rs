@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info};
 
-use crate::{completion, diagnostics, engine_api, parser, symbols, word};
+use crate::{completion, diagnostics, engine_api, parser, references, symbols, word};
 
 /// Holds the parsed-but-not-yet-processed text of every document the client
 /// has opened. Populated by `did_open` / `did_change`, cleared by `did_close`.
@@ -94,6 +94,16 @@ impl LanguageServer for XsLanguageServer {
                 // Week 3: document symbol outline built from the per-file
                 // symbol table.
                 document_symbol_provider: Some(OneOf::Left(true)),
+                // Week 4: find all uses of an identifier in the current
+                // file (workspace-wide lands in week 5+).
+                references_provider: Some(OneOf::Left(true)),
+                // Week 4: rename an identifier across the current file,
+                // with prepare_rename enabled so the client can ask first
+                // whether the cursor is on a renameable identifier.
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 ..Default::default()
             },
             ..Default::default()
@@ -273,6 +283,149 @@ impl LanguageServer for XsLanguageServer {
             uri
         );
         Ok(Some(DocumentSymbolResponse::Nested(items)))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let Some(ident) = word::identifier_at_cursor(&text, pos.line, pos.character) else {
+            debug!("references: no identifier at {:?}", pos);
+            return Ok(None);
+        };
+
+        // Engine API has no source location — return an empty list rather
+        // than a malformed Location.
+        if self.engine.find_syscall(&ident).is_some()
+            || self.engine.find_aiplan(&ident).is_some()
+        {
+            debug!("references: `{ident}` is engine API; returning []");
+            return Ok(Some(vec![]));
+        }
+
+        let Some(tree) = parser::parse(&text) else {
+            debug!("references: parse failed for {}", uri);
+            return Ok(None);
+        };
+        let ranges = {
+            let tables = self.symbol_tables.lock().await;
+            let table = tables.get(uri);
+            let raw = references::find_identifier_uses(&tree, &text, &ident);
+            match table {
+                Some(t) => references::filter_declaration(raw, t, &ident, params.context.include_declaration),
+                None => raw,
+            }
+        };
+
+        debug!(
+            "references: `{ident}` -> {} range(s) in {}",
+            ranges.len(),
+            uri
+        );
+        Ok(Some(references::to_locations(uri, ranges)))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let new_name = &params.new_name;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let Some(ident) = word::identifier_at_cursor(&text, pos.line, pos.character) else {
+            debug!("rename: no identifier at {:?}", pos);
+            return Ok(None);
+        };
+
+        // Engine API symbols can't be renamed — no source to rewrite.
+        if self.engine.find_syscall(&ident).is_some()
+            || self.engine.find_aiplan(&ident).is_some()
+        {
+            debug!("rename: `{ident}` is engine API; refusing");
+            return Ok(None);
+        }
+
+        let Some(tree) = parser::parse(&text) else {
+            debug!("rename: parse failed for {}", uri);
+            return Ok(None);
+        };
+
+        let raw = references::find_identifier_uses(&tree, &text, &ident);
+        let ranges = {
+            let tables = self.symbol_tables.lock().await;
+            match tables.get(uri) {
+                Some(t) => references::filter_declaration(raw, t, &ident, /* include */ true),
+                None => raw,
+            }
+        };
+
+        if ranges.is_empty() {
+            return Ok(None);
+        }
+
+        let edits: Vec<TextEdit> = ranges
+            .into_iter()
+            .map(|range| TextEdit {
+                range,
+                new_text: new_name.clone(),
+            })
+            .collect();
+
+        let mut changes = HashMap::new();
+        changes.insert(uri.clone(), edits);
+        debug!(
+            "rename: `{ident}` -> `{}` ({} edit(s) in {})",
+            new_name,
+            changes.values().map(|v| v.len()).sum::<usize>(),
+            uri
+        );
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = &params.text_document.uri;
+        let pos = params.position;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let Some(ident) = word::identifier_at_cursor(&text, pos.line, pos.character) else {
+            debug!("prepare_rename: no identifier at {:?}", pos);
+            return Ok(None);
+        };
+
+        // Engine API symbols can't be renamed.
+        if self.engine.find_syscall(&ident).is_some()
+            || self.engine.find_aiplan(&ident).is_some()
+        {
+            debug!("prepare_rename: `{ident}` is engine API; refusing");
+            return Ok(None);
+        }
+
+        let Some(tree) = parser::parse(&text) else {
+            debug!("prepare_rename: parse failed for {}", uri);
+            return Ok(None);
+        };
+
+        let Some(range) = references::identifier_range_at(&tree, pos.line, pos.character) else {
+            debug!("prepare_rename: no identifier node under {:?}", pos);
+            return Ok(None);
+        };
+        Ok(Some(PrepareRenameResponse::Range(range)))
     }
 }
 

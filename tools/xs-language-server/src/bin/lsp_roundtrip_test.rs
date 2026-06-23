@@ -51,6 +51,15 @@ const HOVER_WORKSPACE: &str = r#"{"jsonrpc":"2.0","id":6,"method":"textDocument/
 const DEFINITION_WORKSPACE: &str = r#"{"jsonrpc":"2.0","id":7,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///tmp/workspace.xs"},"position":{"line":7,"character":6}}}"#;
 const HOVER_CONSTANT: &str = r#"{"jsonrpc":"2.0","id":8,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///tmp/workspace.xs"},"position":{"line":12,"character":11}}}"#;
 const DOCUMENT_SYMBOL: &str = r#"{"jsonrpc":"2.0","id":9,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"file:///tmp/workspace.xs"}}}"#;
+// Week 4: refs.xs has `helper` declared once and called twice (3 total
+// occurrences). Line 7 col 5 is on the 'l' of `helper` inside `   helper(1);`.
+const DID_OPEN_REFS: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/refs.xs","languageId":"xs","version":1,"text":"int helper(int a)\n{\n   return a;\n}\n\nvoid caller()\n{\n   helper(1);\n   helper(2);\n}\n"}}}"#;
+const REFERENCES: &str = r#"{"jsonrpc":"2.0","id":10,"method":"textDocument/references","params":{"textDocument":{"uri":"file:///tmp/refs.xs"},"position":{"line":7,"character":5},"context":{"includeDeclaration":true}}}"#;
+const RENAME: &str = r#"{"jsonrpc":"2.0","id":11,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///tmp/refs.xs"},"position":{"line":7,"character":5},"newName":"helperRenamed"}}"#;
+const PREPARE_RENAME: &str = r#"{"jsonrpc":"2.0","id":12,"method":"textDocument/prepareRename","params":{"textDocument":{"uri":"file:///tmp/refs.xs"},"position":{"line":7,"character":5}}}"#;
+// prepareRename on the engine-API symbol `aiEcho` in /tmp/test.xs (line 4
+// col 6 is on 'c'). Must return null.
+const PREPARE_RENAME_ENGINE: &str = r#"{"jsonrpc":"2.0","id":13,"method":"textDocument/prepareRename","params":{"textDocument":{"uri":"file:///tmp/test.xs"},"position":{"line":4,"character":6}}}"#;
 const SHUTDOWN: &str = r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#;
 const EXIT: &str = r#"{"jsonrpc":"2.0","method":"exit"}"#;
 
@@ -152,7 +161,7 @@ fn main() {
 
     // Write the full message sequence (including exit) so the server
     // processes everything and exits, flushing stdout.
-    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, COMPLETION_AI, HOVER_AI, DEFINITION_AI, DID_OPEN_WORKSPACE, HOVER_WORKSPACE, DEFINITION_WORKSPACE, HOVER_CONSTANT, DOCUMENT_SYMBOL, SHUTDOWN, EXIT] {
+    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, COMPLETION_AI, HOVER_AI, DEFINITION_AI, DID_OPEN_WORKSPACE, HOVER_WORKSPACE, DEFINITION_WORKSPACE, HOVER_CONSTANT, DOCUMENT_SYMBOL, DID_OPEN_REFS, REFERENCES, RENAME, PREPARE_RENAME, PREPARE_RENAME_ENGINE, SHUTDOWN, EXIT] {
         eprintln!("[test] writing {} bytes", frame(msg).len());
         stdin
             .write_all(frame(msg).as_bytes())
@@ -177,6 +186,10 @@ fn main() {
     let mut definition_workspace_resp = None;
     let mut hover_constant_resp = None;
     let mut document_symbol_resp = None;
+    let mut references_resp = None;
+    let mut rename_resp = None;
+    let mut prepare_rename_resp = None;
+    let mut prepare_rename_engine_resp = None;
 
     // Read everything from stdout, then parse.
     stdout.read_to_end(&mut all_bytes).expect("read stdout to end");
@@ -209,6 +222,14 @@ fn main() {
                         hover_constant_resp = Some(msg);
                     } else if id == 9 && document_symbol_resp.is_none() {
                         document_symbol_resp = Some(msg);
+                    } else if id == 10 && references_resp.is_none() {
+                        references_resp = Some(msg);
+                    } else if id == 11 && rename_resp.is_none() {
+                        rename_resp = Some(msg);
+                    } else if id == 12 && prepare_rename_resp.is_none() {
+                        prepare_rename_resp = Some(msg);
+                    } else if id == 13 && prepare_rename_engine_resp.is_none() {
+                        prepare_rename_engine_resp = Some(msg);
                     }
                 }
             }
@@ -218,11 +239,13 @@ fn main() {
             }
         }
     }
-    eprintln!("[test] init_resp: {}, shutdown_resp: {}, completion_resp: {}, hover_resp: {}, definition_resp: {}, hover_workspace: {}, definition_workspace: {}, hover_constant: {}, document_symbol: {}",
+    eprintln!("[test] init_resp: {}, shutdown_resp: {}, completion_resp: {}, hover_resp: {}, definition_resp: {}, hover_workspace: {}, definition_workspace: {}, hover_constant: {}, document_symbol: {}, references: {}, rename: {}, prepare_rename: {}, prepare_rename_engine: {}",
         init_resp.is_some(), shutdown_resp.is_some(), completion_resp.is_some(),
         hover_resp.is_some(), definition_resp.is_some(),
         hover_workspace_resp.is_some(), definition_workspace_resp.is_some(),
-        hover_constant_resp.is_some(), document_symbol_resp.is_some());
+        hover_constant_resp.is_some(), document_symbol_resp.is_some(),
+        references_resp.is_some(), rename_resp.is_some(),
+        prepare_rename_resp.is_some(), prepare_rename_engine_resp.is_some());
 
     let init_resp = init_resp.expect("initialize response");
     eprintln!("[test] got initialize response");
@@ -242,6 +265,14 @@ fn main() {
     eprintln!("[test] got hover constant response");
     let document_symbol_resp = document_symbol_resp.expect("document symbol response");
     eprintln!("[test] got document symbol response");
+    let references_resp = references_resp.expect("references response");
+    eprintln!("[test] got references response");
+    let rename_resp = rename_resp.expect("rename response");
+    eprintln!("[test] got rename response");
+    let prepare_rename_resp = prepare_rename_resp.expect("prepare rename response");
+    eprintln!("[test] got prepare rename response");
+    let prepare_rename_engine_resp = prepare_rename_engine_resp.expect("prepare rename engine response");
+    eprintln!("[test] got prepare rename engine response");
 
     let stderr_text = std::fs::read_to_string("/tmp/xs_lsp_server_stderr.log")
         .unwrap_or_else(|e| format!("(failed to read stderr log: {e})"));
@@ -403,6 +434,63 @@ fn main() {
     } else {
         println!("FAIL: document symbol did not return all 3 expected symbols (rule={sym_count_rule}, func={sym_count_func}, const={sym_count_const})");
         println!("  document symbol response: {}", document_symbol_resp);
+        all_pass = false;
+    }
+
+    // References: helper is declared once and called twice = 3 occurrences.
+    // The response is an array of Locations, each with a `uri` field.
+    let references_raw = references_resp.to_string();
+    let refs_uri_count = references_raw.matches("\"uri\":\"file:///tmp/refs.xs\"").count()
+        + references_raw.matches("\"uri\": \"file:///tmp/refs.xs\"").count();
+    if refs_uri_count >= 3 {
+        println!("PASS: references returned 3+ locations for helper (count={refs_uri_count})");
+    } else {
+        println!("FAIL: references did not return expected locations (count={refs_uri_count})");
+        println!("  references response: {}", references_resp);
+        all_pass = false;
+    }
+
+    // Rename: WorkspaceEdit with `changes` map containing 3 TextEdits,
+    // each replacing "helper" with "helperRenamed".
+    let rename_raw = rename_resp.to_string();
+    let rename_edits_count = rename_raw.matches("\"helperRenamed\"").count();
+    let has_changes_field = rename_raw.contains("\"changes\"");
+    if rename_edits_count >= 3 && has_changes_field {
+        println!("PASS: rename returned WorkspaceEdit with 3+ edits (count={rename_edits_count}, has_changes={has_changes_field})");
+    } else {
+        println!("FAIL: rename did not return expected WorkspaceEdit (count={rename_edits_count}, has_changes={has_changes_field})");
+        println!("  rename response: {}", rename_resp);
+        all_pass = false;
+    }
+
+    // prepareRename on a workspace symbol: should return a Range, which
+    // serializes as `{start: {...}, end: {...}}` (PrepareRenameResponse::Range
+    // is `#[serde(untagged)]`-ish — the variant tag is dropped).
+    let prepare_rename_raw = prepare_rename_resp.to_string();
+    let has_start = prepare_rename_raw.contains("\"start\"")
+        && prepare_rename_raw.contains("\"end\"")
+        && prepare_rename_raw.contains("\"line\":7");
+    let is_not_null = !prepare_rename_raw.contains("\"result\":null")
+        && !prepare_rename_raw.contains("\"result\": null");
+    if has_start && is_not_null {
+        println!("PASS: prepareRename returned Range for workspace symbol (line=7)");
+    } else {
+        println!("FAIL: prepareRename did not return Range (has_start={has_start}, is_not_null={is_not_null})");
+        println!("  prepare rename response: {}", prepare_rename_resp);
+        all_pass = false;
+    }
+
+    // prepareRename on an engine-API symbol: should return null.
+    let prepare_rename_engine_raw = prepare_rename_engine_resp.to_string();
+    let has_id_13 = prepare_rename_engine_raw.contains("\"id\":13")
+        || prepare_rename_engine_raw.contains("\"id\": 13");
+    let has_null_result = prepare_rename_engine_raw.contains("\"result\":null")
+        || prepare_rename_engine_raw.contains("\"result\": null");
+    if has_id_13 && has_null_result {
+        println!("PASS: prepareRename returned null for engine-API symbol (aiEcho)");
+    } else {
+        println!("FAIL: prepareRename did not return null for engine-API symbol (id13={has_id_13}, null={has_null_result})");
+        println!("  prepare rename engine response: {}", prepare_rename_engine_resp);
         all_pass = false;
     }
 

@@ -5,6 +5,7 @@ mod completion;
 mod diagnostics;
 mod engine_api;
 mod parser;
+mod references;
 mod server;
 mod symbols;
 mod word;
