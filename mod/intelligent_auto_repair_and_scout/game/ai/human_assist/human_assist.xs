@@ -98,16 +98,21 @@ void enableAutoScouting(int unitID = -1)
    // This function is called from the UI, the UI doesn't know our context so we must set it explicitly.
    xsSetContextPlayer(cMyID);
    debugVPS("Enabling automatic scouting for unit: " + unitID + ".");
-   int planID = aiPlanCreate("Autoscout with unit: " + unitID, cPlanExplore);
-   aiPlanAddUnitType(planID, cUnitTypeUnit, 1,1,1);
-   aiPlanAddUnit(planID, unitID);
-   if (kbUnitIsType(unitID, cUnitTypeAbstractOracle) == true)
-   {
-      aiPlanSetVariableBool(planID, cExplorePlanDoLoops, 0, false);
-      // Stand still if less or equal than 20% of our surrounding tiles are explored.
-      aiPlanSetVariableFloat(planID, cExplorePlanStopLOSPercentage, 0, 0.2);
-   }
-   autoScout_register(planID, unitID); // Intelligent Auto-Scout mod (no-op for AI players)
+    int planID = aiPlanCreate("Autoscout with unit: " + unitID, cPlanExplore);
+    aiPlanAddUnitType(planID, cUnitTypeUnit, 1,1,1);
+    aiPlanAddUnit(planID, unitID);
+
+    // Engine knobs for engine-driven area exploration:
+    // No looping for anyone; area list is consumed once and refilled by the mod.
+    aiPlanSetVariableBool(planID, cExplorePlanDoLoops, 0, false);
+
+    if (kbUnitIsType(unitID, cUnitTypeAbstractOracle) == true)
+    {
+       // Stand still if less or equal than 80% of surrounding tiles are explored
+       // (engine hint; explicit LOS monitor owns the <50% pause / 100% resume).
+       aiPlanSetVariableFloat(planID, cExplorePlanStopLOSPercentage, 0, 0.8);
+    }
+    autoScout_register(planID, unitID); // Intelligent Auto-Scout mod (no-op for AI players)
    aiPlanSetFlag(planID, cPlanFlagNoMoreUnits, true);
    aiPlanSetFlag(planID, cPlanFlagRequiresAllNeedUnits, true);
    xsSetContextPlayer(-1);

@@ -62,16 +62,6 @@ const int cAutoScout_MaxChainPerTick = 4;
 // 8 leaves comfortable headroom and keeps the flat-array math trivial.
 const int cAutoScout_MaxCorridorHops = 8;
 
-// Action-type code reported by kbUnitGetActionType when an Oracle has reached
-// its peak AutoLOS bonus and switches to the meditation/glow animation.
-// Identified empirically (2026-05-06): the unit's reported action transitioned
-// 7 -> 37 the moment its current LOS hit the cap and stayed at 37 thereafter.
-// No documented cActionType* constant in the
-// extracted doxygen / shipped XS scripts / BANG docs maps to this value, so
-// we hardcode it. If a future patch surfaces a real constant (something like
-// cActionTypeIdleStatBonusFull), replace this magic number with that.
-const int cAutoScout_OracleSaturatedActionType = 37;
-
 // Plan-state integer for cPlanStateIdle (from docs/MythTRConstants.txt:3166).
 // Setting this on a cPlanExplore parks the plan while keeping it alive as a UI
 // marker. The visible state for an active cPlanExplore is cPlanStateExplore
@@ -90,11 +80,10 @@ const int cAutoScout_PlanStatePausedOracle = 3;
 // scout that is already active. Un-park transitions always recompute immediately.
 const int cAutoScout_AssignmentInterval = 5;
 
-// Cold-start value for the dynamic gAutoScout_maxOracleLOS cache. Used until
-// any oracle is observed in the saturated action state (action ==
-// cAutoScout_OracleSaturatedActionType) with a higher current LOS. 20.0 is
-// a plausible default below the regular Oracle cap of 25 (so the cache will
-// climb on first observed saturation) and above any oracle's base LOS.
+// Cold-start value for the legacy gAutoScout_maxOracleLOS scalar used by
+// the BFS score function for oracle-on-oracle soft penalties. The new LOS
+// monitor uses the per-proto cache gAutoScout_oracleMaxLOS[]. 20.0 is a
+// plausible default below the regular Oracle cap of 25.
 const float cAutoScout_OracleColdCacheMaxLOS = 20.0;
 
 // Oracle-on-oracle soft penalty (2026-05-14). Replaces the previous
@@ -364,12 +353,10 @@ extern int gAutoScout_typeConvertsHerds = -1;
 // proto and other variants.
 extern int gAutoScout_typeAbstractTC = -1;
 
-// Dynamic cache: highest currentLOS ever observed on any of our oracles while
-// in the saturated action state (action == cAutoScout_OracleSaturatedActionType).
-// Cold-started to cAutoScout_OracleColdCacheMaxLOS; climbs only on confirmed
-// saturation events (never decreases). Used as the denominator for the 50%
-// movement floor and as the claim radius for the oracle-overlap heuristic
-// checks. Keyed at the player level (techs that bump the cap apply equally).
+// Legacy oracle max-LOS scalar used by the BFS score function for
+// oracle-on-oracle soft penalties. Cold-started to
+// cAutoScout_OracleColdCacheMaxLOS and no longer updated since the action-37
+// state machine was removed; it remains as a tuning baseline only.
 extern float gAutoScout_maxOracleLOS = cAutoScout_OracleColdCacheMaxLOS;
 
 // Cached query handle for "all of cMyID's alive AbstractOracle units". Used
@@ -1670,23 +1657,6 @@ void autoScout_initOracleQuery()
    kbUnitQuerySetState(gAutoScout_oracleQuery, cUnitStateAlive);
 }
 
-// Updates gAutoScout_maxOracleLOS only if the given oracle is currently
-// saturated AND its current LOS exceeds the cached value. Saturation gating
-// prevents mid-growth readings from polluting the cache.
-void autoScout_updateMaxOracleLOS(int unitID = -1)
-{
-   if (unitID < 0) { return; }
-   if (kbUnitGetActionType(unitID) != cAutoScout_OracleSaturatedActionType) { return; }
-   float current = kbUnitGetStatFloat(unitID, cUnitStatLOS);
-   if (current > gAutoScout_maxOracleLOS)
-   {
-      float prev = gAutoScout_maxOracleLOS;
-      gAutoScout_maxOracleLOS = current;
-      aiEcho("autoScout: maxOracleLOS cache " + prev + " -> " + current
-         + " (from oracle " + unitID + ")");
-   }
-}
-
 // Returns the pool slot for unitID, or -1 if the unit isn't in the pool.
 // Used by the oracle overlap predicates so they can also consider each
 // pool-tracked oracle's currently-set target waypoint, not just its
@@ -2484,11 +2454,11 @@ bool autoScout_arrived(int unitID = -1, vector target = cInvalidVector, int tick
    return(false);
 }
 
-// Shared Diverting-state handler. Called from both autoScout_tickUnit (regular
-// scouts) and autoScout_tickOracleUnit (oracles). Identical semantics: re-target
-// the herd every tick (herds wander), complete on herd-invalid OR herd-flipped-
-// to-us OR arrived OR stuck-timeout. On completion, releases area claim, sets
-// Idle, clears targetHerdID. Returns true if the state transitioned.
+// Shared Diverting-state handler. Called from autoScout_tickUnit. Identical
+// semantics: re-target the herd every tick (herds wander), complete on
+// herd-invalid OR herd-flipped-to-us OR arrived OR stuck-timeout. On completion,
+// releases area claim, sets Idle, clears targetHerdID. Returns true if the state
+// transitioned.
 bool autoScout_tickDivertingState(int slot = -1, int unitID = -1)
 {
    if (slot < 0 || unitID < 0) { return(false); }
@@ -2523,15 +2493,6 @@ bool autoScout_tickDivertingState(int slot = -1, int unitID = -1)
    return(false);
 }
 
-// Oracle-specific tick handler. State machine:
-//   Idle -> Walking (issue move to chosen area centroid)
-//   Walking -> Stationed (on arrival OR currentLOS/MaxOracleLOS < 0.5)
-//   Stationed -> Idle (on saturation: action == cAutoScout_OracleSaturatedActionType)
-//   Diverting -> handled by shared autoScout_tickDivertingState
-// tryDivert is called before any other state transition so herd claims always
-// preempt -- including suspending the 50% LOS floor.
-//
-// Returns true on a state transition this tick (caller may re-tick).
 // Returns true if this tick caused a state transition (caller may want to
 // re-tick the scout in the same rule firing to avoid wasting a frame in
 // the new state).
@@ -2639,6 +2600,40 @@ void autoScout_unparkPlan(int planID = -1, int unitID = -1)
       aiEcho("autoScout: not un-parking plan " + planID + " unit " + unitID
          + " (no areas to scout)");
    }
+}
+
+//------------------------------------------------------------------------------
+// Oracle LOS monitor helpers (engine-explore migration)
+//------------------------------------------------------------------------------
+
+float autoScout_getOracleMaxLOS(int unitID = -1)
+{
+   int proto = kbUnitGetProtoUnitID(unitID);
+   while (gAutoScout_oracleMaxLOS.size() <= proto)
+   {
+      gAutoScout_oracleMaxLOS.add(0.0);
+   }
+   if (gAutoScout_oracleMaxLOS[proto] <= 0.0)
+   {
+      float base = kbPlayerGetProtoStatInt(cMyID, proto, cProtoStatLOS);
+      if (base <= 0.0) { base = 30.0; }
+      gAutoScout_oracleMaxLOS[proto] = base;
+   }
+   return(gAutoScout_oracleMaxLOS[proto]);
+}
+
+void autoScout_oracleParkAndStop(int planID = -1, int unitID = -1)
+{
+   aiEcho("autoScout: parking oracle unit " + unitID);
+   autoScout_parkPlan(planID);
+   aiTaskStopUnit(unitID);
+}
+
+// R8 HIGH: resume ALWAYS reassigns the area list before reactivating the plan.
+void autoScout_oracleResume(int planID = -1, int unitID = -1)
+{
+   aiEcho("autoScout: resuming oracle unit " + unitID);
+   autoScout_unparkPlan(planID, unitID);
 }
 
 //------------------------------------------------------------------------------
@@ -2810,6 +2805,51 @@ active
          {
             gAutoScout_assignmentTick[slot] = tickCount;
          }
+      }
+   }
+   xsSetContextPlayer(-1);
+}
+
+//------------------------------------------------------------------------------
+// Oracle LOS monitor (engine-explore migration)
+//------------------------------------------------------------------------------
+
+rule autoScout_tickOracleLOS
+minInterval 1
+active
+{
+   xsSetContextPlayer(cMyID);
+   int slotCount = gAutoScout_unitID.size();
+   for (int slot = 0; slot < slotCount; slot = slot + 1)
+   {
+      int unitID = gAutoScout_unitID[slot];
+      int planID = gAutoScout_planID[slot];
+      if (kbUnitGetIsIDValid(unitID) == false) { continue; }
+      if (kbUnitIsType(unitID, cUnitTypeAbstractOracle) == false) { continue; }
+
+      // Herd divert takes precedence over the LOS monitor.
+      if (gAutoScout_planState[slot] == cAutoScout_PlanStateParkedDivert
+          || gAutoScout_state[slot] == cAutoScoutState_Diverting)
+      {
+         continue;
+      }
+
+      float currentLOS = kbUnitGetStatFloat(unitID, cUnitStatLOS);
+      float maxLOS     = autoScout_getOracleMaxLOS(unitID);
+      if (maxLOS <= 0.0) { continue; }
+      float ratio = currentLOS / maxLOS;
+
+      if (ratio < 0.5 && gAutoScout_planState[slot] == cAutoScout_PlanStateActive)
+      {
+         aiEcho("autoScout: parking oracle unit " + unitID + " ratio " + ratio);
+         autoScout_oracleParkAndStop(planID, unitID);
+         gAutoScout_planState[slot] = cAutoScout_PlanStatePausedOracle;
+      }
+      else if (ratio >= 1.0 && gAutoScout_planState[slot] == cAutoScout_PlanStatePausedOracle)
+      {
+         aiEcho("autoScout: resuming oracle unit " + unitID + " ratio " + ratio);
+         autoScout_oracleResume(planID, unitID);
+         gAutoScout_planState[slot] = cAutoScout_PlanStateActive;
       }
    }
    xsSetContextPlayer(-1);
