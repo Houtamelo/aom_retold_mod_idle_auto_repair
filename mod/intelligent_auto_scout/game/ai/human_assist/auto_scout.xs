@@ -194,26 +194,6 @@ const float cAutoScout_FleeWeightNearScout  = 0.075;
 // that area's density subscore.
 const float cAutoScout_DensityRadius = 30.0;
 
-// Frontier-walk parameters (in-area exploration during WORKING state).
-// Cap on number of frontier waypoints walked before giving up on the area;
-// safety net against oscillation in pathological shapes.
-const int cAutoScout_MaxFrontierSteps = 15;
-// Sample radii (multiples of LOS), inside-out. The first radius is just
-// outside scout's current LOS so the candidate is provably unscouted.
-const int cAutoScout_FrontierRadii   = 5;
-const int cAutoScout_FrontierAngles  = 8;
-
-// Frontier candidates within this many tiles of ANY previously-visited
-// waypoint in the current WORKING session are rejected. Defeats the
-// deterministic A->B->A oscillation that the angle-sweep sampling otherwise
-// produces in elongated / awkwardly-shaped areas, where each of two positions
-// happens to be the other's first-qualifying frontier candidate.
-// 4.0 is comfortably larger than the arrival threshold (1.5) so "essentially
-// the same spot" is filtered, and comfortably smaller than the inter-angle
-// chord length at the smallest sampling radius (~0.76 * (LOS+2) >= 15 tiles
-// for typical scout LOS), so legitimate adjacent angular samples still pass.
-const float cAutoScout_VisitedRevisitDistance = 4.0;
-
 //------------------------------------------------------------------------------
 // Globals
 //------------------------------------------------------------------------------
@@ -223,27 +203,11 @@ extern int[]    gAutoScout_planID         = default;
 extern int[]    gAutoScout_state          = default;
 extern int[]    gAutoScout_targetAreaID   = default;
 extern vector[] gAutoScout_targetWaypoint = default;
-// gAutoScout_workSteps: in WORKING state, counts frontier steps taken so far
-// (capped by cAutoScout_MaxFrontierSteps). Reset to 0 on entering WORKING.
-extern int[]    gAutoScout_workSteps      = default;
 extern int[]    gAutoScout_stuckTicks     = default;
 
-// Per-scout safe-corridor state. The Walking-state next-area BFS reconstructs
-// its predecessor chain into this flat array so the engine pathfinder is
-// forced through a sequence of BFS-validated safe areas (rather than letting
-// it cut corners through a heat zone on the way to a far target). Layout:
-// gAutoScout_corridorAreas[slot * MaxCorridorHops + i] is the i-th area in
-// the corridor for that slot, where i = 0 is the scout's start area and
-// i = len-1 is the chosen target. gAutoScout_corridorLen[slot] is the total
-// number of valid entries (1..MaxCorridorHops). Reset to len = 1 (just the
-// start area, no extra hops) by setStateIdle and friends.
-extern int[] gAutoScout_corridorAreas = default;
-extern int[] gAutoScout_corridorLen   = default;
-
-// Transient buffer filled by autoScout_findNextArea after a successful pick:
-// ordered area IDs from the scout's start area (index 0) to the chosen target
-// (index Len-1), reconstructed from the BFS predecessor chain. Read once by
-// the caller (Idle-state handler) and copied into per-slot corridor state.
+// Transient BFS result buffer. autoScout_findNextArea fills this with the
+// ordered chain of area IDs from the scout's start area (index 0) to the
+// chosen target (index Len-1), reconstructed from the BFS predecessor table.
 extern int[] gAutoScout_bfsResultPath = default;
 extern int   gAutoScout_bfsResultLen  = 0;
 // Per-call BFS predecessor table. Index = area ID, value = predecessor area
@@ -375,16 +339,6 @@ extern float gAutoScout_diag_rejDng1       = 0.0;
 extern int   gAutoScout_diag_rejID2        = -1;
 extern float gAutoScout_diag_rejDng2       = 0.0;
 
-// Visited-waypoint memory for the frontier-walk algorithm. Two parallel flat
-// arrays keyed by unitID (not by slot, so removeIndex-driven slot shifts don't
-// invalidate the bookkeeping). Each entry records a waypoint the scout has
-// already been issued to walk to during the current WORKING session. Cleared
-// on every IDLE transition (including pool eviction). Read by
-// autoScout_findFrontierWaypoint to reject candidates near any recorded
-// waypoint, breaking the no-history oscillation loop.
-extern vector[] gAutoScout_workVisitedPos  = default;
-extern int[]    gAutoScout_workVisitedUnit = default;
-
 // Per-herd, append-only, never unmarked. Any herd ever selected by any scout for divert.
 // Filters subsequent divert candidates so each herd is attempted at most once globally.
 extern int[] gAutoScout_attemptedHerdIDs = default;
@@ -448,54 +402,6 @@ float floatClamp(float value = 0.0, float lo = 0.0, float hi = 1.0) {
 }
 
 //------------------------------------------------------------------------------
-// Visited-waypoint memory (used by frontier-walk to break A<->B oscillation).
-// Defined here -- ahead of pool management -- because autoScout_dropFromPool
-// and autoScout_setStateIdle both call autoScout_clearVisited, and XS resolves
-// function references at parse time (no forward refs).
-//
-// Storage is flat parallel arrays keyed by unitID rather than by slot, so
-// removeIndex-driven slot shifts in autoScout_dropFromPool don't invalidate
-// the bookkeeping.
-//------------------------------------------------------------------------------
-
-bool autoScout_hasVisitedNear(int unitID = -1, vector pos = cInvalidVector)
-{
-   if (unitID < 0) { return(false); }
-   int n = gAutoScout_workVisitedUnit.size();
-   for (int i = 0; i < n; i = i + 1)
-   {
-      if (gAutoScout_workVisitedUnit[i] != unitID) { continue; }
-      if (xsVectorDistanceXZ(gAutoScout_workVisitedPos[i], pos) < cAutoScout_VisitedRevisitDistance)
-      {
-         return(true);
-      }
-   }
-   return(false);
-}
-
-void autoScout_recordVisited(int unitID = -1, vector pos = cInvalidVector)
-{
-   if (unitID < 0) { return; }
-   gAutoScout_workVisitedPos.add(pos);
-   gAutoScout_workVisitedUnit.add(unitID);
-}
-
-// Drops every entry whose unit matches unitID. Backward iteration so
-// in-place removeIndex doesn't skip elements.
-void autoScout_clearVisited(int unitID = -1)
-{
-   if (unitID < 0) { return; }
-   for (int i = gAutoScout_workVisitedUnit.size() - 1; i >= 0; i = i - 1)
-   {
-      if (gAutoScout_workVisitedUnit[i] == unitID)
-      {
-         gAutoScout_workVisitedUnit.removeIndex(i);
-         gAutoScout_workVisitedPos.removeIndex(i);
-      }
-   }
-}
-
-//------------------------------------------------------------------------------
 // Pool management
 //------------------------------------------------------------------------------
 
@@ -531,7 +437,6 @@ void autoScout_dropFromPool(int slot = -1)
       int droppedState = gAutoScout_state[slot];
       aiEcho("autoScout: dropFromPool slot=" + slot + " unit=" + droppedUnit
          + " state=" + droppedState);
-      autoScout_clearVisited(droppedUnit);
 
       // Death detection: if the unit ID is no longer valid AT THE MOMENT WE
       // DROP, the scout was killed (vs. player-cancelled, in which case the
@@ -566,25 +471,12 @@ void autoScout_dropFromPool(int slot = -1)
    gAutoScout_assignmentTick.removeIndex(slot);
    gAutoScout_targetAreaID.removeIndex(slot);
    gAutoScout_targetWaypoint.removeIndex(slot);
-   gAutoScout_workSteps.removeIndex(slot);
    gAutoScout_stuckTicks.removeIndex(slot);
    gAutoScout_targetHerdID.removeIndex(slot);
    gAutoScout_fleeUntilMs.removeIndex(slot);
    gAutoScout_fleeFromArea.removeIndex(slot);
    gAutoScout_lastHP.removeIndex(slot);
    gAutoScout_lastPos.removeIndex(slot);
-   gAutoScout_corridorLen.removeIndex(slot);
-   // Remove this slot's MaxCorridorHops entries from the flat areas array.
-   // Each removeIndex call shifts subsequent entries left by 1, so calling it
-   // MAX times at the same starting offset pops exactly the slot's block.
-   int corridorOffset = slot * cAutoScout_MaxCorridorHops;
-   for (int j = 0; j < cAutoScout_MaxCorridorHops; j = j + 1)
-   {
-      if (corridorOffset < gAutoScout_corridorAreas.size())
-      {
-         gAutoScout_corridorAreas.removeIndex(corridorOffset);
-      }
-   }
 }
 
 //------------------------------------------------------------------------------
@@ -2561,145 +2453,14 @@ bool autoScout_unparkAndReassignAreas(int planID = -1, int unitID = -1)
 }
 
 //------------------------------------------------------------------------------
-// Frontier-walk: in-area exploration during WORKING state
-//------------------------------------------------------------------------------
-
-// Sample candidate waypoints around the scout's current position at
-// progressively-larger radii (LOS+2, 1.5*LOS, 2*LOS, 2.5*LOS, 3*LOS), 8
-// angular positions per radius. For each candidate, accept the first that:
-//   - is in the target area (kbAreaGetIDByPosition match)
-//   - is reachable from scout via kbCanPath
-// Returned candidate is by construction outside scout's current LOS (each
-// radius >= LOS + 2), so walking there reveals new tiles. Returns
-// cInvalidVector if no candidate qualifies (area's reachable extent is
-// fully within scout's current LOS -> coverage done).
-//
-// Sampling is centered on the SCOUT's position, not the area centroid,
-// because the scout's actual position may differ from the centroid for
-// non-convex areas (the engine pathfinder may have stopped short). This
-// makes the sampling responsive to where the scout actually is, naturally
-// expanding outward as the scout walks.
-vector autoScout_findFrontierWaypoint(int scoutUnitID = -1, int areaID = -1, float los = 18.0)
-{
-   if (scoutUnitID < 0 || areaID < 0 || los < 1.0) { return(cInvalidVector); }
-   vector scoutPos = kbUnitGetPosition(scoutUnitID);
-   int unitProto = kbUnitGetProtoUnitID(scoutUnitID);
-
-   for (int r = 0; r < cAutoScout_FrontierRadii; r = r + 1)
-   {
-      float radius = los + 2.0;
-      if (r == 1) { radius = 1.5 * los; }
-      if (r == 2) { radius = 2.0 * los; }
-      if (r == 3) { radius = 2.5 * los; }
-      if (r == 4) { radius = 3.0 * los; }
-
-      for (int a = 0; a < cAutoScout_FrontierAngles; a = a + 1)
-      {
-         float angle = 2.0 * 3.14159265 * xsIntToFloat(a) / xsIntToFloat(cAutoScout_FrontierAngles);
-         float dx = cos(angle) * radius;
-         float dz = sin(angle) * radius;
-         vector raw = xsVectorCreate(scoutPos.x + dx, scoutPos.y, scoutPos.z + dz);
-         vector cand = autoScout_clampToMap(raw);
-
-         int candArea = kbAreaGetIDByPosition(cand);
-         if (candArea != areaID) { continue; }
-
-         if (kbCanPath(scoutPos, cand, unitProto, 1.0, -1) == false) { continue; }
-
-         // Skip candidates close to any waypoint we've already walked to in
-         // this WORKING session -- breaks the deterministic A<->B oscillation.
-         if (autoScout_hasVisitedNear(scoutUnitID, cand) == true) { continue; }
-
-         return(cand);
-      }
-   }
-   return(cInvalidVector);
-}
-
-//------------------------------------------------------------------------------
 // State machine per scout
 //------------------------------------------------------------------------------
 
 void autoScout_setStateIdle(int slot = -1)
 {
-   if (slot >= 0 && slot < gAutoScout_unitID.size())
-   {
-      autoScout_clearVisited(gAutoScout_unitID[slot]);
-   }
    gAutoScout_state[slot] = cAutoScoutState_Idle;
    gAutoScout_targetWaypoint[slot] = cInvalidVector;
-   gAutoScout_workSteps[slot] = 0;
    gAutoScout_stuckTicks[slot] = 0;
-   gAutoScout_corridorLen[slot] = 0;
-}
-
-// Copies the just-computed BFS corridor (gAutoScout_bfsResultPath) into this
-// slot's flat-array slice, then issues the aiTaskMoveUnit chain. Index 0 of
-// the chain is the scout's current area (we're already there, no move
-// needed); the first move issued is the first hop AWAY from the start area
-// and uses queue=false to clear any pending engine queue and start moving
-// immediately. Subsequent hops append to the engine queue with queue=true so
-// the unit transitions through them seamlessly -- this is what forces the
-// engine pathfinder to stay inside the BFS-validated safe corridor instead
-// of cutting corners through a heat zone toward the final centroid.
-//
-// Degenerate corridors (len == 1, i.e. the scout's start area was itself the
-// chosen target) issue a single move to the start area's center so the unit
-// is tasked; the engine no-ops if already there.
-void autoScout_issueCorridor(int slot = -1, int unitID = -1)
-{
-   if (slot < 0 || unitID < 0) { return; }
-   int len = gAutoScout_bfsResultLen;
-   if (len <= 0) { gAutoScout_corridorLen[slot] = 0; return; }
-   if (len > cAutoScout_MaxCorridorHops) { len = cAutoScout_MaxCorridorHops; }
-
-   int baseIdx = slot * cAutoScout_MaxCorridorHops;
-   for (int i = 0; i < len; i = i + 1)
-   {
-      gAutoScout_corridorAreas[baseIdx + i] = gAutoScout_bfsResultPath[i];
-   }
-   gAutoScout_corridorLen[slot] = len;
-
-   if (len == 1)
-   {
-      vector startCenter = kbAreaGetCenter(gAutoScout_corridorAreas[baseIdx]);
-      aiTaskMoveUnit(unitID, startCenter, false, false);
-      return;
-   }
-
-   bool first = true;
-   for (int j = 1; j < len; j = j + 1)
-   {
-      int hopArea = gAutoScout_corridorAreas[baseIdx + j];
-      vector hopCenter = kbAreaGetCenter(hopArea);
-      bool queueFlag = false;
-      if (first == false) { queueFlag = true; }
-      aiTaskMoveUnit(unitID, hopCenter, false, queueFlag);
-      first = false;
-   }
-}
-
-// Walk the slot's corridor hops (excluding the start area at index 0 and the
-// final target area at index len-1, which are checked separately by the
-// existing currentArea / targetArea per-tick gates). Return the first hop
-// area that is now dangerous, or -1 if none. Used so a freshly-discovered
-// heat zone on a mid-corridor hop triggers a flee BEFORE the scout walks
-// into it, instead of waiting for currentArea to update on arrival.
-int autoScout_corridorFirstDangerousHop(int slot = -1)
-{
-   if (slot < 0) { return(-1); }
-   int len = gAutoScout_corridorLen[slot];
-   if (len < 3) { return(-1); }  // no intermediates (len<=2: just start + maybe target)
-   int baseIdx = slot * cAutoScout_MaxCorridorHops;
-   for (int i = 1; i < len - 1; i = i + 1)
-   {
-      int hopArea = gAutoScout_corridorAreas[baseIdx + i];
-      if (hopArea >= 0 && autoScout_areaIsDangerous(hopArea) == true)
-      {
-         return(hopArea);
-      }
-   }
-   return(-1);
 }
 
 // Arrived = scout is right at the waypoint (within cAutoScout_ArrivalDistance,
@@ -2771,171 +2532,13 @@ bool autoScout_tickDivertingState(int slot = -1, int unitID = -1)
 // preempt -- including suspending the 50% LOS floor.
 //
 // Returns true on a state transition this tick (caller may re-tick).
-bool autoScout_tickOracleUnit(int slot = -1)
-{
-   int unitID = gAutoScout_unitID[slot];
-   int planID = gAutoScout_planID[slot];
-
-   if (kbUnitGetIsIDValid(unitID) == false ||
-       kbUnitGetPlayerID(unitID) != cMyID ||
-       aiPlanGetIsIDValid(planID) == false)
-   {
-      autoScout_dropFromPool(slot);
-      return(true);
-   }
-
-   autoScout_trackHPAndPos(slot, unitID);
-
-   // Opportunistic cache update -- harmless if not saturated (the helper is
-   // gated). Done every tick so we capture the saturation moment regardless
-   // of which state branch we hit.
-   autoScout_updateMaxOracleLOS(unitID);
-
-   // Danger check: same logic as regular tickUnit. Applies to all non-Idle
-   // non-Fleeing oracle states (Walking / Stationed / Diverting).
-   int preState = gAutoScout_state[slot];
-   if (preState != cAutoScoutState_Idle && preState != cAutoScoutState_Fleeing)
-   {
-      vector unitPos = kbUnitGetPosition(unitID);
-      int currentArea = -1;
-      if (autoScout_isOnMap(unitPos) == true)
-      {
-         currentArea = kbAreaGetIDByPosition(unitPos);
-      }
-      int targetArea = gAutoScout_targetAreaID[slot];
-
-      if (currentArea >= 0 && autoScout_areaIsDangerous(currentArea) == true)
-      {
-         autoScout_blacklistArea(currentArea);
-         autoScout_enterFleeing(slot, unitID, currentArea);
-         return(true);
-      }
-      if (targetArea >= 0 && targetArea != currentArea
-          && autoScout_areaIsDangerous(targetArea) == true)
-      {
-         autoScout_blacklistArea(targetArea);
-         autoScout_enterFleeing(slot, unitID, targetArea);
-         return(true);
-      }
-      int dangerHop = autoScout_corridorFirstDangerousHop(slot);
-      if (dangerHop >= 0)
-      {
-         autoScout_blacklistArea(dangerHop);
-         autoScout_enterFleeing(slot, unitID, dangerHop);
-         return(true);
-      }
-   }
-
-   float los = kbUnitGetStatFloat(unitID, cUnitStatLOS);
-   int   state = gAutoScout_state[slot];
-
-   // Diverting: shared logic. No tryDivert call here since we are already
-   // committed to a herd target.
-   if (state == cAutoScoutState_Diverting)
-   {
-      return(autoScout_tickDivertingState(slot, unitID));
-   }
-
-   // tryDivert outranks all other state transitions (incl. the 50% LOS floor).
-   if (autoScout_tryDivert(slot, unitID, los) == true) { return(true); }
-
-   if (state == cAutoScoutState_Idle)
-   {
-      int nextArea = autoScout_findNextArea(unitID);
-      if (nextArea < 0)
-      {
-         // No candidate area. Drop from pool and let engine plan housekeeping
-         // revert the UI button (same as regular scouts when BFS is exhausted).
-         aiTaskStopUnit(unitID);
-         aiPlanDestroy(planID);
-         autoScout_dropFromPool(slot);
-         return(true);
-      }
-      gAutoScout_areaClaim[nextArea] = unitID;
-      gAutoScout_targetAreaID[slot] = nextArea;
-      gAutoScout_targetWaypoint[slot] = kbAreaGetCenter(nextArea);
-      gAutoScout_state[slot] = cAutoScoutState_Walking;
-      gAutoScout_stuckTicks[slot] = 0;
-      aiEcho("autoScout: oracle " + unitID + " picked area " + nextArea
-         + " centroid=" + gAutoScout_targetWaypoint[slot]
-         + " corridorLen=" + gAutoScout_bfsResultLen
-         + " (maxLOS=" + gAutoScout_maxOracleLOS + ")");
-      autoScout_issueCorridor(slot, unitID);
-      return(true);
-   }
-
-   if (state == cAutoScoutState_Walking)
-   {
-      vector waypoint = gAutoScout_targetWaypoint[slot];
-      int areaID = gAutoScout_targetAreaID[slot];
-
-      if (autoScout_arrived(unitID, waypoint, gAutoScout_stuckTicks[slot]) == true)
-      {
-         if (areaID >= 0 && areaID < gAutoScout_areaSelfScouted.size())
-         {
-            gAutoScout_areaSelfScouted[areaID] = 1;
-         }
-         aiEcho("autoScout: oracle " + unitID + " arrived; parking (los=" + los + ")");
-         gAutoScout_state[slot] = cAutoScoutState_Stationed;
-         gAutoScout_stuckTicks[slot] = 0;
-         return(true);
-      }
-
-      gAutoScout_stuckTicks[slot] = gAutoScout_stuckTicks[slot] + 1;
-      if (gAutoScout_stuckTicks[slot] >= cAutoScout_StuckTickLimit)
-      {
-         autoScout_releaseClaim(slot);
-         autoScout_setStateIdle(slot);
-         return(true);
-      }
-      // No per-tick aiTaskMoveUnit re-issue -- the engine cPlanExplore is
-      // parked in cPlanStateIdle so it can't override our initial move; the
-      // unit follows the command issued at state-entry until arrival.
-      return(false);
-   }
-
-   if (state == cAutoScoutState_Stationed)
-   {
-      // Saturation == LOS hit cap. Action 37 is the engine signal (the
-      // meditation animation plays at this point). Re-pick a new area.
-      if (kbUnitGetActionType(unitID) == cAutoScout_OracleSaturatedActionType)
-      {
-         aiEcho("autoScout: oracle " + unitID + " saturated at los=" + los
-            + " (maxLOS cache=" + gAutoScout_maxOracleLOS + "), repicking");
-         autoScout_releaseClaim(slot);
-         autoScout_setStateIdle(slot);
-         return(true);
-      }
-      // Still growing -- stay parked, do nothing. The engine cPlanExplore
-      // plan is kept inert via the loop-radius trick set in
-      // autoScout_register; nothing to override here.
-      return(false);
-   }
-
-   // Working state should not occur for oracles (they don't enter frontier-
-   // walk). Defensive: promote to Stationed.
-   if (state == cAutoScoutState_Working)
-   {
-      gAutoScout_state[slot] = cAutoScoutState_Stationed;
-      return(true);
-   }
-
-   if (state == cAutoScoutState_Fleeing)
-   {
-      if (xsGetTimeMS() < gAutoScout_fleeUntilMs[slot]) { return(false); }
-      aiEcho("autoScout: oracle flee-hold expired slot=" + slot + " unit=" + unitID
-         + ", returning to Idle");
-      autoScout_setStateIdle(slot);
-      gAutoScout_fleeFromArea[slot] = -1;
-      return(true);
-   }
-
-   return(false);
-}
-
 // Returns true if this tick caused a state transition (caller may want to
 // re-tick the scout in the same rule firing to avoid wasting a frame in
 // the new state).
+//
+// With the engine-explore migration, normal movement is delegated to the
+// engine's cPlanExplore. This function now only handles overrides: danger
+// flee, herd divert, and flee-timer expiry.
 bool autoScout_tickUnit(int slot = -1)
 {
    int unitID = gAutoScout_unitID[slot];
@@ -2951,20 +2554,12 @@ bool autoScout_tickUnit(int slot = -1)
 
    autoScout_trackHPAndPos(slot, unitID);
 
-   // Route oracles to their dedicated state machine. They share the pool and
-   // the Diverting handler with regular scouts but have their own
-   // Idle/Walking/Stationed flow (no Working / frontier-walk).
-   if (autoScout_isOracle(unitID) == true)
-   {
-      return(autoScout_tickOracleUnit(slot));
-   }
-
    float los = kbUnitGetStatFloat(unitID, cUnitStatLOS);
    if (los < 1.0) { los = 18.0; }
 
    // Danger check: applies to all non-Idle non-Fleeing states. Idle is exempt
-   // because the next BFS pick respects the hard-skip and blacklist directly;
-   // Fleeing is exempt to avoid recursive entry while the timer is held.
+   // because the BFS/area-list pipeline respects the hard-skip and blacklist
+   // directly; Fleeing is exempt to avoid recursive entry while the timer is held.
    int preState = gAutoScout_state[slot];
    if (preState != cAutoScoutState_Idle && preState != cAutoScoutState_Fleeing)
    {
@@ -2989,195 +2584,15 @@ bool autoScout_tickUnit(int slot = -1)
          autoScout_enterFleeing(slot, unitID, targetArea);
          return(true);
       }
-      int dangerHop = autoScout_corridorFirstDangerousHop(slot);
-      if (dangerHop >= 0)
-      {
-         autoScout_blacklistArea(dangerHop);
-         autoScout_enterFleeing(slot, unitID, dangerHop);
-         return(true);
-      }
    }
 
    int state = gAutoScout_state[slot];
 
-   if (state == cAutoScoutState_Idle)
-   {
-      int nextArea = autoScout_findNextArea(unitID);
-      if (nextArea < 0)
-      {
-         // Inline of vanilla disableAutoScouting (defined later in
-         // human_assist.xs, can't forward-reference): stop unit + destroy
-         // engine plan (which reverts the UI button).
-         aiTaskStopUnit(unitID);
-         aiPlanDestroy(planID);
-         autoScout_dropFromPool(slot);
-         return(true);
-      }
-      gAutoScout_areaClaim[nextArea] = unitID;
-      gAutoScout_targetAreaID[slot] = nextArea;
-      gAutoScout_targetWaypoint[slot] = kbAreaGetCenter(nextArea);
-      gAutoScout_state[slot] = cAutoScoutState_Walking;
-      gAutoScout_stuckTicks[slot] = 0;
-      aiEcho("autoScout: scout " + unitID + " picked area " + nextArea
-         + " centroid=" + gAutoScout_targetWaypoint[slot]
-         + " corridorLen=" + gAutoScout_bfsResultLen);
-      autoScout_issueCorridor(slot, unitID);
-      return(true);
-   }
-
-   if (state == cAutoScoutState_Walking)
+   // Herd divert can interrupt any non-fleeing state. The actual plan-parking
+   // call happens inside autoScout_tryDivert once it finds an eligible herd.
+   if (state != cAutoScoutState_Diverting && state != cAutoScoutState_Fleeing)
    {
       if (autoScout_tryDivert(slot, unitID, los) == true) { return(true); }
-
-      vector waypoint = gAutoScout_targetWaypoint[slot];
-      int areaID = gAutoScout_targetAreaID[slot];
-
-      if (autoScout_arrived(unitID, waypoint, gAutoScout_stuckTicks[slot]) == true)
-      {
-         // Mark this area as "we visited the centroid" regardless of how
-         // many black tiles remain. Prevents the loop where the engine's
-         // fog count keeps the area as a candidate even after our scout
-         // has reached its center, causing the scout to be reassigned to
-         // the same area indefinitely.
-         if (areaID >= 0 && areaID < gAutoScout_areaSelfScouted.size())
-         {
-            gAutoScout_areaSelfScouted[areaID] = 1;
-         }
-
-         vector unitPos = kbUnitGetPosition(unitID);
-         int currentArea = -1;
-         if (autoScout_isOnMap(unitPos) == true)
-         {
-            currentArea = kbAreaGetIDByPosition(unitPos);
-         }
-
-         // Scout couldn't actually enter the target area (non-convex,
-         // centroid blocked or outside the polygon): no point doing
-         // frontier-walk -- the centroid was unreachable so we'd just
-         // re-walk to it. Pass done.
-         if (currentArea != areaID)
-         {
-            aiEcho("autoScout: SHORT-CIRCUIT (centroid not in area) unit " + unitID
-               + " area " + areaID + " currentArea=" + currentArea);
-            autoScout_releaseClaim(slot);
-            autoScout_setStateIdle(slot);
-            return(true);
-         }
-
-         // Already-covered fast path: if the centroid visit + LOS sweep
-         // already brought blackTiles below threshold, skip WORKING.
-         int totalTiles = kbAreaGetNumberTiles(areaID);
-         int blackTiles = kbAreaGetNumberBlackTiles(areaID);
-         int blackPercent = 0;
-         if (totalTiles > 0) { blackPercent = blackTiles * 100 / totalTiles; }
-         if (blackPercent < cAutoScout_BlackTilesPercentMin)
-         {
-            autoScout_releaseClaim(slot);
-            autoScout_setStateIdle(slot);
-            return(true);
-         }
-
-         // Frontier-walk: sample for an in-area, reachable, currently-
-         // out-of-LOS waypoint. If none exists, the area's reachable
-         // extent is already within scout's LOS -- done.
-         vector frontierWp = autoScout_findFrontierWaypoint(unitID, areaID, los);
-         if (frontierWp == cInvalidVector)
-         {
-            autoScout_releaseClaim(slot);
-            autoScout_setStateIdle(slot);
-            return(true);
-         }
-
-         aiEcho("autoScout: entering WORKING for unit " + unitID + " area " + areaID
-            + " (tileCount=" + totalTiles + ", blackTiles=" + blackTiles + ", LOS=" + los + ")");
-         gAutoScout_state[slot] = cAutoScoutState_Working;
-         gAutoScout_workSteps[slot] = 0;
-         gAutoScout_stuckTicks[slot] = 0;
-         gAutoScout_targetWaypoint[slot] = frontierWp;
-         // Clear any stale visited memory (defensive -- setStateIdle should
-         // have done it already) and seed the new session with this waypoint.
-         autoScout_clearVisited(unitID);
-         autoScout_recordVisited(unitID, frontierWp);
-         aiTaskMoveUnit(unitID, frontierWp, false, false);
-         return(true);
-      }
-
-      gAutoScout_stuckTicks[slot] = gAutoScout_stuckTicks[slot] + 1;
-      if (gAutoScout_stuckTicks[slot] >= cAutoScout_StuckTickLimit)
-      {
-         autoScout_releaseClaim(slot);
-         autoScout_setStateIdle(slot);
-         return(true);
-      }
-      // No per-tick aiTaskMoveUnit re-issue -- the engine cPlanExplore is
-      // parked in cPlanStateIdle so it can't override our initial move; the
-      // unit follows the command issued at state-entry until arrival.
-      return(false);
-   }
-
-   if (state == cAutoScoutState_Working)
-   {
-      if (autoScout_tryDivert(slot, unitID, los) == true) { return(true); }
-
-      vector waypoint = gAutoScout_targetWaypoint[slot];
-      int areaID = gAutoScout_targetAreaID[slot];
-
-      if (autoScout_arrived(unitID, waypoint, gAutoScout_stuckTicks[slot]) == true)
-      {
-         // Early exit: black-tile percentage dropped below threshold ->
-         // area effectively covered.
-         int totalTiles = kbAreaGetNumberTiles(areaID);
-         int blackTiles = kbAreaGetNumberBlackTiles(areaID);
-         int blackPercent = 0;
-         if (totalTiles > 0) { blackPercent = blackTiles * 100 / totalTiles; }
-         if (blackPercent < cAutoScout_BlackTilesPercentMin)
-         {
-            autoScout_releaseClaim(slot);
-            autoScout_setStateIdle(slot);
-            return(true);
-         }
-
-         // Step cap: defensive against pathological shapes / oscillation.
-         int step = gAutoScout_workSteps[slot] + 1;
-         if (step >= cAutoScout_MaxFrontierSteps)
-         {
-            aiEcho("autoScout: WORKING step cap hit unit " + unitID + " area " + areaID
-               + " (blackTiles=" + blackTiles + " of " + totalTiles + ")");
-            autoScout_releaseClaim(slot);
-            autoScout_setStateIdle(slot);
-            return(true);
-         }
-         gAutoScout_workSteps[slot] = step;
-         gAutoScout_stuckTicks[slot] = 0;
-
-         // Find next frontier waypoint (in-area, reachable, outside scout's
-         // current LOS). If none, the reachable extent is now within LOS
-         // -> coverage done from where we are.
-         vector nextWp = autoScout_findFrontierWaypoint(unitID, areaID, los);
-         if (nextWp == cInvalidVector)
-         {
-            autoScout_releaseClaim(slot);
-            autoScout_setStateIdle(slot);
-            return(true);
-         }
-
-         gAutoScout_targetWaypoint[slot] = nextWp;
-         autoScout_recordVisited(unitID, nextWp);
-         aiTaskMoveUnit(unitID, nextWp, false, false);
-         return(true);
-      }
-
-      gAutoScout_stuckTicks[slot] = gAutoScout_stuckTicks[slot] + 1;
-      if (gAutoScout_stuckTicks[slot] >= cAutoScout_StuckTickLimit)
-      {
-         autoScout_releaseClaim(slot);
-         autoScout_setStateIdle(slot);
-         return(true);
-      }
-      // No per-tick aiTaskMoveUnit re-issue -- the engine cPlanExplore is
-      // parked in cPlanStateIdle so it can't override our initial move; the
-      // unit follows the command issued at state-entry until arrival.
-      return(false);
    }
 
    if (state == cAutoScoutState_Diverting)
@@ -3195,6 +2610,8 @@ bool autoScout_tickUnit(int slot = -1)
       return(true);
    }
 
+   // Idle / Walking / Working / Stationed are now delegated to the engine
+   // cPlanExplore. autoScout_tickFast refills cExplorePlanExploreAreaIDs.
    return(false);
 }
 
@@ -3245,18 +2662,12 @@ void autoScout_register(int planID = -1, int unitID = -1)
    gAutoScout_assignmentTick.add(0);
    gAutoScout_targetAreaID.add(-1);
    gAutoScout_targetWaypoint.add(cInvalidVector);
-   gAutoScout_workSteps.add(0);
    gAutoScout_stuckTicks.add(0);
    gAutoScout_targetHerdID.add(-1);
    gAutoScout_fleeUntilMs.add(0);
    gAutoScout_fleeFromArea.add(-1);
    gAutoScout_lastHP.add(kbUnitGetStatFloat(unitID, cUnitStatCurrHP));
    gAutoScout_lastPos.add(kbUnitGetPosition(unitID));
-   gAutoScout_corridorLen.add(0);
-   for (int i = 0; i < cAutoScout_MaxCorridorHops; i = i + 1)
-   {
-      gAutoScout_corridorAreas.add(-1);
-   }
 
    autoScout_initAreaArrays();
    int slot = gAutoScout_unitID.size() - 1;
@@ -3368,9 +2779,12 @@ active
 
    for (int slot = gAutoScout_unitID.size() - 1; slot >= 0; slot = slot - 1)
    {
-      // Chain state transitions in the same firing: e.g. WALKING -> arrived
-      // small area -> IDLE -> BFS -> WALKING new area, all in one tick. Cap
-      // iterations to defend against unexpected cycles.
+      if (slot >= gAutoScout_unitID.size()) { continue; }  // dropped from pool
+
+      int unitID = gAutoScout_unitID[slot];
+      int planID = gAutoScout_planID[slot];
+
+      // Override handling (danger/flee/herd) runs every tick.
       bool transitioned = true;
       int iter = 0;
       while (transitioned == true && iter < cAutoScout_MaxChainPerTick)
@@ -3378,6 +2792,24 @@ active
          if (slot >= gAutoScout_unitID.size()) { break; }  // dropped from pool
          transitioned = autoScout_tickUnit(slot);
          iter = iter + 1;
+      }
+
+      // Area-list refill runs at a throttled cadence for active plans.
+      // The engine consumes cExplorePlanExploreAreaIDs as it moves; we keep
+      // feeding it a fresh ranked list every cAutoScout_AssignmentInterval ticks.
+      if (slot < gAutoScout_unitID.size()
+          && gAutoScout_planState[slot] == cAutoScout_PlanStateActive)
+      {
+         int tickCount = gAutoScout_assignmentTick[slot] + 1;
+         if (tickCount >= cAutoScout_AssignmentInterval)
+         {
+            gAutoScout_assignmentTick[slot] = 0;
+            autoScout_unparkAndReassignAreas(planID, unitID);
+         }
+         else
+         {
+            gAutoScout_assignmentTick[slot] = tickCount;
+         }
       }
    }
    xsSetContextPlayer(-1);
