@@ -1434,15 +1434,20 @@ void autoScout_enterFleeing(int slot = -1, int unitID = -1, int dangerAreaID = -
    if (slot < 0) { return; }
    if (unitID < 0) { return; }
 
-   // Clean up Diverting bookkeeping if we flee mid-divert. attemptedHerdIDs
-   // already records the herd; we don't re-attempt it, matching the
-   // "attempt once globally" rule.
-   if (gAutoScout_state[slot] == cAutoScoutState_Diverting)
-   {
-      gAutoScout_targetHerdID[slot] = -1;
-   }
+    // Clean up Diverting bookkeeping if we flee mid-divert. attemptedHerdIDs
+    // already records the herd; we don't re-attempt it, matching the
+    // "attempt once globally" rule.
+    if (gAutoScout_state[slot] == cAutoScoutState_Diverting)
+    {
+       gAutoScout_targetHerdID[slot] = -1;
+    }
 
-   int fleeArea = autoScout_findFleeArea(unitID, dangerAreaID);
+    // Park the engine plan while the mod issues the manual flee move.
+    int planID = gAutoScout_planID[slot];
+    autoScout_parkPlan(planID);
+    gAutoScout_planState[slot] = cAutoScout_PlanStateParkedFlee;
+
+    int fleeArea = autoScout_findFleeArea(unitID, dangerAreaID);
 
    vector dest = kbUnitGetPosition(unitID);
    float destDanger = -1.0;
@@ -1626,15 +1631,20 @@ bool autoScout_tryDivert(int slot = -1, int unitID = -1, float los = 18.0)
    if (herdID < 0) { return(false); }
    if (kbUnitGetIsIDValid(herdID) == false) { return(false); }
 
-   gAutoScout_attemptedHerdIDs.add(herdID);
-   gAutoScout_targetHerdID[slot]   = herdID;
-   gAutoScout_state[slot]          = cAutoScoutState_Diverting;
-   gAutoScout_targetWaypoint[slot] = kbUnitGetPosition(herdID);
-   gAutoScout_stuckTicks[slot]     = 0;
+    gAutoScout_attemptedHerdIDs.add(herdID);
+    gAutoScout_targetHerdID[slot]   = herdID;
+    gAutoScout_state[slot]          = cAutoScoutState_Diverting;
+    gAutoScout_targetWaypoint[slot] = kbUnitGetPosition(herdID);
+    gAutoScout_stuckTicks[slot]     = 0;
 
-   aiEcho("autoScout: DIVERTING unit " + unitID + " to herd " + herdID);
-   aiTaskMoveUnit(unitID, gAutoScout_targetWaypoint[slot], false, false);
-   return(true);
+    // Park the engine plan while the mod issues the manual herd conversion move.
+    int planID = gAutoScout_planID[slot];
+    autoScout_parkPlan(planID);
+    gAutoScout_planState[slot] = cAutoScout_PlanStateParkedDivert;
+
+    aiEcho("autoScout: DIVERTING unit " + unitID + " to herd " + herdID);
+    aiTaskMoveUnit(unitID, gAutoScout_targetWaypoint[slot], false, false);
+    return(true);
 }
 
 //------------------------------------------------------------------------------
@@ -2476,16 +2486,23 @@ bool autoScout_tickDivertingState(int slot = -1, int unitID = -1)
 
    bool stuck = (gAutoScout_stuckTicks[slot] >= cAutoScout_StuckTickLimit);
 
-   if (herdInvalid == true || herdOurs == true || arrived == true || stuck == true)
-   {
-      aiEcho("autoScout: DIVERT done unit " + unitID + " herd " + herdID
-         + " (invalid=" + herdInvalid + " ours=" + herdOurs
-         + " arrived=" + arrived + " stuck=" + stuck + ")");
-      autoScout_releaseClaim(slot);
-      autoScout_setStateIdle(slot);
-      gAutoScout_targetHerdID[slot] = -1;
-      return(true);
-   }
+    if (herdInvalid == true || herdOurs == true || arrived == true || stuck == true)
+    {
+       aiEcho("autoScout: DIVERT done unit " + unitID + " herd " + herdID
+          + " (invalid=" + herdInvalid + " ours=" + herdOurs
+          + " arrived=" + arrived + " stuck=" + stuck + ")");
+       autoScout_releaseClaim(slot);
+
+       // R8 HIGH: reassign a fresh area list and reactivate the engine plan
+       // before returning the scout to normal engine-driven exploration.
+       int planID = gAutoScout_planID[slot];
+       autoScout_unparkPlan(planID, unitID);
+       gAutoScout_planState[slot] = cAutoScout_PlanStateActive;
+
+       autoScout_setStateIdle(slot);
+       gAutoScout_targetHerdID[slot] = -1;
+       return(true);
+    }
 
    gAutoScout_stuckTicks[slot] = gAutoScout_stuckTicks[slot] + 1;
    gAutoScout_targetWaypoint[slot] = kbUnitGetPosition(herdID);
@@ -2561,15 +2578,21 @@ bool autoScout_tickUnit(int slot = -1)
       return(autoScout_tickDivertingState(slot, unitID));
    }
 
-   if (state == cAutoScoutState_Fleeing)
-   {
-      if (xsGetTimeMS() < gAutoScout_fleeUntilMs[slot]) { return(false); }
-      aiEcho("autoScout: flee-hold expired slot=" + slot + " unit=" + unitID
-         + ", returning to Idle");
-      autoScout_setStateIdle(slot);
-      gAutoScout_fleeFromArea[slot] = -1;
-      return(true);
-   }
+    if (state == cAutoScoutState_Fleeing)
+    {
+       if (xsGetTimeMS() < gAutoScout_fleeUntilMs[slot]) { return(false); }
+       aiEcho("autoScout: flee-hold expired slot=" + slot + " unit=" + unitID
+          + ", returning to Idle");
+
+       // R8 HIGH: reassign a fresh area list and reactivate before resuming.
+       int planID = gAutoScout_planID[slot];
+       autoScout_unparkPlan(planID, unitID);
+       gAutoScout_planState[slot] = cAutoScout_PlanStateActive;
+
+       autoScout_setStateIdle(slot);
+       gAutoScout_fleeFromArea[slot] = -1;
+       return(true);
+    }
 
    // Idle / Walking / Working / Stationed are now delegated to the engine
    // cPlanExplore. autoScout_tickFast refills cExplorePlanExploreAreaIDs.
