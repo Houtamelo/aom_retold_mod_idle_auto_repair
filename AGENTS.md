@@ -37,6 +37,35 @@ XS is the C-like scripting language loaded by the AoM:R engine. Consult these re
 - `docs/doxygen_retail/` — official developer-built doxygen documentation of most built-in game functions, including descriptions, signatures, and parameter semantics. When unsure about a `kb*`, `ai*`, `tr*`, or `xs*` call, search here first
 - `docs/xs-lsp-spike.md` — the current pivot toward a Rust LSP for diagnostics; explains why this approach was chosen over a pure-Kotlin implementation
 
+## XS quirks and pitfalls
+
+- **Forward declarations are required.** XS does NOT support implicit forward declarations like C/C++. A function must be either defined before it is called, OR declared (signature only) with a trailing semicolon earlier in the file. A function marked `mutable` is the only exception — it can be redefined later and is forward-callable. See `docs/xs-language-syntax.md` → "Forward declarations" for the full rule.
+  - **How to detect** before deploying: for every user-defined function in a touched `.xs`, find its definition line and check that no call site has a smaller line number. A one-shot scan:
+    ```bash
+    file=mod/<name>/game/ai/human_assist/<name>.xs
+    grep -nE '^(void|int|bool|float|string|extern|mutable)[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\(' "$file" \
+      | awk -F'[ \t:()]+' '{print $2, $1}' \
+      | sort -k1,1 -u \
+      | while read fn def; do
+        early=$(grep -nE "[^A-Za-z0-9_]$fn[ \t]*\(" "$file" | awk -F: -v d="$def" '$1 < d')
+        [ -n "$early" ] && echo "MISSING FWD-DECL: $fn (def line $def)"
+      done
+    ```
+  - **Fix pattern:** add a forward-declaration block after the `extern` block, mirroring every signature with a trailing `;`:
+    ```xs
+    extern int gMyGlobal = 0;
+
+    void autoScout_helperA(int x = -1);
+    int  autoScout_helperB(int y = -1, int z = -1);
+
+    // ... original code, possibly calling helperA/helperB ...
+
+    void autoScout_helperA(int x = -1) { /* ... */ }
+    int  autoScout_helperB(int y = -1, int z = -1) { /* ... */ }
+    ```
+  - **Failure mode when missed:** engine refuses to load the mod with `Error 0310: invalid symbol lookup` at game start. Only visible by booting AoM:R — there is no standalone XS compiler.
+  - **Lesson learned (engine-explore-migration):** when an SDD apply produces 7+ commits across 1000+ lines of XS, run the scan above before declaring "Deviations from Design: None." That change claimed no deviations but actually introduced 8 forward-declaration bugs in `mod/intelligent_auto_scout/game/ai/human_assist/auto_scout.xs`.
+
 ## Develop & verify loop
 
 ### For mods

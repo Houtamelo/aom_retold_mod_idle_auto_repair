@@ -111,6 +111,35 @@ void main() {
 
 Rules are an XS unique feature that require extensive explanation, as such they have their own document: *"BANG documentation\XS documentation\XS rules functionality"*.
 
+## Forward declarations
+
+XS does NOT support implicit forward declarations like C/C++. If function `A` calls function `B`, then `B` must be either:
+
+1. **Defined** before `A` in the same file, OR
+2. **Declared** (signature only) with a trailing semicolon, placed earlier in the file.
+
+A function declared `mutable` is the only exception — it can be called before its definition and redefined later.
+
+```xs
+// Forward-declaration block — typically placed right after the `extern` block.
+void helper_foo(int x = -1);
+int  helper_bar(int y = -1, int z = -1);
+
+// Original code that calls them may follow.
+void main() {
+  helper_foo(1);
+  int v = helper_bar(2, 3);
+}
+
+// Definitions come later in the file (or in another file in the same include root).
+void helper_foo(int x = -1) { /* ... */ }
+int  helper_bar(int y = -1, int z = -1) { /* ... */ }
+```
+
+**Failure mode:** if a call site precedes both a declaration and a definition, the engine rejects the mod on load with `Error 0310: invalid symbol lookup`. There is no standalone XS compiler to catch this earlier — only the game engine validates.
+
+**Cross-file note:** the same rule applies across `include` boundaries; the included file's function must be defined (not just declared) before the call site in the including file. See the "Includes" section.
+
 ## Modifiers
 
 - const — cannot be modified after assignment. Must be initialized from another constant (XS limitation).
