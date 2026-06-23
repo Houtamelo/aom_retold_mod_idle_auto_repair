@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info};
 
-use crate::{completion, diagnostics, engine_api, parser, word};
+use crate::{completion, diagnostics, engine_api, parser, symbols, word};
 
 /// Holds the parsed-but-not-yet-processed text of every document the client
 /// has opened. Populated by `did_open` / `did_change`, cleared by `did_close`.
@@ -37,6 +37,8 @@ impl DocumentStore {
 pub struct XsLanguageServer {
     pub client: Client,
     pub documents: Arc<Mutex<DocumentStore>>,
+    /// Per-file symbol tables, rebuilt on every `did_open` / `did_change`.
+    pub symbol_tables: Arc<Mutex<HashMap<Url, symbols::SymbolTable>>>,
     pub engine: engine_api::SharedEngineApi,
 }
 
@@ -45,6 +47,7 @@ impl XsLanguageServer {
         Self {
             client,
             documents: Arc::new(Mutex::new(DocumentStore::default())),
+            symbol_tables: Arc::new(Mutex::new(HashMap::new())),
             engine: Arc::new(engine_api::EngineApi::load_default().unwrap_or_default()),
         }
     }
@@ -88,6 +91,9 @@ impl LanguageServer for XsLanguageServer {
                 // linkSupport yet — that comes when we have real workspace
                 // symbols.
                 definition_provider: Some(OneOf::Left(true)),
+                // Week 3: document symbol outline built from the per-file
+                // symbol table.
+                document_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -112,6 +118,7 @@ impl LanguageServer for XsLanguageServer {
             let mut docs = self.documents.lock().await;
             docs.open(uri.clone(), text.clone());
         }
+        self.rebuild_symbol_table(&uri, &text).await;
         self.publish_diagnostics(&uri, &text, version).await;
     }
 
@@ -130,6 +137,7 @@ impl LanguageServer for XsLanguageServer {
             let mut docs = self.documents.lock().await;
             docs.change(&uri, text.clone());
         }
+        self.rebuild_symbol_table(&uri, &text).await;
         self.publish_diagnostics(&uri, &text, version).await;
     }
 
@@ -138,6 +146,8 @@ impl LanguageServer for XsLanguageServer {
         debug!("did_close: {}", uri);
         let mut docs = self.documents.lock().await;
         docs.close(&uri);
+        let mut tables = self.symbol_tables.lock().await;
+        tables.remove(&uri);
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -164,13 +174,22 @@ impl LanguageServer for XsLanguageServer {
             return Ok(None);
         };
 
+        // Engine API first (richer info: signature + help text + return type).
+        // Workspace symbol table as fallback (signature only, but anchored
+        // to a real source location).
         let markdown = if let Some(s) = self.engine.find_syscall(&ident) {
             format_hover_syscall(s)
         } else if let Some(c) = self.engine.find_aiplan(&ident) {
             format_hover_aiplan(c)
         } else {
-            debug!("hover: identifier `{ident}` not in engine API");
-            return Ok(None);
+            let tables = self.symbol_tables.lock().await;
+            match tables.get(uri).and_then(|t| t.find(&ident)) {
+                Some(sym) => format_hover_symbol(sym),
+                None => {
+                    debug!("hover: identifier `{ident}` not in engine API or workspace");
+                    return Ok(None);
+                }
+            }
         };
 
         debug!("hover: `{ident}` -> {} chars of markdown", markdown.len());
@@ -199,27 +218,82 @@ impl LanguageServer for XsLanguageServer {
             return Ok(None);
         };
 
-        if self.engine.find_syscall(&ident).is_none()
-            && self.engine.find_aiplan(&ident).is_none()
-        {
-            debug!("definition: identifier `{ident}` not in engine API");
-            return Ok(None);
-        }
-
-        // Virtual URI — these stubs don't have a real source position, so
-        // we use 0:0-0:0. Clients will show a synthetic file for this URI.
-        let stub_uri = format!("xs-stub://engine/{ident}");
-        let location = Location {
-            uri: Url::parse(&stub_uri)
-                .map_err(|e| tower_lsp::jsonrpc::Error::internal_error())?,
-            range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+        // Workspace symbol table first — has a real file:line location.
+        // Engine API as fallback — returns a virtual xs-stub:// URI.
+        let location = {
+            let tables = self.symbol_tables.lock().await;
+            tables
+                .get(uri)
+                .and_then(|t| t.find(&ident))
+                .map(|sym| Location {
+                    uri: uri.clone(),
+                    range: sym.selection_range,
+                })
         };
-        debug!("definition: `{ident}` -> {stub_uri}");
+
+        let location = match location {
+            Some(loc) => {
+                debug!("definition: `{ident}` -> workspace at {:?}", loc.range.start);
+                loc
+            }
+            None => {
+                if self.engine.find_syscall(&ident).is_none()
+                    && self.engine.find_aiplan(&ident).is_none()
+                {
+                    debug!("definition: identifier `{ident}` not in engine API or workspace");
+                    return Ok(None);
+                }
+                // Virtual URI — these stubs don't have a real source position.
+                let stub_uri = format!("xs-stub://engine/{ident}");
+                let loc = Location {
+                    uri: Url::parse(&stub_uri)
+                        .map_err(|_e| tower_lsp::jsonrpc::Error::internal_error())?,
+                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                };
+                debug!("definition: `{ident}` -> {stub_uri}");
+                loc
+            }
+        };
         Ok(Some(GotoDefinitionResponse::Scalar(location)))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = &params.text_document.uri;
+        let tables = self.symbol_tables.lock().await;
+        let Some(table) = tables.get(uri) else {
+            return Ok(None);
+        };
+        let items: Vec<DocumentSymbol> = table.symbols.iter().map(symbol_to_lsp).collect();
+        debug!(
+            "document_symbol: {} symbol(s) for {}",
+            items.len(),
+            uri
+        );
+        Ok(Some(DocumentSymbolResponse::Nested(items)))
     }
 }
 
 impl XsLanguageServer {
+    /// Re-parse `text` and rebuild the per-file symbol table for `uri`.
+    /// Called on `did_open` / `did_change`. On parse failure, we keep the
+    /// stale table rather than clearing it — the old symbols still help
+    /// with hover/definition until the user fixes the parse error.
+    async fn rebuild_symbol_table(&self, uri: &Url, text: &str) {
+        if let Some(tree) = parser::parse(text) {
+            let table = symbols::build_symbol_table(&tree, text);
+            debug!(
+                "rebuild_symbol_table: {} -> {} symbol(s)",
+                uri,
+                table.symbols.len()
+            );
+            let mut tables = self.symbol_tables.lock().await;
+            tables.insert(uri.clone(), table);
+        }
+    }
+
     /// Parse `text` as XS and publish any parse errors as LSP diagnostics.
     /// An empty `Vec` (clean parse) is also published so clients clear
     /// stale diagnostics for this URI.
@@ -273,4 +347,38 @@ fn format_hover_aiplan(c: &engine_api::AiplanConstant) -> String {
     let signature = format!("const {} {} = {}", c.variable_type, c.name, c.variable_value);
     let md = format!("```xs\n{}\n```\n", signature);
     md
+}
+
+/// Format a workspace symbol as a Markdown hover card. Workspace symbols
+/// don't carry help text, but they have a real source location.
+fn format_hover_symbol(s: &symbols::Symbol) -> String {
+    let kind_label = s.kind.label();
+    let mut md = format!("*{}* — `{}`\n", kind_label, s.detail);
+    if !s.params.is_empty() {
+        md.push_str("\n**Parameters:**\n");
+        for p in &s.params {
+            md.push_str(&format!("- `{} {}`\n", p.ty, p.name));
+        }
+    }
+    md
+}
+
+/// Convert a workspace symbol to the LSP `DocumentSymbol` shape.
+fn symbol_to_lsp(s: &symbols::Symbol) -> DocumentSymbol {
+    let kind = match s.kind {
+        symbols::SymbolKind::Rule => SymbolKind::FUNCTION, // XS has no RULE kind in LSP
+        symbols::SymbolKind::Function => SymbolKind::FUNCTION,
+        symbols::SymbolKind::Variable => SymbolKind::VARIABLE,
+        symbols::SymbolKind::Constant => SymbolKind::CONSTANT,
+    };
+    DocumentSymbol {
+        name: s.name.clone(),
+        detail: Some(s.detail.clone()),
+        kind,
+        tags: None,
+        deprecated: None,
+        range: s.full_range,
+        selection_range: s.selection_range,
+        children: None,
+    }
 }

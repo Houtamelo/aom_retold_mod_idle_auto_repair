@@ -24,6 +24,33 @@ const COMPLETION_AI: &str = r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/co
 // of "aiEcho" in the test file (line 4 = `   aiEcho("hello");`).
 const HOVER_AI: &str = r#"{"jsonrpc":"2.0","id":4,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///tmp/test.xs"},"position":{"line":4,"character":6}}}"#;
 const DEFINITION_AI: &str = r#"{"jsonrpc":"2.0","id":5,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///tmp/test.xs"},"position":{"line":4,"character":6}}}"#;
+// Week 3: open a SECOND file with workspace symbols (a rule, a function,
+// a constant). Hover/definition on the workspace symbol should resolve to
+// a real file:line location in the same file (not the xs-stub:// virtual
+// URI used for engine API).
+//
+// File content:
+//   1: rule doStuff
+//   2: minInterval 5
+//   3: active
+//   4: {
+//   5:    aiEcho("called");
+//   6: }
+//   7:
+//   8: int helper(int a, int b)
+//   9: {
+//  10:    return a + b;
+//  11: }
+//  12:
+//  13: const int cMagic = 42;
+//
+// Hover at line 7 col 6 is on 'h' in `helper`. Definition at the same
+// place should jump to line 7 col 5.
+const DID_OPEN_WORKSPACE: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/workspace.xs","languageId":"xs","version":1,"text":"rule doStuff\nminInterval 5\nactive\n{\n   aiEcho(\"called\");\n}\n\nint helper(int a, int b)\n{\n   return a + b;\n}\n\nconst int cMagic = 42;\n"}}}"#;
+const HOVER_WORKSPACE: &str = r#"{"jsonrpc":"2.0","id":6,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///tmp/workspace.xs"},"position":{"line":7,"character":6}}}"#;
+const DEFINITION_WORKSPACE: &str = r#"{"jsonrpc":"2.0","id":7,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///tmp/workspace.xs"},"position":{"line":7,"character":6}}}"#;
+const HOVER_CONSTANT: &str = r#"{"jsonrpc":"2.0","id":8,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///tmp/workspace.xs"},"position":{"line":12,"character":11}}}"#;
+const DOCUMENT_SYMBOL: &str = r#"{"jsonrpc":"2.0","id":9,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"file:///tmp/workspace.xs"}}}"#;
 const SHUTDOWN: &str = r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#;
 const EXIT: &str = r#"{"jsonrpc":"2.0","method":"exit"}"#;
 
@@ -125,7 +152,7 @@ fn main() {
 
     // Write the full message sequence (including exit) so the server
     // processes everything and exits, flushing stdout.
-    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, COMPLETION_AI, HOVER_AI, DEFINITION_AI, SHUTDOWN, EXIT] {
+    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, COMPLETION_AI, HOVER_AI, DEFINITION_AI, DID_OPEN_WORKSPACE, HOVER_WORKSPACE, DEFINITION_WORKSPACE, HOVER_CONSTANT, DOCUMENT_SYMBOL, SHUTDOWN, EXIT] {
         eprintln!("[test] writing {} bytes", frame(msg).len());
         stdin
             .write_all(frame(msg).as_bytes())
@@ -146,6 +173,10 @@ fn main() {
     let mut completion_resp = None;
     let mut hover_resp = None;
     let mut definition_resp = None;
+    let mut hover_workspace_resp = None;
+    let mut definition_workspace_resp = None;
+    let mut hover_constant_resp = None;
+    let mut document_symbol_resp = None;
 
     // Read everything from stdout, then parse.
     stdout.read_to_end(&mut all_bytes).expect("read stdout to end");
@@ -170,6 +201,14 @@ fn main() {
                         hover_resp = Some(msg);
                     } else if id == 5 && definition_resp.is_none() {
                         definition_resp = Some(msg);
+                    } else if id == 6 && hover_workspace_resp.is_none() {
+                        hover_workspace_resp = Some(msg);
+                    } else if id == 7 && definition_workspace_resp.is_none() {
+                        definition_workspace_resp = Some(msg);
+                    } else if id == 8 && hover_constant_resp.is_none() {
+                        hover_constant_resp = Some(msg);
+                    } else if id == 9 && document_symbol_resp.is_none() {
+                        document_symbol_resp = Some(msg);
                     }
                 }
             }
@@ -179,8 +218,11 @@ fn main() {
             }
         }
     }
-    eprintln!("[test] init_resp: {}, shutdown_resp: {}, completion_resp: {}, hover_resp: {}, definition_resp: {}",
-        init_resp.is_some(), shutdown_resp.is_some(), completion_resp.is_some(), hover_resp.is_some(), definition_resp.is_some());
+    eprintln!("[test] init_resp: {}, shutdown_resp: {}, completion_resp: {}, hover_resp: {}, definition_resp: {}, hover_workspace: {}, definition_workspace: {}, hover_constant: {}, document_symbol: {}",
+        init_resp.is_some(), shutdown_resp.is_some(), completion_resp.is_some(),
+        hover_resp.is_some(), definition_resp.is_some(),
+        hover_workspace_resp.is_some(), definition_workspace_resp.is_some(),
+        hover_constant_resp.is_some(), document_symbol_resp.is_some());
 
     let init_resp = init_resp.expect("initialize response");
     eprintln!("[test] got initialize response");
@@ -192,6 +234,14 @@ fn main() {
     eprintln!("[test] got hover response");
     let definition_resp = definition_resp.expect("definition response");
     eprintln!("[test] got definition response");
+    let hover_workspace_resp = hover_workspace_resp.expect("hover workspace response");
+    eprintln!("[test] got hover workspace response");
+    let definition_workspace_resp = definition_workspace_resp.expect("definition workspace response");
+    eprintln!("[test] got definition workspace response");
+    let hover_constant_resp = hover_constant_resp.expect("hover constant response");
+    eprintln!("[test] got hover constant response");
+    let document_symbol_resp = document_symbol_resp.expect("document symbol response");
+    eprintln!("[test] got document symbol response");
 
     let stderr_text = std::fs::read_to_string("/tmp/xs_lsp_server_stderr.log")
         .unwrap_or_else(|e| format!("(failed to read stderr log: {e})"));
@@ -295,6 +345,64 @@ fn main() {
     } else {
         println!("FAIL: definition did not return xs-stub://engine/aiEcho");
         println!("  definition response: {}", definition_resp);
+        all_pass = false;
+    }
+
+    // Hover on a workspace function (`helper`): should return workspace
+    // hover (not engine API), with the function name, kind, and detail.
+    let hover_workspace_raw = hover_workspace_resp.to_string();
+    let has_workspace_name = hover_workspace_raw.contains("helper");
+    let has_workspace_kind = hover_workspace_raw.contains("function");
+    let has_workspace_detail = hover_workspace_raw.contains("int helper")
+        || hover_workspace_raw.contains("helper(int a, int b)");
+    if has_workspace_name && has_workspace_kind && has_workspace_detail {
+        println!("PASS: hover returned workspace function (helper with kind/detail)");
+    } else {
+        println!("FAIL: hover workspace did not return expected content (name={has_workspace_name}, kind={has_workspace_kind}, detail={has_workspace_detail})");
+        println!("  hover workspace response: {}", hover_workspace_resp);
+        all_pass = false;
+    }
+
+    // Definition on a workspace function (`helper`): should return a
+    // Location pointing to the REAL file, NOT a xs-stub:// virtual URI.
+    let def_workspace_raw = definition_workspace_resp.to_string();
+    let has_real_file = def_workspace_raw.contains("file:///tmp/workspace.xs");
+    let no_stub_uri = !def_workspace_raw.contains("xs-stub://");
+    // The function is defined at line 7 col 5 (0-indexed line 7 = "int helper").
+    let has_correct_line = def_workspace_raw.contains("\"line\":7")
+        || def_workspace_raw.contains("\"line\": 7");
+    if has_real_file && no_stub_uri && has_correct_line {
+        println!("PASS: definition returned real file:line for workspace function");
+    } else {
+        println!("FAIL: definition workspace did not return real location (file={has_real_file}, no_stub={no_stub_uri}, line={has_correct_line})");
+        println!("  definition workspace response: {}", definition_workspace_resp);
+        all_pass = false;
+    }
+
+    // Hover on a workspace CONSTANT (`cMagic` at line 12 col 11).
+    let hover_constant_raw = hover_constant_resp.to_string();
+    let has_constant_name = hover_constant_raw.contains("cMagic");
+    let has_constant_kind = hover_constant_raw.contains("constant");
+    let has_constant_detail = hover_constant_raw.contains("42");
+    if has_constant_name && has_constant_kind && has_constant_detail {
+        println!("PASS: hover returned workspace constant (cMagic with kind/value)");
+    } else {
+        println!("FAIL: hover constant did not return expected content (name={has_constant_name}, kind={has_constant_kind}, detail={has_constant_detail})");
+        println!("  hover constant response: {}", hover_constant_resp);
+        all_pass = false;
+    }
+
+    // Document symbol outline: should return >= 3 symbols (rule, function,
+    // constant). Each symbol is a JSON object with `name` and `kind`.
+    let doc_sym_raw = document_symbol_resp.to_string();
+    let sym_count_rule = doc_sym_raw.matches("\"name\":\"doStuff\"").count();
+    let sym_count_func = doc_sym_raw.matches("\"name\":\"helper\"").count();
+    let sym_count_const = doc_sym_raw.matches("\"name\":\"cMagic\"").count();
+    if sym_count_rule >= 1 && sym_count_func >= 1 && sym_count_const >= 1 {
+        println!("PASS: document symbol returned 3 symbols (rule={sym_count_rule}, function={sym_count_func}, constant={sym_count_const})");
+    } else {
+        println!("FAIL: document symbol did not return all 3 expected symbols (rule={sym_count_rule}, func={sym_count_func}, const={sym_count_const})");
+        println!("  document symbol response: {}", document_symbol_resp);
         all_pass = false;
     }
 

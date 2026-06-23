@@ -6,6 +6,7 @@ mod diagnostics;
 mod engine_api;
 mod parser;
 mod server;
+mod symbols;
 mod word;
 
 use server::XsLanguageServer;
