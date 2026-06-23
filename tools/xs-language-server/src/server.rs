@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info};
 
-use crate::{diagnostics, parser};
+use crate::{completion, diagnostics, engine_api, parser};
 
 /// Holds the parsed-but-not-yet-processed text of every document the client
 /// has opened. Populated by `did_open` / `did_change`, cleared by `did_close`.
@@ -37,6 +37,7 @@ impl DocumentStore {
 pub struct XsLanguageServer {
     pub client: Client,
     pub documents: Arc<Mutex<DocumentStore>>,
+    pub engine: engine_api::SharedEngineApi,
 }
 
 impl XsLanguageServer {
@@ -44,6 +45,7 @@ impl XsLanguageServer {
         Self {
             client,
             documents: Arc::new(Mutex::new(DocumentStore::default())),
+            engine: Arc::new(engine_api::EngineApi::load_default().unwrap_or_default()),
         }
     }
 }
@@ -52,9 +54,11 @@ impl XsLanguageServer {
 impl LanguageServer for XsLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         info!(
-            "initialize: client={:?}, root_uri={:?}, capabilities=present",
+            "initialize: client={:?}, root_uri={:?}, capabilities=present ({} syscalls, {} aiplans loaded)",
             params.client_info.map(|i| i.name),
-            params.root_uri
+            params.root_uri,
+            self.engine.syscalls.len(),
+            self.engine.aiplans.len(),
         );
 
         Ok(InitializeResult {
@@ -64,10 +68,16 @@ impl LanguageServer for XsLanguageServer {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
-                // Reserved for Day 4-5.
-                diagnostic_provider: None,
-                // Reserved for Day 6-7.
-                completion_provider: None,
+                completion_provider: Some(CompletionOptions {
+                    // We don't need resolve_provider; detail is in the item.
+                    resolve_provider: Some(false),
+                    // Trigger on every identifier character and dot.
+                    trigger_characters: Some(vec![
+                        ".".to_string(),
+                        "_".to_string(),
+                    ]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -118,6 +128,17 @@ impl LanguageServer for XsLanguageServer {
         debug!("did_close: {}", uri);
         let mut docs = self.documents.lock().await;
         docs.close(&uri);
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+        let items = completion::complete(&self.engine, &text, &params);
+        debug!("completion: {} item(s) at {:?}", items.len(), params.text_document_position.position);
+        Ok(Some(CompletionResponse::Array(items)))
     }
 }
 

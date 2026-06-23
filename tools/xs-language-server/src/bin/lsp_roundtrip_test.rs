@@ -19,6 +19,7 @@ const INITIALIZED: &str =
 const DID_OPEN: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/test.xs","languageId":"xs","version":1,"text":"rule test\nminInterval 5\nactive\n{\n   aiEcho(\"hello\");\n}"}}}"#;
 const DID_CHANGE: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/test.xs","version":2},"contentChanges":[{"text":"rule test2\nactive\n{\n   aiEcho(\"changed\");\n}"}]}}"#;
 const DID_OPEN_BAD: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/bad.xs","languageId":"xs","version":1,"text":"rule brokenRule\nminInterval 5\nactive\n{\n   int x = ;\n   aiEcho(\"hello\n}\n\nvoid unclosed(int a\n{\n}\n"}}}"#;
+const COMPLETION_AI: &str = r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///tmp/test.xs"},"position":{"line":4,"character":6}}}"#;
 const SHUTDOWN: &str = r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#;
 const EXIT: &str = r#"{"jsonrpc":"2.0","method":"exit"}"#;
 
@@ -120,7 +121,7 @@ fn main() {
 
     // Write the full message sequence (including exit) so the server
     // processes everything and exits, flushing stdout.
-    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, SHUTDOWN, EXIT] {
+    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, COMPLETION_AI, SHUTDOWN, EXIT] {
         eprintln!("[test] writing {} bytes", frame(msg).len());
         stdin
             .write_all(frame(msg).as_bytes())
@@ -138,6 +139,7 @@ fn main() {
     let mut all_bytes = Vec::new();
     let mut init_resp = None;
     let mut shutdown_resp = None;
+    let mut completion_resp = None;
 
     // Read everything from stdout, then parse.
     stdout.read_to_end(&mut all_bytes).expect("read stdout to end");
@@ -156,6 +158,8 @@ fn main() {
                         init_resp = Some(msg);
                     } else if id == 2 && shutdown_resp.is_none() {
                         shutdown_resp = Some(msg);
+                    } else if id == 3 && completion_resp.is_none() {
+                        completion_resp = Some(msg);
                     }
                 }
             }
@@ -165,13 +169,15 @@ fn main() {
             }
         }
     }
-    eprintln!("[test] init_resp: {}, shutdown_resp: {}",
-        init_resp.is_some(), shutdown_resp.is_some());
+    eprintln!("[test] init_resp: {}, shutdown_resp: {}, completion_resp: {}",
+        init_resp.is_some(), shutdown_resp.is_some(), completion_resp.is_some());
 
     let init_resp = init_resp.expect("initialize response");
     eprintln!("[test] got initialize response");
     let shutdown_resp = shutdown_resp.expect("shutdown response");
     eprintln!("[test] got shutdown response");
+    let completion_resp = completion_resp.expect("completion response");
+    eprintln!("[test] got completion response");
 
     let stderr_text = std::fs::read_to_string("/tmp/xs_lsp_server_stderr.log")
         .unwrap_or_else(|e| format!("(failed to read stderr log: {e})"));
@@ -225,6 +231,22 @@ fn main() {
         println!("PASS: malformed-file diagnostics published with parse errors");
     } else {
         println!("FAIL: missing diagnostics notification for /tmp/bad.xs");
+        all_pass = false;
+    }
+
+    // Completion: the request asked for items at line 4 col 13 in /tmp/test.xs,
+    // which is after `aiEcho("hel` (the partial token at that position is "aiE"
+    // since the file content's line 4 reads "   aiEcho(\"hello\");", col 13 is
+    // around the `c` in "aiEcho"). Look for the expected engine-API matches.
+    let raw = String::from_utf8_lossy(&all_bytes);
+    let completion_count = raw.matches("\"aiEcho\"").count()
+        + raw.matches("\"aiEchoCategory\"").count()
+        + raw.matches("\"aiEchoWarning\"").count();
+    if completion_count >= 3 {
+        println!("PASS: completion returned aiEcho family items ({completion_count} occurrences)");
+    } else {
+        println!("FAIL: completion did not return expected aiEcho* items (count={completion_count})");
+        println!("  completion response: {}", completion_resp);
         all_pass = false;
     }
 
