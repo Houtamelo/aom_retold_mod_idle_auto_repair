@@ -1,15 +1,13 @@
 //==============================================================================
 // auto_scout.xs (Intelligent Auto-Scout mod)
 //
-// Frontier-based replacement for the engine's player-triggered cPlanExplore
-// for non-Oracle AbstractScout units. Walks each scout to nearby unexplored
-// areas, prioritizing areas closest to the player's main town center via a
-// BFS over the area-adjacency graph (BFS bounds reachability from the scout
-// position; the chosen candidate among reachable ones is the one with
-// smallest Euclidean distance to the main TC).
+// Engine-driven area exploration for player-triggered AbstractScout units.
+// The engine's cPlanExplore consumes cExplorePlanExploreAreaIDs; this mod
+// selects, scores, and filters the area IDs while the engine handles
+// pathing and waypoint sequencing. Herd divert, danger flee, and Oracle
+// LOS pausing are preserved as override layers that park/resume the plan.
 //
-// See docs/superpowers/specs/2026-05-04-intelligent-auto-scout-design.md
-// for the full design.
+// Design: openspec/changes/engine-explore-migration/design.md
 //==============================================================================
 
 const int cAutoScoutState_Idle      = 0;
@@ -56,11 +54,11 @@ const int cAutoScout_StuckTickLimit = 30;
 // against unexpected state cycles).
 const int cAutoScout_MaxChainPerTick = 4;
 
-// Max hops in a per-scout corridor (BFS predecessor chain from start area to
+// Max hops reconstructed from the BFS predecessor chain (start area to
 // chosen target area, inclusive of both endpoints). BFS batchMax is 2 for
-// regular scouts and 3 for oracles, so a real corridor is at most 4 entries;
-// 8 leaves comfortable headroom and keeps the flat-array math trivial.
-const int cAutoScout_MaxCorridorHops = 8;
+// regular scouts and 3 for oracles, so a real path is at most 4 entries;
+// 8 leaves comfortable headroom as a defensive cap.
+const int cAutoScout_MaxBfsPathHops = 8;
 
 // Plan-state integer for cPlanStateIdle (from docs/MythTRConstants.txt:3166).
 // Setting this on a cPlanExplore parks the plan while keeping it alive as a UI
@@ -2153,7 +2151,7 @@ void autoScout_clearBfsResult()
 
 // Fill gAutoScout_bfsResultPath with the ordered chain start -> ... -> target
 // by walking gAutoScout_bfsPredecessor backwards from target. Capped at
-// cAutoScout_MaxCorridorHops as a defensive guard against unexpected loops.
+// cAutoScout_MaxBfsPathHops as a defensive guard against unexpected loops.
 // XS doesn't allow int[] function parameters, hence the global predecessor
 // table instead of passing it in.
 void autoScout_buildBfsPath(int startArea = -1, int targetArea = -1)
@@ -2165,7 +2163,7 @@ void autoScout_buildBfsPath(int startArea = -1, int targetArea = -1)
    // we reverse it into gAutoScout_bfsResultPath afterwards.
    int[] tmp = new int(0, 0);
    int cur = targetArea;
-   while (cur >= 0 && cur != startArea && tmp.size() < cAutoScout_MaxCorridorHops)
+   while (cur >= 0 && cur != startArea && tmp.size() < cAutoScout_MaxBfsPathHops)
    {
       tmp.add(cur);
       if (cur >= gAutoScout_bfsPredecessor.size()) { cur = -1; }
