@@ -6,9 +6,9 @@ edition = "2024"
 [dependencies]
 serde_json = "1.0.150"
 tokio = { version = "1.52.3", features = ["full"] }
-tower-lsp = { version = "0.20.0", default-features = false, features = ["runtime-agnostic"] }
+tower-lsp = { version = "0.20.0", features = ["tokio", "tokio-util"] }
 tracing = "0.1.44"
-tracing-subscriber = "0.3.23"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tree-sitter = "0.26.9"
 tree-sitter-c = "0.24.2"
 tree-sitter-language = "0.1"
