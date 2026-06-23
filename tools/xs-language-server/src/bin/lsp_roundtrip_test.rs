@@ -60,6 +60,15 @@ const PREPARE_RENAME: &str = r#"{"jsonrpc":"2.0","id":12,"method":"textDocument/
 // prepareRename on the engine-API symbol `aiEcho` in /tmp/test.xs (line 4
 // col 6 is on 'c'). Must return null.
 const PREPARE_RENAME_ENGINE: &str = r#"{"jsonrpc":"2.0","id":13,"method":"textDocument/prepareRename","params":{"textDocument":{"uri":"file:///tmp/test.xs"},"position":{"line":4,"character":6}}}"#;
+// Week 5: types.xs contains 2 valid + 2 invalid engine API calls.
+//   Line 0: void test()
+//   Line 1: {
+//   Line 2:    aiEcho("valid");                  <-- ok
+//   Line 3:    aiEchoCategory(0, "warning");    <-- ok
+//   Line 4:    aiEcho("too", "many");            <-- arg count error (1 expected)
+//   Line 5:    aiEcho(42);                       <-- arg type error (expected string, got int)
+//   Line 6: }
+const DID_OPEN_TYPES: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/types.xs","languageId":"xs","version":1,"text":"void test()\n{\n   aiEcho(\"valid\");\n   aiEchoCategory(0, \"warning\");\n   aiEcho(\"too\", \"many\");\n   aiEcho(42);\n}\n"}}}"#;
 const SHUTDOWN: &str = r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#;
 const EXIT: &str = r#"{"jsonrpc":"2.0","method":"exit"}"#;
 
@@ -161,7 +170,7 @@ fn main() {
 
     // Write the full message sequence (including exit) so the server
     // processes everything and exits, flushing stdout.
-    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, COMPLETION_AI, HOVER_AI, DEFINITION_AI, DID_OPEN_WORKSPACE, HOVER_WORKSPACE, DEFINITION_WORKSPACE, HOVER_CONSTANT, DOCUMENT_SYMBOL, DID_OPEN_REFS, REFERENCES, RENAME, PREPARE_RENAME, PREPARE_RENAME_ENGINE, SHUTDOWN, EXIT] {
+    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, COMPLETION_AI, HOVER_AI, DEFINITION_AI, DID_OPEN_WORKSPACE, HOVER_WORKSPACE, DEFINITION_WORKSPACE, HOVER_CONSTANT, DOCUMENT_SYMBOL, DID_OPEN_REFS, REFERENCES, RENAME, PREPARE_RENAME, PREPARE_RENAME_ENGINE, DID_OPEN_TYPES, SHUTDOWN, EXIT] {
         eprintln!("[test] writing {} bytes", frame(msg).len());
         stdin
             .write_all(frame(msg).as_bytes())
@@ -190,6 +199,7 @@ fn main() {
     let mut rename_resp = None;
     let mut prepare_rename_resp = None;
     let mut prepare_rename_engine_resp = None;
+    let mut types_diag_raw: Option<String> = None;
 
     // Read everything from stdout, then parse.
     stdout.read_to_end(&mut all_bytes).expect("read stdout to end");
@@ -230,6 +240,19 @@ fn main() {
                         prepare_rename_resp = Some(msg);
                     } else if id == 13 && prepare_rename_engine_resp.is_none() {
                         prepare_rename_engine_resp = Some(msg);
+                    }
+                } else if msg.get("method").and_then(|m| m.as_str())
+                    == Some("textDocument/publishDiagnostics")
+                {
+                    // Week 5: capture the publishDiagnostics notification
+                    // for /tmp/types.xs so we can assert on the typecheck
+                    // output.
+                    let uri = msg
+                        .get("params")
+                        .and_then(|p| p.get("uri"))
+                        .and_then(|u| u.as_str());
+                    if uri == Some("file:///tmp/types.xs") && types_diag_raw.is_none() {
+                        types_diag_raw = Some(msg.to_string());
                     }
                 }
             }
@@ -491,6 +514,29 @@ fn main() {
     } else {
         println!("FAIL: prepareRename did not return null for engine-API symbol (id13={has_id_13}, null={has_null_result})");
         println!("  prepare rename engine response: {}", prepare_rename_engine_resp);
+        all_pass = false;
+    }
+
+    // Week 5: type checking. /tmp/types.xs has 2 valid + 2 invalid calls.
+    //   * aiEcho("valid")            -- ok
+    //   * aiEchoCategory(0, "warning")-- ok
+    //   * aiEcho("too", "many")      -- 1 expected, 2 got  (count error)
+    //   * aiEcho(42)                 -- expected string, got int (type error)
+    let types_diag_raw = types_diag_raw.clone().unwrap_or_default();
+    let has_count_err = types_diag_raw.contains("expected 1 argument(s) to `aiEcho`");
+    let has_type_err = types_diag_raw
+        .contains("expected argument 1 of type `string` for `aiEcho`, got `int`");
+    // The valid calls should NOT produce type errors. The "got `string`" case
+    // would be a false positive, so verify it's absent.
+    let has_no_err_on_valid_calls = !types_diag_raw
+        .contains("expected argument 1 of type `string` for `aiEcho`, got `string`");
+    if has_count_err && has_type_err && has_no_err_on_valid_calls {
+        println!("PASS: typecheck flagged wrong count + wrong type on /tmp/types.xs");
+    } else {
+        println!(
+            "FAIL: typecheck incomplete (count_err={has_count_err}, type_err={has_type_err}, no_false_positive={has_no_err_on_valid_calls})"
+        );
+        println!("  raw diagnostics: {types_diag_raw}");
         all_pass = false;
     }
 

@@ -8,6 +8,7 @@ mod parser;
 mod references;
 mod server;
 mod symbols;
+mod typecheck;
 mod word;
 
 use server::XsLanguageServer;

@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info};
 
-use crate::{completion, diagnostics, engine_api, parser, references, symbols, word};
+use crate::{completion, diagnostics, engine_api, parser, references, symbols, typecheck, word};
 
 /// Holds the parsed-but-not-yet-processed text of every document the client
 /// has opened. Populated by `did_open` / `did_change`, cleared by `did_close`.
@@ -447,12 +447,29 @@ impl XsLanguageServer {
         }
     }
 
-    /// Parse `text` as XS and publish any parse errors as LSP diagnostics.
-    /// An empty `Vec` (clean parse) is also published so clients clear
-    /// stale diagnostics for this URI.
+    /// Parse `text` as XS and publish any parse errors AND engine-API call
+    /// type errors as LSP diagnostics. An empty `Vec` (clean parse) is
+    /// also published so clients clear stale diagnostics for this URI.
     async fn publish_diagnostics(&self, uri: &Url, text: &str, version: i32) {
         let diagnostics = match parser::parse(text) {
-            Some(tree) => diagnostics::collect_diagnostics(&tree, text),
+            Some(tree) => {
+                let mut all = diagnostics::collect_diagnostics(&tree, text);
+                // Week 5: type-check engine API calls (arg count + arg type).
+                // We hold the symbol-tables lock briefly to look up the
+                // per-file table; releasing before `publish_diagnostics`
+                // keeps the lock window minimal.
+                let typecheck_diags = {
+                    let tables = self.symbol_tables.lock().await;
+                    match tables.get(uri) {
+                        Some(table) => {
+                            typecheck::check_calls(&tree, text, &self.engine, table)
+                        }
+                        None => Vec::new(),
+                    }
+                };
+                all.extend(typecheck_diags);
+                all
+            }
             None => vec![Diagnostic {
                 range: Range::new(Position::new(0, 0), Position::new(0, 0)),
                 severity: Some(DiagnosticSeverity::ERROR),
