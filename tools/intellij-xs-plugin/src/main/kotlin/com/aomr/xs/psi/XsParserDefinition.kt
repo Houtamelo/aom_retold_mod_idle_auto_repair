@@ -43,6 +43,11 @@ class XsParserDefinition : ParserDefinition {
         val FILE = IFileElementType("XS_FILE", XsLanguage.INSTANCE)
         val WHITESPACES = TokenSet.create(XsTokenTypes.WHITE_SPACE)
         val COMMENTS = TokenSet.create(XsTokenTypes.LINE_COMMENT, XsTokenTypes.BLOCK_COMMENT)
-        val STRINGS = TokenSet.create(XsTokenTypes.STRING_QUOTE, XsTokenTypes.CHAR_QUOTE)
+        val STRINGS = TokenSet.create(
+            XsTokenTypes.STRING_LITERAL,
+            XsTokenTypes.CHAR_LITERAL,
+            XsTokenTypes.STRING_QUOTE,
+            XsTokenTypes.CHAR_QUOTE
+        )
     }
 }

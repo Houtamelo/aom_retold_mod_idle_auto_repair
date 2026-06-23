@@ -11,6 +11,9 @@ import com.intellij.psi.tree.IElementType;
 %function advance
 %type IElementType
 
+%state IN_STRING
+%state IN_CHAR
+
 WHITE_SPACE=[ \t\n\f\r]+
 IDENTIFIER=[A-Za-z_][A-Za-z_0-9]*
 
@@ -26,8 +29,21 @@ IDENTIFIER=[A-Za-z_][A-Za-z_0-9]*
     ")"               { return XsTokenTypes.RPAREN; }
     "["               { return XsTokenTypes.LBRACKET; }
     "]"               { return XsTokenTypes.RBRACKET; }
-    "\""              { return XsTokenTypes.STRING_QUOTE; }
-    "'"               { return XsTokenTypes.CHAR_QUOTE; }
+    ","               { return XsTokenTypes.COMMA; }
+    "\""              { yybegin(IN_STRING); return XsTokenTypes.STRING_QUOTE; }
+    "'"               { yybegin(IN_CHAR); return XsTokenTypes.CHAR_QUOTE; }
     {IDENTIFIER}      { return XsTokenTypes.IDENTIFIER; }
     [^]               { return XsTokenTypes.XS_OTHER; }
+}
+
+<IN_STRING> {
+    "\""              { yybegin(YYINITIAL); return XsTokenTypes.STRING_QUOTE; }
+    [^\"\\]+         { return XsTokenTypes.STRING_LITERAL; }
+    "\\" .           { return XsTokenTypes.STRING_LITERAL; }
+}
+
+<IN_CHAR> {
+    "'"               { yybegin(YYINITIAL); return XsTokenTypes.CHAR_QUOTE; }
+    [^\'\\]          { return XsTokenTypes.CHAR_LITERAL; }
+    "\\" .           { return XsTokenTypes.CHAR_LITERAL; }
 }

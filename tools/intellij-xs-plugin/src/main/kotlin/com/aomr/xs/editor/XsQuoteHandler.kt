@@ -16,8 +16,11 @@ class XsQuoteHandler : QuoteHandler {
     override fun hasNonClosedLiteral(editor: Editor?, iterator: HighlighterIterator?, offset: Int): Boolean = false
 
     override fun isInsideLiteral(iterator: HighlighterIterator?): Boolean =
-        isQuoteToken(iterator?.tokenType)
+        isQuoteToken(iterator?.tokenType) || isLiteralToken(iterator?.tokenType)
 
     private fun isQuoteToken(tokenType: Any?): Boolean =
         tokenType == XsTokenTypes.STRING_QUOTE || tokenType == XsTokenTypes.CHAR_QUOTE
+
+    private fun isLiteralToken(tokenType: Any?): Boolean =
+        tokenType == XsTokenTypes.STRING_LITERAL || tokenType == XsTokenTypes.CHAR_LITERAL
 }
