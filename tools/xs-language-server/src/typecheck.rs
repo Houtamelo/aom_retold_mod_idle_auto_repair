@@ -23,19 +23,20 @@
 
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
-use crate::engine_api::EngineApi;
+use crate::engine_api::{EngineApi, Param};
 use crate::symbols::SymbolTable;
 
 /// Walk `tree` and return one `Diagnostic` per wrong-arg-count or
-/// wrong-arg-type call to a known engine syscall.
+/// wrong-arg-type call to a known engine or user-defined function.
 pub fn check_calls(
     tree: &tree_sitter::Tree,
     source: &str,
     engine: &EngineApi,
     table: &SymbolTable,
+    project: Option<&crate::semantic::VirtualProject>,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    walk(tree.root_node(), source, engine, table, &mut out);
+    walk(tree.root_node(), source, engine, table, project, &mut out);
     out
 }
 
@@ -44,14 +45,15 @@ fn walk(
     source: &str,
     engine: &EngineApi,
     table: &SymbolTable,
+    project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
     if node.kind() == "call_expression" {
-        check_one_call(node, source, engine, table, out);
+        check_one_call(node, source, engine, table, project, out);
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        walk(child, source, engine, table, out);
+        walk(child, source, engine, table, project, out);
     }
 }
 
@@ -60,18 +62,28 @@ fn check_one_call(
     source: &str,
     engine: &EngineApi,
     table: &SymbolTable,
+    project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
     let Some(callee) = extract_callee_name(call_node, source) else {
         return;
     };
-    let Some(syscall) = engine.find_syscall(&callee) else {
-        return;
+
+    // Resolve the callee against the engine API and then against the virtual
+    // project. We keep the same count + type check shape for both.
+    let resolved: Option<Callee<'_>> = if let Some(syscall) = engine.find_syscall(&callee) {
+        Some(Callee::Engine(syscall))
+    } else {
+        project.and_then(|p| resolve_workspace_function(p, &callee)).map(Callee::Workspace)
     };
+
+    let Some(target) = resolved else { return };
+    let name = target.name();
+    let params = target.params();
 
     let arg_list = find_named_child(call_node, "argument_list");
     let arg_count = arg_list.map(count_args).unwrap_or(0);
-    let expected_count = syscall.params.len();
+    let expected_count = params.len();
 
     if arg_count != expected_count {
         out.push(Diagnostic {
@@ -81,8 +93,7 @@ fn check_one_call(
             code_description: None,
             source: Some("xs-language-server".to_string()),
             message: format!(
-                "expected {expected_count} argument(s) to `{name}`, got {arg_count}",
-                name = syscall.name
+                "expected {expected_count} argument(s) to `{name}`, got {arg_count}"
             ),
             related_information: None,
             tags: None,
@@ -96,7 +107,7 @@ fn check_one_call(
     let Some(args) = arg_list else { return };
     for (i, (arg_node, expected)) in args
         .named_children(&mut args.walk())
-        .zip(syscall.params.iter())
+        .zip(params.iter())
         .enumerate()
     {
         let Some(actual_ty) = expr_type(arg_node, source, table) else {
@@ -113,7 +124,7 @@ fn check_one_call(
                     "expected argument {i} of type `{expected}` for `{name}`, got `{actual}`",
                     i = i + 1,
                     expected = expected.ty,
-                    name = syscall.name,
+                    name = name,
                     actual = actual_ty
                 ),
                 related_information: None,
@@ -122,6 +133,49 @@ fn check_one_call(
             });
         }
     }
+}
+
+/// A resolved callee, either an engine syscall or a workspace function.
+enum Callee<'a> {
+    Engine(&'a crate::engine_api::Syscall),
+    Workspace(&'a crate::symbols::Symbol),
+}
+
+impl<'a> Callee<'a> {
+    fn name(&self) -> &str {
+        match self {
+            Callee::Engine(s) => &s.name,
+            Callee::Workspace(sym) => &sym.name,
+        }
+    }
+
+    fn params(&self) -> Vec<Param> {
+        match self {
+            Callee::Engine(s) => s.params.clone(),
+            Callee::Workspace(sym) => sym
+                .params
+                .iter()
+                .map(|p| Param {
+                    ty: p.ty.clone(),
+                    name: p.name.clone(),
+                    default: p.default.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn resolve_workspace_function<'a>(
+    project: &'a crate::semantic::VirtualProject,
+    name: &str,
+) -> Option<&'a crate::symbols::Symbol> {
+    project.files.values().find_map(|file| {
+        file.table.symbols.iter().find(|s| {
+            s.kind == crate::symbols::SymbolKind::Function
+                && s.name == name
+                && !s.is_forward
+        })
+    })
 }
 
 /// Extract the function name from a `call_expression`. XS calls look like
@@ -173,10 +227,16 @@ fn number_literal_type(node: tree_sitter::Node<'_>, source: &str) -> String {
     }
 }
 
-/// Week 5: exact match only. Subtype compatibility (e.g. `int` -> `float`)
-/// is out of scope.
+/// Type compatibility for function-call arguments.
+///
+/// XS allows implicit `int` -> `float` widening, but not `float` -> `int`
+/// (loss of precision). String and bool are not implicitly convertible to
+/// numeric types.
 fn types_compatible(expected: &str, actual: &str) -> bool {
-    expected == actual
+    if expected == actual {
+        return true;
+    }
+    expected == "float" && actual == "int"
 }
 
 fn count_args(arg_list_node: tree_sitter::Node<'_>) -> usize {
@@ -246,7 +306,7 @@ mod tests {
         let src = r#"void test() { aiEcho("hello"); aiEchoCategory(0, "warning"); }"#;
         let tree = parse(src);
         let table = table_for(src);
-        let diags = check_calls(&tree, src, &engine(), &table);
+        let diags = check_calls(&tree, src, &engine(), &table, None);
         assert!(
             diags.is_empty(),
             "expected no diagnostics, got: {:?}",
@@ -259,7 +319,7 @@ mod tests {
         let src = r#"void test() { aiEcho("hi", "extra"); }"#;
         let tree = parse(src);
         let table = table_for(src);
-        let diags = check_calls(&tree, src, &engine(), &table);
+        let diags = check_calls(&tree, src, &engine(), &table, None);
         let msgs = messages(&diags);
         assert!(
             msgs.iter()
@@ -274,7 +334,7 @@ mod tests {
         let src = r#"void test() { aiEchoCategory(0); }"#;
         let tree = parse(src);
         let table = table_for(src);
-        let diags = check_calls(&tree, src, &engine(), &table);
+        let diags = check_calls(&tree, src, &engine(), &table, None);
         let msgs = messages(&diags);
         assert!(
             msgs.iter()
@@ -289,7 +349,7 @@ mod tests {
         let src = r#"void test() { aiEcho(42); }"#;
         let tree = parse(src);
         let table = table_for(src);
-        let diags = check_calls(&tree, src, &engine(), &table);
+        let diags = check_calls(&tree, src, &engine(), &table, None);
         let msgs = messages(&diags);
         assert!(
             msgs.iter().any(|m| m.contains("expected argument 1 of type `string`")
@@ -304,7 +364,7 @@ mod tests {
         let src = r#"void test() { aiEchoCategory("oops", "msg"); }"#;
         let tree = parse(src);
         let table = table_for(src);
-        let diags = check_calls(&tree, src, &engine(), &table);
+        let diags = check_calls(&tree, src, &engine(), &table, None);
         let msgs = messages(&diags);
         assert!(
             msgs.iter().any(|m| m.contains("expected argument 1 of type `int`")
@@ -327,7 +387,7 @@ mod tests {
         "#;
         let tree = parse(src);
         let table = table_for(src);
-        let diags = check_calls(&tree, src, &engine(), &table);
+        let diags = check_calls(&tree, src, &engine(), &table, None);
         let msgs = messages(&diags);
         assert!(
             msgs.iter().any(|m| m.contains("expected argument 1 of type `string`")
@@ -342,7 +402,7 @@ mod tests {
         let src = r#"void test() { notAFunction(1, 2); }"#;
         let tree = parse(src);
         let table = table_for(src);
-        let diags = check_calls(&tree, src, &engine(), &table);
+        let diags = check_calls(&tree, src, &engine(), &table, None);
         assert!(
             diags.is_empty(),
             "unknown function should not be flagged, got: {:?}",
@@ -356,7 +416,7 @@ mod tests {
         let src = r#"void test() { aiEcho(42, 99); }"#;
         let tree = parse(src);
         let table = table_for(src);
-        let diags = check_calls(&tree, src, &engine(), &table);
+        let diags = check_calls(&tree, src, &engine(), &table, None);
         let msgs = messages(&diags);
         assert!(
             msgs.iter()
@@ -380,10 +440,49 @@ mod tests {
         let src = r#"void test() { aiEcho("ok", true); }"#;
         let tree = parse(src);
         let table = table_for(src);
-        let diags = check_calls(&tree, src, &engine(), &table);
+        let diags = check_calls(&tree, src, &engine(), &table, None);
         // The only way this can fail is if `aiEcho` has a 2-arg signature
         // and `true` is treated as something other than bool. Either way we
         // just want to ensure no panic + sensible output.
         let _ = messages(&diags);
+    }
+
+    #[test]
+    fn allows_int_to_float_widening_for_user_function() {
+        let src = r#"void takeFloat(float x) {}
+void test() { takeFloat(5); }"#;
+        let tree = parse(src);
+        let table = table_for(src);
+
+        let mut files = std::collections::HashMap::new();
+        files.insert(std::path::PathBuf::from("test.xs"), src.to_string());
+        let project = crate::semantic::VirtualProject::from_files(files);
+
+        let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
+        assert!(
+            diags.is_empty(),
+            "int -> float widening should be allowed, got: {:?}",
+            messages(&diags)
+        );
+    }
+
+    #[test]
+    fn flags_float_to_int_loss_for_user_function() {
+        let src = r#"void takeInt(int x) {}
+void test() { takeInt(3.14); }"#;
+        let tree = parse(src);
+        let table = table_for(src);
+
+        let mut files = std::collections::HashMap::new();
+        files.insert(std::path::PathBuf::from("test.xs"), src.to_string());
+        let project = crate::semantic::VirtualProject::from_files(files);
+
+        let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
+        let msgs = messages(&diags);
+        assert!(
+            msgs.iter().any(|m| m.contains("expected argument 1 of type `int`") && m.contains("got `float`")),
+            "expected float->int loss error, got: {:?}",
+            msgs
+        );
     }
 }
