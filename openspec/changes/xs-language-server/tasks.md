@@ -142,10 +142,10 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-file-watching-cache-invalidation.md`
 - **Files affected:** `tools/xs-language-server/src/cache.rs`, `tools/xs-language-server/src/workspace.rs`
 - **Acceptance criteria:**
-  1. Store parsed game-folder files at `game_parse/v1/<mtime>-<sha256>.json`.
-  2. Parse-tree + per-file symbol table loaded on first access.
-  3. If mtime/SHA-256 unchanged, reuse cache across restarts.
-  4. Unit tests cover cache key derivation and warm load.
+  1. [x] Store parsed game-folder files at `game_parse/v1/<mtime>-<sha256>.json`.
+  2. [x] Parse-tree + per-file symbol table loaded on first access.
+  3. [x] If mtime/SHA-256 unchanged, reuse cache across restarts.
+  4. [x] Unit tests cover cache key derivation and warm load.
 - **Estimated lines changed:** ~200
 - **Test command:** `cargo test parse_cache`
 

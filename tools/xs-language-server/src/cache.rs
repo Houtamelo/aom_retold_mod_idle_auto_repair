@@ -15,12 +15,14 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::{parser, symbols};
 
 /// Returns the user-level cache root directory for this LSP.
 ///
@@ -86,6 +88,106 @@ pub fn parse_cache_key(mtime: SystemTime, content_hash: &str) -> String {
 /// Path to a cached parse-tree/symbol-table JSON file.
 pub fn parse_cache_path(cache_dir: &Path, key: &str) -> PathBuf {
     parse_cache_dir(cache_dir).join(format!("{key}.json"))
+}
+
+/// A single entry in the per-file parse symbol cache.
+///
+/// The raw tree-sitter `Tree` is intentionally NOT cached — it cannot be
+/// cheaply serialized across process restarts. We cache the extracted
+/// `SymbolTable` and re-parse on demand to obtain the tree for diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParseCacheEntry {
+    pub relative_path: String,
+    pub mtime_millis: u128,
+    pub content_hash: String,
+    pub symbols: symbols::SymbolTable,
+}
+
+/// Compute the cache key (`mtime-<sha256>`) and content hash for `path`.
+pub fn parse_file_key(path: &Path) -> Result<(String, String, u128)> {
+    let meta = fs::metadata(path)
+        .with_context(|| format!("reading metadata for parse cache key: {path:?}"))?;
+    let mtime = meta
+        .modified()
+        .with_context(|| format!("reading mtime for parse cache key: {path:?}"))?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("reading file for parse cache key: {path:?}"))?;
+    let hash = sha256_bytes(content.as_bytes());
+    let millis = mtime.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let key = format!("{millis}-{hash}");
+    Ok((key, hash, millis))
+}
+
+/// Load the cached `SymbolTable` for a game-folder file if it matches the
+/// file's current mtime and SHA-256, otherwise parse the file, extract the
+/// symbol table, and write a new cache entry.
+///
+/// `relative_path` is the file's path relative to the game folder (e.g.
+/// `ai/core/core.xs`). It is stored in the cache entry so invalidation has
+/// a stable key even when the mtime/hash changes.
+pub fn load_or_parse_symbols(
+    path: &Path,
+    relative_path: &str,
+    cache_dir: &Path,
+) -> Result<symbols::SymbolTable> {
+    let (key, content_hash, mtime_millis) = parse_file_key(path)?;
+    let cache_path = parse_cache_path(cache_dir, &key);
+
+    if let Some(entry) = read_json::<ParseCacheEntry>(&cache_path)? {
+        if entry.relative_path == relative_path
+            && entry.content_hash == content_hash
+            && entry.mtime_millis == mtime_millis
+        {
+            return Ok(entry.symbols);
+        }
+    }
+
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("re-reading source for parse cache: {path:?}"))?;
+    let tree = parser::parse(&text)
+        .with_context(|| format!("installing XS parser for {path:?}"))?;
+    let table = symbols::build_symbol_table(&tree, &text);
+
+    let entry = ParseCacheEntry {
+        relative_path: relative_path.to_string(),
+        mtime_millis,
+        content_hash,
+        symbols: table.clone(),
+    };
+    write_json(&cache_path, &entry)
+        .with_context(|| format!("writing parse cache file {cache_path:?}"))?;
+
+    Ok(table)
+}
+
+/// Remove all cached parse entries whose `relative_path` matches `relative_path`.
+///
+/// Because the cache file name is keyed by mtime+hash rather than by path,
+/// we scan the parse-cache directory and delete every matching entry. The
+/// directory is small in practice.
+pub fn invalidate_parse_cache(relative_path: &str, cache_dir: &Path) -> Result<()> {
+    let dir = parse_cache_dir(cache_dir);
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("reading parse cache directory {dir:?}"))?
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        match read_json::<ParseCacheEntry>(&path) {
+            Ok(Some(cached)) if cached.relative_path == relative_path => {
+                fs::remove_file(&path)
+                    .with_context(|| format!("removing stale parse cache {path:?}"))?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Serialize `value` to JSON and atomically write it to `path`.
@@ -253,5 +355,69 @@ mod tests {
         let key = parse_cache_key(mtime, "abc123");
         assert!(key.starts_with("12345-"));
         assert!(key.ends_with("abc123"));
+    }
+
+    #[test]
+    fn load_or_parse_symbols_caches_and_reuses_symbol_table() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let src_dir = tmp.path().join("game");
+        let file = src_dir.join("ai").join("core").join("core.xs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "void myCore() {}\n").unwrap();
+
+        // Cold load: parse + cache.
+        let t1 = load_or_parse_symbols(&file, "ai/core/core.xs", &cache_dir).unwrap();
+        assert!(t1.find("myCore").is_some());
+        let files: Vec<_> = fs::read_dir(parse_cache_dir(&cache_dir))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(files.len(), 1);
+
+        // Warm load: cache hit, no new file written.
+        let t2 = load_or_parse_symbols(&file, "ai/core/core.xs", &cache_dir).unwrap();
+        assert!(t2.find("myCore").is_some());
+        let files: Vec<_> = fs::read_dir(parse_cache_dir(&cache_dir))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn invalidate_parse_cache_removes_matching_entries() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let src_dir = tmp.path().join("game");
+        let file = src_dir.join("ai").join("core").join("core.xs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "void myCore() {}\n").unwrap();
+
+        load_or_parse_symbols(&file, "ai/core/core.xs", &cache_dir).unwrap();
+        assert!(!parse_cache_dir(&cache_dir).read_dir().unwrap().flatten().next().is_none());
+
+        invalidate_parse_cache("ai/core/core.xs", &cache_dir).unwrap();
+        assert!(parse_cache_dir(&cache_dir).read_dir().unwrap().flatten().next().is_none());
+    }
+
+    #[test]
+    fn load_or_parse_reparses_after_invalidation() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let src_dir = tmp.path().join("game");
+        let file = src_dir.join("ai").join("core").join("core.xs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "void oldName() {}\n").unwrap();
+
+        let _ = load_or_parse_symbols(&file, "ai/core/core.xs", &cache_dir).unwrap();
+
+        // Wait a millisecond so the mtime changes.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(&file, "void newName() {}\n").unwrap();
+
+        let t = load_or_parse_symbols(&file, "ai/core/core.xs", &cache_dir).unwrap();
+        assert!(t.find("newName").is_some());
+        assert!(t.find("oldName").is_none());
     }
 }

@@ -19,7 +19,7 @@
 use tower_lsp::lsp_types::{Position, Range};
 
 /// What kind of XS construct a symbol represents.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SymbolKind {
     Rule,
     Function,
@@ -40,7 +40,7 @@ impl SymbolKind {
 }
 
 /// A function parameter — `int x` or `string s = "default"`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Param {
     pub ty: String,
     pub name: String,
@@ -59,7 +59,7 @@ impl Param {
 }
 
 /// A single named XS construct visible at the top level of a file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
@@ -80,7 +80,7 @@ pub struct Symbol {
 }
 
 /// The full per-file symbol table.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SymbolTable {
     pub symbols: Vec<Symbol>,
 }
