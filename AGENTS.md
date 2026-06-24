@@ -98,7 +98,7 @@ The plugin is now a thin LSP client. Settings live under **Settings → Language
 4. `cargo run --bin lsp_roundtrip_test` for the end-to-end LSP message sequence
 5. Integration test: open the IntelliJ plugin and verify diagnostics arrive for a mod `.xs` file
 
-The server caches extracted engine API data under `~/.local/state/aomr_lsp/v1/` (or `~/.aomr_lsp` if `XDG_STATE_HOME` is unavailable). The cache key is the SHA-256 of `doxygen_retail.7z`; warm starts load the cached JSON directly instead of re-extracting the archive.
+The server caches extracted engine API data under `~/.local/state/aomr_lsp/v2/` (or `~/.aomr_lsp/v2/` if `XDG_STATE_HOME` is unavailable). The cache key is the SHA-256 of `doxygen_retail.7z`; warm starts load the cached JSON directly instead of re-extracting the archive. The `v2/` schema was introduced when the legacy JSON backfill was removed in Phase 5; older `v1/` cache files are ignored.
 
 ## Where to look for more
 

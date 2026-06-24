@@ -39,7 +39,7 @@ The redesigned XS Language Server is fully implemented and all automated verific
 
 **Scenarios verified:**
 
-1. **Cold start** — `EngineApi::load_from_archive` extracts `doxygen_retail.7z`, writes `~/.local/state/aomr_lsp/v1/<sha256>.json`, and loads 1,804 syscalls + 193 AI-plan constants.
+1. **Cold start** — `EngineApi::load_from_archive` extracts `doxygen_retail.7z`, writes `~/.local/state/aomr_lsp/v2/<sha256>.json`, and loads 1,804 syscalls + 193 AI-plan constants.
 2. **Warm start** — a second call with the same archive loads cached JSON and skips extraction.
 3. **Corrupt cache** — a corrupt cache file is deleted and the archive is re-extracted.
 4. **CLI/env resolution** — `main.rs` resolves `--game-path`, positional argument, and `AOMR_GAME_PATH` in the specified precedence order and exits descriptively when the archive is missing.
@@ -233,6 +233,7 @@ The redesigned XS Language Server is fully implemented and all automated verific
 | 2 | `EngineApi` exposes 1,805 syscalls | Direct archive extraction yields 1,804 syscalls (`xsExecute` is not in the Doxygen archive) | No legacy backfill; the LSP now reports exactly what the archive contains |
 | 3 | T30: `./gradlew test` with platform fixtures | Rewrote settings/detector tests as plain JUnit to avoid headless fixture hangs | Sandbox CI cannot run `BasePlatformTestCase`/`LightPlatformTestCase` reliably; the rewritten tests still assert the same behavior |
 | 4 | Per-keystroke latency < 200 ms | Not instrumented on a representative corpus | Implementation uses per-file parse cache and single-file diagnostic passes, but no corpus benchmark was run |
+| 5 | Engine-data cache schema version `v1/` per original design/specs | Bumped to `v2/` when legacy JSON backfill was removed | Prevents stale `v1/` caches (which could still contain 1,805 backfilled syscalls) from masking the new no-backfill behavior; older `v1/` files are left in place and ignored |
 
 No deviations break the specified behavior.
 

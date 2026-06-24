@@ -3,7 +3,7 @@
 //!
 //! Data is extracted from the AoM:R `doxygen_retail.7z` archive and cached by
 //! SHA-256 under the provided cache directory (usually
-//! `~/.local/state/aomr_lsp/v1/`). No static JSON resources are bundled or
+//! `~/.local/state/aomr_lsp/v2/`). No static JSON resources are bundled or
 //! loaded from sibling crates.
 
 use std::path::Path;
@@ -52,7 +52,7 @@ pub struct AiplanConstant {
     pub variable_value: String,
 }
 
-/// Combined engine data as stored in `v1/<hash>.json`.
+/// Combined engine data as stored in `v2/<hash>.json`.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct EngineData {
     pub syscalls: Vec<Syscall>,

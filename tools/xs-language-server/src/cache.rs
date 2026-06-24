@@ -5,12 +5,14 @@
 //! `~/.aomr_lsp/`):
 //!
 //! ```text
-//! v1/<sha256-of-doxygen_retail.7z>.json          engine API (syscalls + aiplans)
+//! v2/<sha256-of-doxygen_retail.7z>.json          engine API (syscalls + aiplans)
 //! game_parse/v1/<mtime>-<sha256>.json            per-file parse tree + symbols
 //! ```
 //!
-//! The `v1/` prefix is a schema-version marker. Future incompatible schema
-//! changes can write to `v2/` without invalidating older cache files.
+//! The `v2/` prefix for engine data is the current schema-version marker.
+//! It was bumped from `v1/` when the legacy JSON backfill was removed, so
+//! existing `v1/` caches are left in place and the server writes/reads only
+//! `v2/` files. Future incompatible schema changes can write to `v3/` etc.
 
 use std::fs;
 use std::io::Write;
@@ -38,9 +40,9 @@ pub fn state_cache_dir() -> PathBuf {
         })
 }
 
-/// `v1/` subdirectory for engine API cache files.
+/// `v2/` subdirectory for engine API cache files.
 pub fn engine_cache_dir(cache_dir: &Path) -> PathBuf {
-    cache_dir.join("v1")
+    cache_dir.join("v2")
 }
 
 /// `game_parse/v1/` subdirectory for per-file parse caches.
