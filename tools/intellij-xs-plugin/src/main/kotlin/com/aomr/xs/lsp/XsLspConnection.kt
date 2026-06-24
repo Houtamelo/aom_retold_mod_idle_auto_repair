@@ -9,8 +9,6 @@ import org.eclipse.lsp4j.DidCloseTextDocumentParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
 import org.eclipse.lsp4j.InitializeParams
 import org.eclipse.lsp4j.InitializedParams
-import org.eclipse.lsp4j.Registration
-import org.eclipse.lsp4j.RegistrationParams
 import org.eclipse.lsp4j.TextDocumentContentChangeEvent
 import org.eclipse.lsp4j.TextDocumentIdentifier
 import org.eclipse.lsp4j.TextDocumentItem
@@ -111,25 +109,6 @@ class XsLspConnection(
             log.info("Sent workspace/didChangeWorkspaceFolders: +${added.size} -${removed.size}")
         } catch (e: Exception) {
             log.warn("Failed to send workspace/didChangeWorkspaceFolders", e)
-        }
-    }
-
-    @Synchronized
-    fun registerGameFolderWatcher(gamePath: String) {
-        val s = server ?: return
-        val glob = "$gamePath/game/**/*.xs"
-        val registration = Registration(
-            "xs-game-folder-watcher",
-            "workspace/didChangeWatchedFiles",
-            org.eclipse.lsp4j.DidChangeWatchedFilesRegistrationOptions(
-                listOf(org.eclipse.lsp4j.FileSystemWatcher(glob))
-            )
-        )
-        try {
-            s.client.registerCapability(RegistrationParams(listOf(registration)))
-            log.info("Registered game-folder watcher: $glob")
-        } catch (e: Exception) {
-            log.warn("Failed to register game-folder watcher", e)
         }
     }
 

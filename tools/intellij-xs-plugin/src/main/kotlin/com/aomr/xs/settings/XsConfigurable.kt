@@ -5,6 +5,7 @@ import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.ui.CollectionListModel
 import com.intellij.ui.ToolbarDecorator
 import com.intellij.ui.components.JBList
@@ -15,6 +16,7 @@ import java.awt.datatransfer.StringSelection
 import java.awt.datatransfer.Transferable
 import javax.swing.JComponent
 import javax.swing.JList
+import javax.swing.ListSelectionModel
 import javax.swing.TransferHandler
 
 /**
@@ -32,7 +34,7 @@ class XsConfigurable(private val project: Project) : Configurable {
     private val modList = JBList(modModel)
 
     init {
-        modList.selectionMode = JList.SINGLE_SELECTION
+        modList.selectionMode = ListSelectionModel.SINGLE_SELECTION
         modList.dragEnabled = true
         modList.transferHandler = ReorderTransferHandler()
     }
@@ -117,8 +119,7 @@ class XsConfigurable(private val project: Project) : Configurable {
     }
 
     private fun runAutoDetect() {
-        val root = project.basePath?.let { com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(it) }
-            ?: project.guessProjectDir()
+        val root = project.basePath?.let { LocalFileSystem.getInstance().findFileByPath(it) }
             ?: return
         val detected = XsModAutoDetector.scan(root)
         if (detected.isEmpty()) {
@@ -166,11 +167,11 @@ class XsConfigurable(private val project: Project) : Configurable {
             val dropLocation = support.dropLocation as? JList.DropLocation ?: return false
             val targetIndex = dropLocation.index.coerceIn(0, modModel.size - 1)
             val path = support.transferable.getTransferData(DataFlavor.stringFlavor) as? String ?: return false
-            val currentIndex = modModel.indexOf(path)
+            val currentIndex = modModel.items.indexOf(path)
             if (currentIndex < 0) return false
             if (currentIndex == targetIndex) return true
             modModel.remove(currentIndex)
-            val insertIndex = if (targetIndex > currentIndex) targetIndex else targetIndex
+            val insertIndex = if (targetIndex > currentIndex) targetIndex - 1 else targetIndex
             modModel.add(insertIndex, path)
             modList.selectedIndex = insertIndex
             return true

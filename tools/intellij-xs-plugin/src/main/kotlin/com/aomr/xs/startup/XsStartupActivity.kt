@@ -10,6 +10,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.StartupActivity
+import com.intellij.openapi.vfs.LocalFileSystem
 
 /**
  * First-run UX for the XS Language Server client.
@@ -33,7 +34,7 @@ class XsStartupActivity : StartupActivity.DumbAware {
         }
 
         if (settings.state.modPaths.isEmpty()) {
-            val projectRoot = project.guessProjectDir()
+            val projectRoot = project.basePath?.let { LocalFileSystem.getInstance().findFileByPath(it) }
             if (projectRoot != null) {
                 val detected = XsModAutoDetector.scan(projectRoot)
                 if (detected.isEmpty()) {
