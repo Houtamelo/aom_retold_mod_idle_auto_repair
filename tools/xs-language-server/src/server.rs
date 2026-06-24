@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -40,15 +41,17 @@ pub struct XsLanguageServer {
     /// Per-file symbol tables, rebuilt on every `did_open` / `did_change`.
     pub symbol_tables: Arc<Mutex<HashMap<Url, symbols::SymbolTable>>>,
     pub engine: engine_api::SharedEngineApi,
+    pub game_path: PathBuf,
 }
 
 impl XsLanguageServer {
-    pub fn new(client: Client) -> Self {
+    pub fn new(client: Client, engine: engine_api::SharedEngineApi, game_path: PathBuf) -> Self {
         Self {
             client,
             documents: Arc::new(Mutex::new(DocumentStore::default())),
             symbol_tables: Arc::new(Mutex::new(HashMap::new())),
-            engine: Arc::new(engine_api::EngineApi::load_default().unwrap_or_default()),
+            engine,
+            game_path,
         }
     }
 }

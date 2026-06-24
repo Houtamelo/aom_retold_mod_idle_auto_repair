@@ -152,10 +152,27 @@ fn locate_server_binary() -> std::path::PathBuf {
         .expect("could not derive target/debug/ from current_exe()")
 }
 
+/// Derive the repository root from the crate manifest dir
+/// (`tools/xs-language-server/` -> repo root) so we can pass `docs/` as the
+/// game folder. `docs/doxygen_retail.7z` is committed in the repo.
+fn resolve_test_game_path() -> std::path::PathBuf {
+    let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // tools/xs-language-server -> tools -> repo root
+    let repo_root = crate_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root from CARGO_MANIFEST_DIR");
+    let path = repo_root.join("docs");
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
 fn main() {
     let server_path = locate_server_binary();
+    let game_path = resolve_test_game_path();
 
     let mut child = Command::new(&server_path)
+        .arg("--game-path")
+        .arg(&game_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(
