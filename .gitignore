@@ -7,6 +7,10 @@ extracted/
 tools/*
 !tools/intellij-xs-plugin/
 
+# Smoke-test artifacts (LSP binary + plugin zip). Built fresh per smoke test.
+# See docs/smoke-test-setup.md for what these are and how to use them.
+dist/
+
 # OS / editor noise
 .DS_Store
 *.swp
