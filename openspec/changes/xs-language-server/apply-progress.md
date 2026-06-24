@@ -164,3 +164,67 @@
 ## Next batch
 
 - **Phase 4 (T19–T26):** IntelliJ client integration
+
+---
+
+# Apply Progress — `xs-language-server` Phase 4
+
+**Status:** complete
+**Change:** xs-language-server (workspace & engine-data redesign)
+**Batch:** Phase 4 (T19–T26) — IntelliJ client integration
+**Branch:** `xs-language-server/redesign-phase-4`
+**Base:** `xs-language-server/redesign-phase-3` @ `749a277`
+
+## Tasks completed
+
+- [x] **T19** — Vendor `xs.tmLanguage.json` (extracted from `extracted/xs.vsix` once, committed under `tools/intellij-xs-plugin/src/main/resources/syntaxes/xs.tmLanguage.json`)
+- [x] **T20** — `XsSettings.kt` (`PersistentStateComponent` with `gamePath: String` and `modPaths: MutableList<String>`)
+- [x] **T21** — `XsConfigurable.kt` Settings UI panel (game folder field + file chooser, mod list with + / – buttons, auto-detect button)
+- [x] **T22** — `XsModAutoDetector.kt` recursive scan for `game/` folders; **stops recursion at `game/` boundaries**; collects parent dirs as mod roots
+- [x] **T23** — Extended `XsLspServerManager.kt` to read `XsSettings`, pass `--game-path`, send `didChangeWorkspaceFolders`, register `didChangeWatchedFiles` watcher, and react to settings changes
+- [x] **T24** — Registered `<projectConfigurable>` for `XsConfigurable` in `META-INF/plugin.xml`
+- [x] **T25** — First-run UX wiring in `XsStartupActivity` (DumbAware): if `gamePath` empty → notification prompting to open Settings; if `modPaths` empty → run `XsModAutoDetector` and warn if nothing found
+- [x] **T26** — Phase 4 verification: Kotlin compiles; sandbox `buildSearchableOptions` task fails on the bundled JBR (sandbox env quirk, not a code issue — `compileKotlin` is green)
+
+## Phase 4 finalization (post-task cleanup)
+
+After the user-reported container recreation interrupted the agent mid-cleanup, the leftover diff was committed as `bf2db33`:
+
+- **Commit `bf2db33`** — `refactor(intellij-xs-plugin): drop obsolete engine-facing Kotlin classes`
+  - Removed 8 production classes + 6 matching test classes that the LSP client now obsoletes (`XsCallContextDetector`, `XsCompletionContributor`, `XsAiPlans`, `XsEngineApi`, `XsDocumentationProvider`, `XsEngineReferenceContributor`, `XsEngineStubGenerator`, `XsParameterInfoHandler`, plus their tests)
+  - Tightened `XsLspConnection` / `XsLspServerManager` / `XsSettings` / `XsConfigurable` / `XsStartupActivity` to drop now-unused fields
+  - After this commit the IntelliJ plugin is a true thin LSP client (file type, TextMate bundle, brace matcher, settings UI, LSP lifecycle)
+
+## Commits made
+
+| Hash | Title |
+|------|-------|
+| `a273c34` | `feat(intellij-xs-plugin): vendor xs.tmLanguage.json` |
+| `1db0630` | `feat(intellij-xs-plugin): add XsSettings PersistentStateComponent` |
+| `3274ba5` | `feat(intellij-xs-plugin): add XsModAutoDetector (recursive game folder scan)` |
+| `96b4e2c` | `feat(intellij-xs-plugin): add XsConfigurable settings UI` |
+| `e58e85b` | `feat(intellij-xs-plugin): wire XsLspServerManager to settings + workspace folders + watch` |
+| `31beb26` | `chore(intellij-xs-plugin): register XsConfigurable in plugin.xml` |
+| `d36d664` | `feat(intellij-xs-plugin): first-run UX (auto-detect + warning + settings prompt)` |
+| `bf2db33` | `refactor(intellij-xs-plugin): drop obsolete engine-facing Kotlin classes` (post-interrupt cleanup) |
+
+## Test results
+
+- `cargo test` (LSP, after cleanup): **75 passed, 0 failed**
+- `./gradlew compileKotlin` (IntelliJ plugin, after cleanup): **BUILD SUCCESSFUL**
+- `./gradlew buildPlugin`: Kotlin compilation passes; `buildSearchableOptions` fails on the bundled JBR (sandbox env quirk — runs the IDE in a special mode; documented in the previous week 6 work as a known sandbox limitation, not a code issue)
+
+## Known issues / deviations
+
+1. **`buildSearchableOptions` fails in the sandbox.**
+   - The task runs the IDE's search-index generator under the bundled JBR; the sandbox container has a JBR/headless mismatch.
+   - Kotlin compilation succeeds. The artifact can be built on a non-sandbox machine.
+   - Workaround if needed in the sandbox: skip with `./gradlew buildPlugin -x buildSearchableOptions` and confirm `compileKotlin` is the gate that matters.
+
+2. **`XsModAutoDetector` does not yet have unit tests in the repo.**
+   - The detector logic is straightforward and exercised by hand on the synthetic tree described in the implementation guidance, but a formal `XsModAutoDetectorTest.kt` was deferred because the agent was interrupted before running it.
+   - Phase 5 verification should add a small fixture-backed test if a sandbox `gradle test` is runnable there.
+
+## Next batch
+
+- **Phase 5 (T27–T30):** VS Code removal (`.vsix`, `extracted/` exception) + housekeeping (AGENTS.md, docs/xs-lsp-spike.md, final verification).
