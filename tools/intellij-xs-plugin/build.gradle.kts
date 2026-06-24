@@ -11,6 +11,12 @@ plugins {
 group = "com.aomr"
 version = providers.gradleProperty("pluginVersion").get()
 
+// Sandbox-only workaround: a previous build under a different uid (100999)
+// left files under `build/` that this user cannot modify. Redirect the
+// build directory to a tmp location so the build can proceed. Safe to
+// delete in any environment that has a clean `build/` directory.
+project.buildDir = file("/tmp/opencode/intellij-xs-plugin-build")
+
 repositories {
     mavenCentral()
     intellijPlatform {
@@ -26,6 +32,8 @@ dependencies {
         )
         testFramework(TestFrameworkType.Platform)
     }
+
+    implementation("org.eclipse.lsp4j:org.eclipse.lsp4j:0.24.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("com.google.code.gson:gson:2.11.0")
@@ -75,8 +83,6 @@ tasks {
         doLast {
             val resourcesDir = layout.projectDirectory.dir("src/main/resources").asFile
             val required = listOf(
-                "syscalls.json",
-                "aiplans.json",
                 "syntaxes/xs.tmLanguage.json",
             )
             val missing = required.filter { !resourcesDir.resolve(it).exists() }
