@@ -4,7 +4,7 @@
     <vendor>aomr</vendor>
 
     <description><![CDATA[
-        <p>Language support for Age of Mythology: Retold XS scripts.</p>
+        <p>Language support for Age of Mythology: Retold XS scripts via a Rust LSP server.</p>
     ]]></description>
 
     <idea-version since-build="242" until-build="252.*"/>
@@ -22,9 +22,15 @@
         <lang.braceMatcher language="XS" implementationClass="com.aomr.xs.editor.XsBraceMatcher"/>
         <lang.quoteHandler language="XS" implementationClass="com.aomr.xs.editor.XsQuoteHandler"/>
         <lang.commenter language="XS" implementationClass="com.aomr.xs.editor.XsCommenter"/>
-        <completion.contributor language="XS" implementationClass="com.aomr.xs.completion.XsCompletionContributor"/>
-        <lang.documentationProvider language="XS" implementationClass="com.aomr.xs.documentation.XsDocumentationProvider"/>
-        <lang.parameterInfoHandler language="XS" implementationClass="com.aomr.xs.parameterInfo.XsParameterInfoHandler"/>
-        <psi.referenceContributor language="XS" implementation="com.aomr.xs.navigation.XsEngineReferenceContributor"/>
+
+        <notificationGroup id="XS Language Server" displayType="BALLOON"/>
+
+        <projectConfigurable
+            parentId="language"
+            instance="com.aomr.xs.settings.XsConfigurable"
+            id="xsLsp"
+            displayName="XS Language Server"/>
+
+        <postStartupActivity implementation="com.aomr.xs.startup.XsStartupActivity"/>
     </extensions>
 </idea-plugin>
