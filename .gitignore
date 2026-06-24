@@ -22,3 +22,4 @@ tools/intellij-xs-plugin/src/main/resources/bin/
 *.swp
 # Local AI runtime state
 .atl/
+.idea/

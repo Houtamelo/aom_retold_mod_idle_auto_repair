@@ -1,7 +1,9 @@
 {
   "name": "XS",
   "scopeName": "source.xs",
-  "fileTypes": ["xs"],
+  "fileTypes": [
+    "xs"
+  ],
   "version": "0.1.0",
   "patterns": [
     {
@@ -1615,6 +1617,5 @@
         }
       ]
     }
-  },
-  "name": "XS"
+  }
 }
