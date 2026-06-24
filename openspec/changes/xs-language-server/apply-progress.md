@@ -105,6 +105,62 @@
 4. **`Cargo.lock` dependency downgrade for Rust 1.85.**
    - `url 2.5.8` + `idna_adapter 1.2.2` required Rust 1.86; locked to `url 2.5.4` and `idna_adapter 1.1.0` to retain compatibility with the container's `rustc 1.85.0`.
 
+## Phase 3 — Semantic diagnostics
+
+**Status:** complete
+
+**Batch:** Phase 3 (T13–T18)
+**Branch:** `xs-language-server/redesign-phase-3`
+**Base:** `xs-language-server/redesign-phase-2` @ `e35d4e1`
+
+### Tasks completed
+
+- [x] **T13** — Extend `symbols.rs` with `Visibility` enum (`Local`/`Const`/`Extern`/`Public`), `is_mutable`, `is_forward`, and parameter default-value extraction. Unit tests for extern, mutable, and forward-declaration recovery.
+- [x] **T14** — Implement `semantic.rs`: `extern` collision detection, forward-declaration validation, `mutable` redefinition equality, unresolved-symbol `Error 0310`. Unit tests with fixtures.
+- [x] **T15** — Wire semantic diagnostics into `diagnostics.rs`/`server.rs`: on `didOpen`/`didChange`, build a semantic virtual project and merge semantic diagnostics with parse/typecheck diagnostics.
+- [x] **T16** — Extend `typecheck.rs`: implicit `int`→`float` widening, cross-file user-function argument checking via the virtual project.
+- [x] **T17** — Update `completion.rs`: combine engine API with exported project symbols; show all symbols in the current file and only `extern` symbols from other files; hide file-local variables outside their file.
+- [x] **T18** — Phase 3 verification: semantic fixture files under `tools/xs-language-server/src/semantic_fixtures/`, LSP round-trip tests for forward decl, extern collision, mutable redefinition, int/float widening/loss.
+
+### Commits made
+
+| Hash | Title |
+|------|-------|
+| `e35d4e1` | `feat(xs-lsp): track extern/mutable/visibility in symbol table` |
+| `2c967a9` | `feat(xs-lsp): add semantic module for extern collision + forward-decl + mutable redefinition` |
+| `cd92cc9` | `feat(xs-lsp): add int↔float widening + cross-file typecheck` |
+| `1881b92` | `feat(xs-lsp): scope completion to exported symbols + current file` |
+| `ecd2050` | `feat(xs-lsp): wire semantic diagnostics into didOpen/didChange` |
+| `405244c` | `test(xs-lsp): add semantic fixtures and roundtrip tests` |
+
+### Test results
+
+- `cargo test`: **75 passed, 0 failed** (+19 tests vs Phase 2)
+- `cargo build --bin xs-language-server && cargo run --bin lsp_roundtrip_test`: **PASS** (baseline + workspace + semantic sequences green)
+- New coverage:
+  - `semantic.rs`: extern collisions, forward declarations, mutable redefinition, unresolved symbols
+  - `typecheck.rs`: int→float widening, float→int loss, cross-file user-function type checks
+  - `completion.rs`: current-file symbols, extern-only cross-file symbols, hidden file-local variables
+  - `lsp_roundtrip_test.rs`: seven end-to-end semantic fixture scenarios
+
+### Known issues / deviations
+
+1. **Forward declarations parse as `ERROR` nodes.**
+   - The current tree-sitter XS grammar does not have a dedicated rule for function headers without bodies, so `void bar(int x = -1);` surfaces as an `ERROR` node.
+   - `symbols::build_symbol_table` recovers forward declarations from these `ERROR` nodes when they contain a type, identifier, and parameter list and no body.
+   - This is documented in `symbols.rs` and matches the engine-enforced rule without requiring a grammar change in this phase.
+
+2. **Completion cross-file visibility is `extern`-only (not `Public` functions from other files).**
+   - This follows the explicit scoping guidance in the implementation spec.
+   - `Public` functions remain visible within the current file and via `include` textual paste.
+
+3. **`include "..."` textual paste is approximated.**
+   - `completion.rs` includes the full symbol set for files whose relative path matches an `include` target in the current file.
+   - Forward-declaration and type-check cross-file resolution currently treat all project function definitions as visible; included files are not reordered.
+
+4. **Per-keystroke diagnostic latency not instrumented.**
+   - The semantic project is rebuilt on every `didOpen`/`didChange`. Real mods may require incremental update in a later phase to consistently stay under the 200 ms budget.
+
 ## Next batch
 
-- **Phase 3 (T13–T18):** semantic diagnostics (`extern` collisions, forward-declaration validation, `mutable` redefinition, cross-file type checking, completion scope)
+- **Phase 4 (T19–T26):** IntelliJ client integration
