@@ -169,10 +169,10 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-virtual-project-overlay.md`
 - **Files affected:** `tools/xs-language-server/src/server.rs`
 - **Acceptance criteria:**
-  1. Implement `workspace/didChangeWorkspaceFolders` method.
-  2. Add/remove mod roots; rebuild virtual-project overlay maps.
-  3. Re-evaluate ownership of currently open files and emit showMessage/unowned warning as needed.
-  4. Add LSP round-trip test for add/remove workspace folders.
+  1. [x] Implement `workspace/didChangeWorkspaceFolders` method.
+  2. [x] Add/remove mod roots; rebuild virtual-project overlay maps.
+  3. [x] Re-evaluate ownership of currently open files and emit showMessage/unowned warning as needed.
+  4. [ ] Add LSP round-trip test for add/remove workspace folders.
 - **Estimated lines changed:** ~250
 - **Test command:** `cargo test workspace_folders && cargo run --bin lsp_roundtrip_test`
 
