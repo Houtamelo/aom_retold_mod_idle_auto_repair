@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 mod cache;
 mod completion;
 mod diagnostics;
+mod doxygen;
 mod engine_api;
 mod parser;
 mod references;
