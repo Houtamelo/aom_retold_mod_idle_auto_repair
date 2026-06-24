@@ -17,3 +17,5 @@ pub mod symbols;
 pub mod typecheck;
 pub mod word;
 pub mod workspace;
+
+pub mod merged_view;
