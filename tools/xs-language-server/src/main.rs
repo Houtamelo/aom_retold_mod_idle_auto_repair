@@ -18,6 +18,7 @@ mod server;
 mod symbols;
 mod typecheck;
 mod word;
+mod workspace;
 
 use server::XsLanguageServer;
 

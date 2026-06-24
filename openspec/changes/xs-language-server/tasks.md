@@ -113,12 +113,12 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-virtual-project-overlay.md`
 - **Files affected:** `tools/xs-language-server/src/workspace.rs`
 - **Acceptance criteria:**
-  1. Represent a virtual project as engine API + game folder + mod `game/` overlay.
-  2. Resolve file ownership by longest workspace-folder URI prefix.
-  3. Hide vanilla file at relative path `R` when mod provides `game/R`.
-  4. Infer include roots (`game/ai/`, `game/data/trigger/`, `game/random_maps/`) from the file path.
-  5. Resolve `include "X"` first in mod include-root directory, then in game include-root directory.
-  6. Unit tests cover overlay replacement, include resolution, include-root inference, and mod-in-mod boundaries.
+  1. [x] Represent a virtual project as engine API + game folder + mod `game/` overlay.
+  2. [x] Resolve file ownership by longest workspace-folder URI prefix.
+  3. [x] Hide vanilla file at relative path `R` when mod provides `game/R`.
+  4. [x] Infer include roots (`game/ai/`, `game/data/trigger/`, `game/random_maps/`) from the file path.
+  5. [x] Resolve `include "X"` first in mod include-root directory, then in game include-root directory.
+  6. [x] Unit tests cover overlay replacement, include resolution, include-root inference, and mod-in-mod boundaries.
 - **Estimated lines changed:** ~600
 - **Test command:** `cargo test workspace`
 
