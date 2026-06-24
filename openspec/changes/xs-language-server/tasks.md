@@ -196,11 +196,11 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-semantic-diagnostics.md`
 - **Files affected:** `tools/xs-language-server/src/symbols.rs`
 - **Acceptance criteria:**
-  1. Record `extern` and `mutable` flags on functions and variables.
-  2. Record forward-only declarations (function header without body) from `function_definition` where the parser emits them.
-  3. Distinguish file-local (`static`/no `extern`) symbols from exported (`extern`) symbols.
-  4. Expose a per-file `SymbolTable` API suitable for a cross-file index.
-  5. Unit tests cover `extern`, `mutable`, and forward-decl extraction.
+  1. [x] Record `extern` and `mutable` flags on functions and variables.
+  2. [x] Record forward-only declarations (function header without body) from `function_definition` where the parser emits them.
+  3. [x] Distinguish file-local (`static`/no `extern`) symbols from exported (`extern`) symbols.
+  4. [x] Expose a per-file `SymbolTable` API suitable for a cross-file index.
+  5. [x] Unit tests cover `extern`, `mutable`, and forward-decl extraction.
 - **Estimated lines changed:** ~250
 - **Test command:** `cargo test symbols`
 
@@ -210,11 +210,11 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-semantic-diagnostics.md`
 - **Files affected:** `tools/xs-language-server/src/semantic.rs`
 - **Acceptance criteria:**
-  1. Detect `extern` collisions: any file has `extern X`, another file declares/defines `X` → diagnostic.
-  2. Validate use-before-definition: function call before its definition is an error unless the function is `mutable` or a forward declaration precedes the call.
-  3. Validate `mutable` redefinition equality: same name, parameter types, and default values.
-  4. Respect `include "..."` textual semantics for visibility.
-  5. Unit tests with fixtures cover forward-decl, extern collision, mutable redefinition, and file-local shadowing.
+  1. [x] Detect `extern` collisions: any file has `extern X`, another file declares/defines `X` → diagnostic.
+  2. [x] Validate use-before-definition: function call before its definition is an error unless the function is `mutable` or a forward declaration precedes the call.
+  3. [x] Validate `mutable` redefinition equality: same name, parameter types, and default values.
+  4. [x] Respect `include "..."` textual semantics for visibility.
+  5. [x] Unit tests with fixtures cover forward-decl, extern collision, mutable redefinition, and file-local shadowing.
 - **Estimated lines changed:** ~600
 - **Test command:** `cargo test semantic`
 
@@ -224,10 +224,10 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-semantic-diagnostics.md`
 - **Files affected:** `tools/xs-language-server/src/diagnostics.rs`, `tools/xs-language-server/src/server.rs`
 - **Acceptance criteria:**
-  1. On `didOpen`/`didChange`, after parse, run `semantic.rs` over the file’s virtual project.
-  2. Merge semantic diagnostics with parse diagnostics.
-  3. Publish combined diagnostics with source `"xs-language-server"`.
-  4. Include engine-style `Error 0310` message for unresolved symbols.
+  1. [x] On `didOpen`/`didChange`, after parse, run `semantic.rs` over the file’s virtual project.
+  2. [x] Merge semantic diagnostics with parse diagnostics.
+  3. [x] Publish combined diagnostics with source `"xs-language-server"`.
+  4. [x] Include engine-style `Error 0310` message for unresolved symbols.
 - **Estimated lines changed:** ~150
 - **Test command:** `cargo test diagnostics && cargo run --bin lsp_roundtrip_test`
 
@@ -237,10 +237,10 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-semantic-diagnostics.md`
 - **Files affected:** `tools/xs-language-server/src/typecheck.rs`
 - **Acceptance criteria:**
-  1. Allow implicit `int` ↔ `float` widening in arithmetic, comparisons, and engine-call arguments.
-  2. Resolve workspace function types across files via the virtual-project symbol index.
-  3. Keep existing engine-call count/type checks.
-  4. Unit tests cover `int` passed where `float` expected and cross-file function argument checks.
+  1. [x] Allow implicit `int` ↔ `float` widening in arithmetic, comparisons, and engine-call arguments.
+  2. [x] Resolve workspace function types across files via the virtual-project symbol index.
+  3. [x] Keep existing engine-call count/type checks.
+  4. [x] Unit tests cover `int` passed where `float` expected and cross-file function argument checks.
 - **Estimated lines changed:** ~250
 - **Test command:** `cargo test typecheck`
 
@@ -250,10 +250,10 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-semantic-diagnostics.md`
 - **Files affected:** `tools/xs-language-server/src/completion.rs`
 - **Acceptance criteria:**
-  1. Combine engine API items with exported project symbols (`extern` variables/functions and all symbols from included files).
-  2. Hide file-local variables outside their declaring file.
-  3. Prefer exact/prefix matching without prefix-based heuristics.
-  4. Unit tests verify scope filtering.
+  1. [x] Combine engine API items with exported project symbols (`extern` variables/functions and all symbols from included files).
+  2. [x] Hide file-local variables outside their declaring file.
+  3. [x] Prefer exact/prefix matching without prefix-based heuristics.
+  4. [x] Unit tests verify scope filtering.
 - **Estimated lines changed:** ~250
 - **Test command:** `cargo test completion`
 
@@ -263,9 +263,9 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-semantic-diagnostics.md`
 - **Files affected:** `tools/xs-language-server/tests/fixtures/**/*` (new fixtures)
 - **Acceptance criteria:**
-  1. Fixtures for forward-decl errors, extern collisions, mutable redefinition, int/float widening, and autocompletion scope.
-  2. LSP round-trip tests cover each semantic scenario.
-  3. `cargo test` is green.
+  1. [x] Fixtures for forward-decl errors, extern collisions, mutable redefinition, int/float widening, and autocompletion scope.
+  2. [x] LSP round-trip tests cover each semantic scenario.
+  3. [x] `cargo test` is green.
 - **Estimated lines changed:** ~300
 - **Test command:** `cargo test && cargo run --bin lsp_roundtrip_test`
 
