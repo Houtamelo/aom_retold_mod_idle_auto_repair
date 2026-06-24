@@ -14,6 +14,7 @@ mod doxygen;
 mod engine_api;
 mod parser;
 mod references;
+mod semantic;
 mod server;
 mod symbols;
 mod typecheck;
