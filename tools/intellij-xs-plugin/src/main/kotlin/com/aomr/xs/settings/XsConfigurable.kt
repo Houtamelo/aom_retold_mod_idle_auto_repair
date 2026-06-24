@@ -11,6 +11,7 @@ import com.intellij.ui.ToolbarDecorator
 import com.intellij.ui.components.JBList
 import com.intellij.ui.dsl.builder.Align
 import com.intellij.ui.dsl.builder.panel
+import java.awt.GraphicsEnvironment
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
 import java.awt.datatransfer.Transferable
@@ -35,8 +36,13 @@ class XsConfigurable(private val project: Project) : Configurable {
 
     init {
         modList.selectionMode = ListSelectionModel.SINGLE_SELECTION
-        modList.dragEnabled = true
-        modList.transferHandler = ReorderTransferHandler()
+        // Drag-and-drop reorder is not available in headless environments
+        // (e.g. CI / buildSearchableOptions). Guard so plugin packaging still
+        // works; the list retains +/− buttons for editing in all modes.
+        if (!GraphicsEnvironment.isHeadless()) {
+            modList.dragEnabled = true
+            modList.transferHandler = ReorderTransferHandler()
+        }
     }
 
     override fun getDisplayName(): String = DISPLAY_NAME

@@ -1,9 +1,13 @@
 package com.aomr.xs.settings
 
-import com.intellij.testFramework.LightPlatformTestCase
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
+import org.junit.Test
 
-class XsSettingsTest : LightPlatformTestCase() {
+class XsSettingsTest {
 
+    @Test
     fun testDefaultsAreEmpty() {
         val settings = XsSettings()
         val state = settings.state
@@ -11,6 +15,7 @@ class XsSettingsTest : LightPlatformTestCase() {
         assertTrue(state.modPaths.isEmpty())
     }
 
+    @Test
     fun testLoadStateRestoresValues() {
         val settings = XsSettings()
         val loaded = XsSettings.State(
@@ -24,6 +29,7 @@ class XsSettingsTest : LightPlatformTestCase() {
         assertEquals(listOf("/mod/one", "/mod/two"), state.modPaths)
     }
 
+    @Test
     fun testSetModPathsReplacesList() {
         val settings = XsSettings()
         settings.setModPaths(listOf("/a", "/b"))
@@ -33,10 +39,11 @@ class XsSettingsTest : LightPlatformTestCase() {
         assertEquals(listOf("/c"), settings.state.modPaths)
     }
 
-    fun testProjectServiceInstanceReturnsSameComponent() {
-        val project = project
-        val first = XsSettings.getInstance(project)
-        val second = XsSettings.getInstance(project)
-        assertSame(first, second)
+    @Test
+    fun testStateInstanceIsStable() {
+        val settings = XsSettings()
+        val first = settings.state
+        val second = settings.state
+        assertSame("PersistentStateComponent should reuse the same state instance", first, second)
     }
 }

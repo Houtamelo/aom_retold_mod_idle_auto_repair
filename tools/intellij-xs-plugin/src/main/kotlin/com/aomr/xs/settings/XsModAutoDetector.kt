@@ -1,6 +1,9 @@
 package com.aomr.xs.settings
 
 import com.intellij.openapi.vfs.VirtualFile
+import java.nio.file.Files
+import java.nio.file.Path
+import kotlin.streams.asSequence
 
 /**
  * Recursively scans a project root for directories named exactly `game`.
@@ -12,20 +15,24 @@ import com.intellij.openapi.vfs.VirtualFile
  */
 object XsModAutoDetector {
 
-    fun scan(projectRoot: VirtualFile): List<String> {
+    fun scan(projectRoot: VirtualFile): List<String> =
+        scan(projectRoot.toNioPath())
+
+    fun scan(projectRoot: Path): List<String> {
         val mods = mutableSetOf<String>()
         scanRecursive(projectRoot, mods)
         return mods.sorted()
     }
 
-    private fun scanRecursive(dir: VirtualFile, mods: MutableSet<String>) {
-        if (!dir.isDirectory) return
-        for (child in dir.children) {
-            if (!child.isDirectory) continue
-            if (child.name == "game") {
+    private fun scanRecursive(dir: Path, mods: MutableSet<String>) {
+        if (!Files.isDirectory(dir)) return
+        val children = Files.list(dir).use { stream -> stream.asSequence().toList() }
+        for (child in children) {
+            if (!Files.isDirectory(child)) continue
+            if (child.fileName?.toString() == "game") {
                 val parent = child.parent
                 if (parent != null) {
-                    mods.add(parent.path)
+                    mods.add(parent.toAbsolutePath().normalize().toString())
                 }
             } else {
                 scanRecursive(child, mods)
