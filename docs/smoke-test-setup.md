@@ -8,25 +8,29 @@ the archive of the `xs-language-server` SDD change. The pending-task in
 
 ---
 
-## Artifacts
+## Artifact
 
-| File                                                    | Size   | SHA-256                                                          |
-| ------------------------------------------------------- | ------ | ---------------------------------------------------------------- |
-| `dist/xs-language-server`                               | 8.5 MB | `8de9272c13d2d98b5ac64241a46da44628291533c79406121d760b1d2e683eac` |
-| `dist/intellij-xs-plugin-0.1.0.zip`                     | 1.0 MB | `f89435b1d13403cd9766bbf11d68df8898f744a98863c47e16e209befc78b3ac` |
+| File                                | Size   | SHA-256                                                          |
+| ----------------------------------- | ------ | ---------------------------------------------------------------- |
+| `dist/intellij-xs-plugin-0.1.0.zip`   | 3.7 MB | `165070efa07c8288e6bac6254da48442aa1add5dd0c1147d7d5685bcd4775fbb` |
 
-Both were built from branch `xs-language-server/redesign-phase-5` (commit `d03ce69`).
-Tests at build time: `cargo test` 75/0 green, `./gradlew test` 13/0 green, `lsp_roundtrip_test` PASS.
+The Rust `xs-language-server` binary is **bundled inside the plugin** at
+`bin/xs-language-server` inside the plugin's JAR. No separate binary
+placement is needed. The plugin extracts the binary from its classpath to a
+temp file on first use and runs it as a stdio child process.
+
+Built from branch `xs-language-server/redesign-phase-5` @ `2a7b5a8`
+plus the bundling patch (commit pending). Tests at build time:
+`cargo test` 75/0 green, `./gradlew test` 13/0 green.
 
 ---
 
 ## Step 0 — Prerequisites
 
-- **OS:** Linux (this build was produced on a Linux sandbox; the binary is
-  Linux x86_64). For Windows, rebuild with `cargo build --release` on a
-  Windows host.
-- **IntelliJ IDEA or JetBrains Rider:** version 2024.2 or newer
-  (matches the `ideaIC-2024.2` target the plugin was built against).
+- **OS:** Linux x86_64. For Windows or macOS, rebuild from source — the
+  bundled binary matches the host that built the .zip.
+- **IntelliJ IDEA or JetBrains Rider:** version 2024.2 or newer (matches
+  the `ideaIC-2024.2` target the plugin was built against).
 - **AoM:R installed:** at `~/.steam/steam/steamapps/common/Age of Mythology Retold/`
   (or the Proton equivalent on Linux). The LSP needs the game folder path.
 - **A doxygen archive at the game root:** the LSP needs
@@ -51,46 +55,14 @@ You can verify the install:
 - The plugin should also expose a settings panel under
   **Settings → Languages & Frameworks → XS Language Server**.
 
----
-
-## Step 2 — Place the LSP binary
-
-The plugin auto-finds the LSP binary in this order
-(see `XsLspConnection.kt::resolveBinaryPath`):
-
-1. `-Dxs.lsp.path=...` system property (passed to the IDE's JVM)
-2. `XS_LSP_PATH` environment variable
-3. `<project_root>/tools/xs-language-server/target/release/xs-language-server`
-   (the project-relative default; **does not apply if the project root
-   doesn't have the LSP source checked out**)
-4. `xs-language-server` on the `PATH`
-
-Easiest: put the binary anywhere and set `XS_LSP_PATH`:
-
-```bash
-mkdir -p ~/bin
-cp dist/xs-language-server ~/bin/
-chmod +x ~/bin/xs-language-server
-export XS_LSP_PATH=~/bin/xs-language-server
-```
-
-If you use this option, also add the export to your shell rc
-(`~/.bashrc`, `~/.zshrc`, etc.) so it persists across IDE restarts.
-
-Alternative: drop the binary into the project's `tools/` folder
-so the plugin's default resolution works:
-```bash
-mkdir -p tools/xs-language-server/target/release
-cp dist/xs-language-server tools/xs-language-server/target/release/
-chmod +x tools/xs-language-server/target/release/xs-language-server
-```
-
-**Note:** the LSP runs over stdio. The plugin spawns it as a child
-process; the IDE does not need any open port.
+The plugin extracts the bundled LSP binary to a temp directory on first
+use (`/tmp/xs-lsp-<random>/xs-language-server`) and reuses it for the
+duration of the IDE session. No environment variables or PATH
+configuration are needed.
 
 ---
 
-## Step 3 — Configure the game folder
+## Step 2 — Configure the game folder
 
 1. In IntelliJ, open one of the mod projects in this repo
    (e.g., `mod/intelligent_auto_repair_and_scout/`).
@@ -107,7 +79,7 @@ process; the IDE does not need any open port.
 
 ---
 
-## Step 4 — Open an XS file and verify diagnostics
+## Step 3 — Open an XS file and verify diagnostics
 
 Open any XS file in the mod, e.g.:
 `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/human_assist.xs`
@@ -138,7 +110,7 @@ You should see:
 
 ---
 
-## Step 5 — Watcher invalidation
+## Step 4 — Watcher invalidation
 
 1. While the IDE is open, edit a file under `<game>/game/...`
    (e.g., add a comment to `<game>/game/ai/core/x.xs`).
@@ -150,7 +122,7 @@ This validates the cache invalidation path.
 
 ---
 
-## Step 6 — Settings change handling
+## Step 5 — Settings change handling
 
 1. In the plugin settings, add a new mod path (or remove one).
 2. Save. The plugin should send `didChangeWorkspaceFolders` to the LSP
@@ -214,18 +186,36 @@ The LSP shuts down when IntelliJ closes the project. To force a restart:
 | Symptom                                          | Likely cause                                                                                 |
 | ------------------------------------------------ | -------------------------------------------------------------------------------------------- |
 | "Game folder not configured" notification        | Settings → XS Language Server → Game folder is empty                                         |
-| "Failed to start XS Language Server"             | `XS_LSP_PATH` is unset and the binary isn't in the auto-discovered project location            |
+| "Failed to start XS Language Server"             | Plugin couldn't extract the bundled binary. Check the IDE log for extraction errors            |
 | "doxygen_retail.7z not found in <game>" error    | Copy the 7z to `<game>/doxygen_retail.7z` (see Step 0)                                         |
 | No diagnostics for engine API calls              | LSP didn't start; check the IDE log for errors                                                |
 | "file not part of any registered mod" warning    | The open file is not under any mod root; auto-detect may have missed it; add manually         |
 | IntelliJ doesn't show the XS settings panel      | The plugin didn't load; check **Settings → Plugins**                                          |
 | Diagnostics look stale after editing a game file | Watcher not registered; check the IDE log for `workspace/didChangeWatchedFiles` registration |
+| "binary not executable" error                    | The IDE is running in a sandbox/container that strips exec bits from /tmp; contact the dev     |
 
 If you see something not in this table, capture the IDE log
 (**Help → Diagnostic Tools → Debug Log Settings** with
 `#com.aomr.xs` and `#com.intellij.openapi.vfs.newvfs` set to `TRACE`),
-then `tail -f ~/Library/Logs/JetBrains/.../idea.log` (macOS) or
-`~/.cache/JetBrains/.../log/idea.log` (Linux).
+then `tail -f ~/.cache/JetBrains/.../log/idea.log` (Linux).
+
+---
+
+## Overriding the bundled binary (for development)
+
+If you need to test a different `xs-language-server` build (e.g., a
+work-in-progress), the plugin's resolution order is:
+
+1. `-Dxs.lsp.path=...` system property (passed to the IDE's JVM)
+2. `XS_LSP_PATH` environment variable
+3. Bundled binary (the default)
+4. `xs-language-server` on `PATH`
+
+For example, to point at a freshly-built debug binary:
+```bash
+XS_LSP_PATH=/path/to/tools/xs-language-server/target/debug/xs-language-server \
+    idea.sh
+```
 
 ---
 

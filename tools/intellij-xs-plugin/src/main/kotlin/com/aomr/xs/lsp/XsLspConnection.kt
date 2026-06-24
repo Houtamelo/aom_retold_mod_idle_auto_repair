@@ -18,6 +18,7 @@ import org.eclipse.lsp4j.WorkspaceFoldersChangeEvent
 import org.eclipse.lsp4j.launch.LSPLauncher
 import org.eclipse.lsp4j.services.LanguageServer
 import java.io.File
+import java.nio.file.Files
 import java.util.concurrent.TimeUnit
 
 /**
@@ -28,13 +29,18 @@ import java.util.concurrent.TimeUnit
  * Binary path resolution order:
  *  1. `-Dxs.lsp.path=...` system property
  *  2. `XS_LSP_PATH` environment variable
- *  3. `xs-language-server` resolved from the project build directory
- *     (`tools/xs-language-server/target/release/...` is not used; cargo
- *     builds to `tools/xs-language-server/target/release/xs-language-server`)
- *  4. `xs-language-server` on PATH
+ *  3. The `xs-language-server` binary bundled inside the plugin's
+ *     resources at `bin/xs-language-server`. Extracted to a temp
+ *     directory on first use; the extracted copy is reused for
+ *     subsequent sessions in the same IDE run.
+ *  4. Project-local binary at `tools/xs-language-server/target/release/xs-language-server`
+ *     (convenience for development).
+ *  5. `xs-language-server` on the `PATH`.
  *
- * Build the server with:
+ * To rebuild the bundled binary:
  *   cd tools/xs-language-server && cargo build --release
+ *   cd tools/intellij-xs-plugin && ./gradlew copyLspServerToResources
+ *   ./gradlew buildPlugin
  */
 class XsLspConnection(
     private val project: Project,
@@ -170,10 +176,21 @@ class XsLspConnection(
     }
 
     private fun resolveBinaryPath(): String {
-        return System.getProperty("xs.lsp.path")
-            ?: System.getenv("XS_LSP_PATH")
-            ?: findProjectBinary()
-            ?: "xs-language-server"
+        System.getProperty("xs.lsp.path")?.takeIf { it.isNotBlank() }?.let {
+            log.info("Using LSP binary from -Dxs.lsp.path: $it"); return it
+        }
+        System.getenv("XS_LSP_PATH")?.takeIf { it.isNotBlank() }?.let {
+            log.info("Using LSP binary from XS_LSP_PATH: $it"); return it
+        }
+        extractBundledBinary()?.let {
+            log.info("Using bundled LSP binary: $it"); return it
+        }
+        findProjectBinary()?.let {
+            log.info("Using project-local LSP binary: $it"); return it
+        }
+        log.warn("No LSP binary found via system property, env, bundled, or project; " +
+            "falling back to PATH lookup. Install via IntelliJ plugin or set XS_LSP_PATH.")
+        return "xs-language-server"
     }
 
     private fun findProjectBinary(): String? {
@@ -184,5 +201,50 @@ class XsLspConnection(
         return candidates.firstOrNull { it.canExecute() }?.absolutePath
     }
 
+    /**
+     * Extract the `bin/xs-language-server` resource that was bundled into the
+     * plugin at build time (see `build.gradle.kts::copyLspServerToResources`)
+     * to a temp file, make it executable, and return its path.
+     *
+     * The extracted binary is reused across sessions within a single IDE run
+     * (cached in [bundledBinaryPath]). It is deleted on JVM exit.
+     */
+    private fun extractBundledBinary(): String? {
+        bundledBinaryPath?.let { return it }
+        val resourcePath = "/bin/xs-language-server"
+        val stream = XsLspConnection::class.java.getResourceAsStream(resourcePath) ?: return null
+        return try {
+            val tempDir = Files.createTempDirectory("xs-lsp-").toFile()
+            tempDir.deleteOnExit()
+            val tempFile = File(tempDir, "xs-language-server")
+            stream.use { input ->
+                tempFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            // Mark as executable for the owner; group/other perms are not
+            // required since the JVM spawns the child process.
+            tempFile.setExecutable(true, false)
+            tempFile.deleteOnExit()
+            bundledBinaryPath = tempFile.absolutePath
+            tempFile.absolutePath
+        } catch (e: Exception) {
+            log.warn("Failed to extract bundled LSP binary", e)
+            null
+        } finally {
+            try { stream.close() } catch (_: Exception) {}
+        }
+    }
+
     private fun String.toFileUri(): String = File(this).toURI().toString()
+
+    companion object {
+        /**
+         * Cached path to the extracted bundled binary. Populated on first
+         * call to [extractBundledBinary]. Cleared automatically when the
+         * JVM exits because the underlying temp file is `deleteOnExit`.
+         */
+        @Volatile
+        private var bundledBinaryPath: String? = null
+    }
 }
