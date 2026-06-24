@@ -392,9 +392,9 @@ mod tests {
     fn extracts_docs_doxygen_retail_counts() {
         let archive = Path::new("../../docs/doxygen_retail.7z");
         let data = extract_engine_api(archive).expect("extract docs/doxygen_retail.7z");
-        // The archive itself contains 1804 function summary rows. The historical
-        // committed JSON also includes `xsExecute`, which is restored by the
-        // legacy-JSON fallback in `engine_api::load_from_archive`.
+        // The archive contains 1804 function summary rows. `xsExecute` is not
+        // present in the archive, so the server exposes exactly what Doxygen
+        // provides (no legacy JSON backfill).
         assert_eq!(
             data.syscalls.len(), 1804,
             "expected 1804 syscalls parsed directly from docs/doxygen_retail.7z"

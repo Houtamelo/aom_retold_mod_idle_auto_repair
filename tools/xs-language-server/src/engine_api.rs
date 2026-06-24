@@ -1,13 +1,11 @@
-//! Loads the engine-API data (`syscalls.json` and `aiplans.json`) once at
-//! server start and exposes lookup helpers used by the completion handler.
+//! Loads the engine-API data (`syscalls` and `aiplans`) once at server start
+//! and exposes lookup helpers used by completion, hover, and type checking.
 //!
-//! Source files live under `tools/intellij-xs-plugin/src/main/resources/`;
-//! this crate reaches them by relative path. Long-term the Rust crate
-//! becomes the source of truth (see `docs/xs-lsp-spike.md`, "What gets
-//! replaced").
+//! Data is extracted from the AoM:R `doxygen_retail.7z` archive and cached by
+//! SHA-256 under the provided cache directory (usually
+//! `~/.local/state/aomr_lsp/v1/`). No static JSON resources are bundled or
+//! loaded from sibling crates.
 
-use std::collections::HashSet;
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -15,9 +13,6 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::{cache, doxygen};
-
-const DEFAULT_DATA_DIR: &str =
-    "../intellij-xs-plugin/src/main/resources";
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Param {
@@ -113,10 +108,6 @@ impl EngineApi {
     /// Load the engine API from `doxygen_retail.7z`, using the SHA-256 cache
     /// under `cache_dir` to skip re-extraction on warm starts.
     ///
-    /// If the sibling-crate JSON files are still present, any entries missing
-    /// from the archive are backfilled with a warning. This preserves the
-    /// historical committed counts during the transition away from static JSON.
-    ///
     /// If the cached JSON is corrupt, it is treated as a miss and the archive
     /// is re-extracted.
     pub fn load_from_archive(archive: &Path, cache_dir: &Path) -> anyhow::Result<Self> {
@@ -130,7 +121,7 @@ impl EngineApi {
             Ok(data) => data,
             Err(_) if cache_path.exists() => {
                 // Possible corrupt cache: delete it and try one more time.
-                fs::remove_file(&cache_path)
+                std::fs::remove_file(&cache_path)
                     .with_context(|| format!("removing corrupt cache {cache_path:?}"))?;
                 Self::extract_and_cache(archive, cache_dir, &hash)
                     .with_context(|| format!("re-extracting after corrupt cache {cache_path:?}"))?
@@ -147,40 +138,9 @@ impl EngineApi {
         hash: &str,
     ) -> anyhow::Result<EngineData> {
         cache::load_or_write_engine(cache_dir, hash, || {
-            let mut extracted = doxygen::extract_engine_api(archive)
-                .with_context(|| format!("extracting engine API from {archive:?}"))?;
-            if let Some(legacy) = Self::load_legacy_data() {
-                Self::augment_with_legacy(&mut extracted, &legacy);
-            }
-            Ok(extracted)
+            doxygen::extract_engine_api(archive)
+                .with_context(|| format!("extracting engine API from {archive:?}"))
         })
-    }
-
-    /// Deprecated sibling-crate JSON loader. Kept only as an emergency
-    /// fallback while the archive-based pipeline is being rolled out.
-    #[deprecated(
-        since = "0.1.0",
-        note = "use EngineApi::load_from_archive with a game-path doxygen_retail.7z"
-    )]
-    pub fn load_default() -> Option<Self> {
-        Self::load_from_dir(Path::new(DEFAULT_DATA_DIR))
-    }
-
-    pub fn load_from_dir(dir: &Path) -> Option<Self> {
-        let syscalls = fs::read_to_string(dir.join("syscalls.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<SyscallsFile>(&s).ok())
-            .map(|f| f.syscalls)
-            .unwrap_or_default();
-        let aiplans = fs::read_to_string(dir.join("aiplans.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<AiplansFile>(&s).ok())
-            .map(|f| f.constants)
-            .unwrap_or_default();
-        if syscalls.is_empty() && aiplans.is_empty() {
-            return None;
-        }
-        Some(Self { syscalls, aiplans })
     }
 
     /// Syscalls whose `name` starts with `prefix` (case-sensitive).
@@ -206,43 +166,6 @@ impl EngineApi {
     pub fn find_aiplan(&self, name: &str) -> Option<&AiplanConstant> {
         self.aiplans.iter().find(|c| c.name == name)
     }
-
-    #[allow(deprecated)]
-    fn load_legacy_data() -> Option<EngineData> {
-        Self::load_default().map(|api| api.to_engine_data())
-    }
-
-    fn augment_with_legacy(extracted: &mut EngineData, legacy: &EngineData) {
-        let existing_syscalls: HashSet<String> = extracted
-            .syscalls
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
-        for syscall in &legacy.syscalls {
-            if !existing_syscalls.contains(&syscall.name) {
-                tracing::warn!(
-                    "engine API archive is missing syscall '{}'; backfilling from legacy JSON",
-                    syscall.name
-                );
-                extracted.syscalls.push(syscall.clone());
-            }
-        }
-
-        let existing_aiplans: HashSet<String> = extracted
-            .constants
-            .iter()
-            .map(|c| c.name.clone())
-            .collect();
-        for constant in &legacy.constants {
-            if !existing_aiplans.contains(&constant.name) {
-                tracing::warn!(
-                    "engine API archive is missing AI-plan constant '{}'; backfilling from legacy JSON",
-                    constant.name
-                );
-                extracted.constants.push(constant.clone());
-            }
-        }
-    }
 }
 
 /// Wrap in `Arc` so the server can hand the same data to multiple async
@@ -265,8 +188,8 @@ mod tests {
         let api = EngineApi::load_from_archive(archive, cache_dir).unwrap();
         assert_eq!(
             api.syscalls.len(),
-            1805,
-            "expected 1805 syscalls after legacy fallback merge"
+            1804,
+            "expected 1804 syscalls parsed directly from the Doxygen archive"
         );
         assert_eq!(
             api.aiplans.len(),
@@ -304,7 +227,7 @@ mod tests {
         assert!(cache_path.exists());
 
         // Corrupt the cache file.
-        fs::write(&cache_path, b"{not valid json").unwrap();
+        std::fs::write(&cache_path, b"{not valid json").unwrap();
 
         // load_from_archive detects the corrupt cache, deletes it, and
         // re-extracts from the archive.

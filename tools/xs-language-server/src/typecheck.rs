@@ -280,12 +280,19 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn engine() -> EngineApi {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        // tools/xs-language-server/ -> tools/ -> aom_retold_mod/
-        let workspace_root = manifest_dir.parent().and_then(|p| p.parent()).unwrap();
-        let path = workspace_root.join("tools/intellij-xs-plugin/src/main/resources");
-        EngineApi::load_from_dir(&path).expect("load engine data from workspace resources")
+    fn engine() -> &'static EngineApi {
+        use std::sync::OnceLock;
+
+        static ENGINE: OnceLock<EngineApi> = OnceLock::new();
+        ENGINE.get_or_init(|| {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            // tools/xs-language-server/ -> tools/ -> aom_retold_mod/
+            let workspace_root = manifest_dir.parent().and_then(|p| p.parent()).unwrap();
+            let archive = workspace_root.join("docs/doxygen_retail.7z");
+            let cache_dir = crate::cache::state_cache_dir();
+            EngineApi::load_from_archive(&archive, &cache_dir)
+                .expect("load engine data from Doxygen archive")
+        })
     }
 
     fn table_for(source: &str) -> SymbolTable {
