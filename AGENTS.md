@@ -24,7 +24,7 @@ Five deployable mod packages live under `mod/`:
 
 ## Tooling under `tools/`
 
-- `tools/xs-language-server/` — Rust LSP server (tree-sitter + tower-lsp). The "real" language implementation for XS. Diagnoses mod scripts using a 3-source workspace: engine API extracted from `doxygen_retail.7z`, the vanilla AoM:R `game/` folder, and per-mod `game/` overlays. See `openspec/changes/xs-language-server/` for the full proposal, design, specs, and implementation record.
+- `tools/xs-language-server/` — Rust LSP server (tree-sitter + tower-lsp). The "real" language implementation for XS. Diagnoses mod scripts using a 3-source workspace: engine API extracted from `doxygen_retail.7z`, the vanilla AoM:R `game/` folder, and per-mod `game/` overlays. See `openspec/changes/archive/xs-language-server/` for the full proposal, design, specs, and implementation record.
 - `tools/intellij-xs-plugin/` — IntelliJ Platform plugin (Kotlin/Gradle) for XS. Now a thin LSP client that provides file-type registration, TextMate syntax highlighting, brace matching, and editor helpers. It also provides a settings page for the LSP server connection and can auto-detect mod roots.
 
 ## XS language reference
@@ -35,8 +35,8 @@ XS is the C-like scripting language loaded by the AoM:R engine. Consult these re
 - `docs/MythRMConstants.txt` and `docs/MythTRConstants.txt` — full lists of XS global constants (unit types, ages, god powers, resources, plan states, etc.). Grep these to discover valid IDs and ranges
 - `~/.steam/steam/steamapps/common/Age of Mythology Retold/game` — every `.xs` script shipped by the developers, including `game/ai/human_assist/`, `game/ai/core/`, `game/ai/campaign/`, etc. Inspect freely for research, inspiration, and live examples of engine API usage. Read-only from this repo's perspective
 - `docs/doxygen_retail/` — official developer-built doxygen documentation of most built-in game functions, including descriptions, signatures, and parameter semantics. When unsure about a `kb*`, `ai*`, `tr*`, or `xs*` call, search here first
-- `docs/xs-lsp-spike.md` — historical spike plan that led to the Rust LSP pivot. Now superseded by `openspec/changes/xs-language-server/`; kept as a record of the original investigation.
-- `openspec/changes/xs-language-server/` — SDD artifacts for the redesigned LSP (proposal, design, specs, apply progress, verify report).
+- `docs/xs-lsp-spike.md` — historical spike plan that led to the Rust LSP pivot. Now superseded by `openspec/changes/archive/xs-language-server/`; kept as a record of the original investigation.
+- `openspec/changes/archive/xs-language-server/` — SDD artifacts for the redesigned LSP (proposal, design, specs, apply progress, verify report).
 
 ## XS quirks and pitfalls
 
@@ -108,6 +108,6 @@ The server caches extracted engine API data under `~/.local/state/aomr_lsp/v2/` 
 - `openspec/config.yaml` — SDD rules, proposal/spec/design conventions, verification method.
 - `openspec/sdd-init/aom_retold_mod_idle_auto_repair.md` — full SDD-init context (stack, conventions, testing capability).
 - `openspec/changes/intellij-xs-plugin/` — completed Kotlin plugin planning (P0, P0.5, P1). P1 was fully verified (PASS, 36 tests green). P2-P5 paused in favor of the LSP pivot. The Kotlin plugin is now a thin LSP client.
-- `openspec/changes/xs-language-server/` — current SDD change for the redesigned Rust LSP (Phases 1–5).
+- `openspec/changes/archive/xs-language-server/` — current SDD change for the redesigned Rust LSP (Phases 1–5).
 - `docs/` — proto_mods syntax, BANG docs, research notes, playtest records, XS language syntax notes.
 - skill: `playtest-log-analysis/` — project-local skill for parsing AI playtest logs.

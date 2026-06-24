@@ -1,6 +1,6 @@
 # XS Language Server — Rust LSP Spike
 
-**Status:** HISTORICAL — superseded by `openspec/changes/xs-language-server/` (Phase 1–5 complete). Last updated 2026-06-23.
+**Status:** HISTORICAL — superseded by `openspec/changes/archive/xs-language-server/` (Phase 1–5 complete). Last updated 2026-06-23.
 **Owner:** houtamelo
 **Goal of the spike:** de-risk the assumption that a Rust LSP can give us "error checks without booting the game" for XS in ~1 week, before committing to the architectural pivot.
 
@@ -30,7 +30,7 @@ If any single day fails, the spike fails — abort and resume the Kotlin path.
 
 1. Add `tree-sitter` and `tree-sitter-c` (or fork the C grammar) as a starting point.
 2. Modify the grammar for XS specifics:
-   - **Note:** the first draft of this spike planned prefix-based heuristics (`k[A-Z]\w*`, `g[A-Z]\w*`, `s[A-Z]\w*`). The actual redesigned LSP uses no prefix heuristics for semantics; see `openspec/changes/xs-language-server/explore.md` §3.4 for the locked semantic rules (`const`, `extern`, `mutable`) and Doxygen-sourced engine API.
+   - **Note:** the first draft of this spike planned prefix-based heuristics (`k[A-Z]\w*`, `g[A-Z]\w*`, `s[A-Z]\w*`). The actual redesigned LSP uses no prefix heuristics for semantics; see `openspec/changes/archive/xs-language-server/explore.md` §3.4 for the locked semantic rules (`const`, `extern`, `mutable`) and Doxygen-sourced engine API.
    - XS-specific keywords: `rule`, `void`, `bool`, `vector`
    - Strip C-specific stuff XS doesn't have: preprocessor, headers, struct/union, bit fields
 3. Test by parsing `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/human_assist.xs` and asserting it parses with no errors.
@@ -228,10 +228,10 @@ The spike succeeded and the pivot was justified. The redesigned XS Language Serv
 4. IntelliJ plugin converted to a thin LSP client with settings UI, mod auto-detect, and LSP lifecycle management.
 5. VS Code `.vsix` removed from scope; `extracted/xs.vsix` is no longer tracked.
 
-The full design, specs, implementation record, and verification report live under `openspec/changes/xs-language-server/`. See `apply-progress.md` for the implementation record and `verify-report.md` for the final verification results.
+The full design, specs, implementation record, and verification report live under `openspec/changes/archive/xs-language-server/`. See `apply-progress.md` for the implementation record and `verify-report.md` for the final verification results.
 
 ## What this doc is NOT
 
-- It's not a spec for the LSP server. That's a separate artifact (will live at `openspec/changes/xs-language-server/specs/` if/when we formalize via SDD).
+- It's not a spec for the LSP server. That's a separate artifact (will live at `openspec/specs/` if/when we formalize via SDD).
 - It's not a commitment. The spike can fail. If it does, we resume the Kotlin path.
 - It's not a port plan for the VS Code extension. That's a separate task for week 7 of the post-spike plan.
