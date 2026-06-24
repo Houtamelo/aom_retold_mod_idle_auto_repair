@@ -56,6 +56,7 @@ module.exports = grammar({
     [$.array_type, $.expression],
     [$.array_type, $.expression, $._type_identifier],
     [$.field_declaration],
+    [$.function_pointer_type, $.type_specifier],
   ],
 
   extras: $ => [
@@ -317,6 +318,11 @@ module.exports = grammar({
       'void',
     )),
 
+    function_pointer_type: $ => seq(
+      field('return', $.type_specifier),
+      field('parameters', $.parameter_list),
+    ),
+
     field_declaration_list: $ => seq(
       '{',
       repeat($.field_declaration),
@@ -350,7 +356,7 @@ module.exports = grammar({
 
     parameter_declaration: $ => seq(
       repeat($._declaration_modifiers),
-      field('type', $.type_specifier),
+      field('type', choice($.type_specifier, $.function_pointer_type)),
       field('declarator', optional($.identifier)),
       optional(seq('=', field('default', $.expression))),
     ),
@@ -502,6 +508,7 @@ module.exports = grammar({
       $.false,
       $.null,
       $.parenthesized_expression,
+      $.lambda_expression,
     ),
 
     comma_expression: $ => seq(
@@ -634,6 +641,14 @@ module.exports = grammar({
       '(',
       choice($.expression, $.comma_expression, $.compound_statement),
       ')',
+    ),
+
+    lambda_expression: $ => seq(
+      '[',
+      ']',
+      optional(field('parameters', $.parameter_list)),
+      optional(seq('->', field('return', $.type_specifier))),
+      field('body', $.compound_statement),
     ),
 
     number_literal: _ => {

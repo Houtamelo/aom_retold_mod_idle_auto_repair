@@ -54,6 +54,10 @@
         "named": true
       },
       {
+        "type": "lambda_expression",
+        "named": true
+      },
+      {
         "type": "new_expression",
         "named": true
       },
@@ -1035,6 +1039,32 @@
     }
   },
   {
+    "type": "function_pointer_type",
+    "named": true,
+    "fields": {
+      "parameters": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "parameter_list",
+            "named": true
+          }
+        ]
+      },
+      "return": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "type_specifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "if_statement",
     "named": true,
     "fields": {
@@ -1143,6 +1173,42 @@
     }
   },
   {
+    "type": "lambda_expression",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "compound_statement",
+            "named": true
+          }
+        ]
+      },
+      "parameters": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "parameter_list",
+            "named": true
+          }
+        ]
+      },
+      "return": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_specifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "new_expression",
     "named": true,
     "fields": {
@@ -1201,6 +1267,10 @@
         "multiple": false,
         "required": true,
         "types": [
+          {
+            "type": "function_pointer_type",
+            "named": true
+          },
           {
             "type": "type_specifier",
             "named": true
