@@ -155,11 +155,11 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-file-watching-cache-invalidation.md`
 - **Files affected:** `tools/xs-language-server/src/server.rs`
 - **Acceptance criteria:**
-  1. In `initialized`, dynamically register `workspace/didChangeWatchedFiles` for `<game-path>/game/**/*.xs` when the client supports it.
-  2. On `Changed`/`Deleted` notifications, invalidate the parse cache for the URI and dependent files.
-  3. Re-diagnose affected open mod files and publish updated diagnostics.
-  4. If the client does not support dynamic registration, degrade gracefully.
-  5. Add LSP round-trip test simulating a watched-file change.
+  1. [x] In `initialized`, dynamically register `workspace/didChangeWatchedFiles` for `<game-path>/game/**/*.xs` when the client supports it.
+  2. [x] On `Changed`/`Deleted` notifications, invalidate the parse cache for the URI and dependent files.
+  3. [x] Re-diagnose affected open mod files and publish updated diagnostics.
+  4. [x] If the client does not support dynamic registration, degrade gracefully.
+  5. [ ] Add LSP round-trip test simulating a watched-file change.
 - **Estimated lines changed:** ~300
 - **Test command:** `cargo test watched_files && cargo run --bin lsp_roundtrip_test`
 

@@ -50,6 +50,8 @@ pub struct XsLanguageServer {
     pub workspace: Arc<Mutex<workspace::Workspace>>,
     /// Most recently touched document, used to scope `workspace/symbol`.
     pub last_active_uri: Arc<Mutex<Option<Url>>>,
+    /// Capabilities advertised by the client on initialize.
+    pub client_capabilities: Arc<Mutex<ClientCapabilities>>,
 }
 
 impl XsLanguageServer {
@@ -67,6 +69,7 @@ impl XsLanguageServer {
             game_path,
             workspace: Arc::new(Mutex::new(workspace)),
             last_active_uri: Arc::new(Mutex::new(None)),
+            client_capabilities: Arc::new(Mutex::new(ClientCapabilities::default())),
         }
     }
 
@@ -103,6 +106,11 @@ impl LanguageServer for XsLanguageServer {
                     warn!("failed to register workspace folder {}: {}", uri, e);
                 }
             }
+        }
+
+        {
+            let mut caps = self.client_capabilities.lock().await;
+            *caps = params.capabilities;
         }
 
         info!(
@@ -181,6 +189,48 @@ impl LanguageServer for XsLanguageServer {
 
     async fn initialized(&self, _: InitializedParams) {
         info!("initialized: client confirmed init");
+
+        let (dynamic_supported, game_path) = {
+            let caps = self.client_capabilities.lock().await;
+            let supported = caps
+                .workspace
+                .as_ref()
+                .and_then(|w| w.did_change_watched_files.as_ref())
+                .and_then(|d| d.dynamic_registration)
+                .unwrap_or(false);
+            (supported, self.game_path.clone())
+        };
+
+        if dynamic_supported {
+            let pattern = format!(
+                "{}/game/**/*.xs",
+                game_path.to_string_lossy().replace('\\', "/")
+            );
+            let client = self.client.clone();
+            tokio::spawn(async move {
+                let options = DidChangeWatchedFilesRegistrationOptions {
+                    watchers: vec![FileSystemWatcher {
+                        glob_pattern: GlobPattern::String(pattern),
+                        kind: None,
+                    }],
+                };
+                let registration = Registration {
+                    id: "xs-game-folder-watcher".to_string(),
+                    method: "workspace/didChangeWatchedFiles".to_string(),
+                    register_options: Some(
+                        serde_json::to_value(options)
+                            .unwrap_or(serde_json::Value::Null),
+                    ),
+                };
+                if let Err(e) = client.register_capability(vec![registration]).await {
+                    warn!("failed to register didChangeWatchedFiles watcher: {}", e);
+                } else {
+                    info!("registered didChangeWatchedFiles watcher for game folder");
+                }
+            });
+        } else {
+            info!("client does not support dynamic watched-file registration");
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {
