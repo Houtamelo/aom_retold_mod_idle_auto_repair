@@ -1,6 +1,6 @@
 # XS Language Server — Rust LSP Spike
 
-**Status:** planning (pre-spike) — last updated 2026-06-23
+**Status:** HISTORICAL — superseded by `openspec/changes/xs-language-server/` (Phase 1–5 complete). Last updated 2026-06-23.
 **Owner:** houtamelo
 **Goal of the spike:** de-risk the assumption that a Rust LSP can give us "error checks without booting the game" for XS in ~1 week, before committing to the architectural pivot.
 
@@ -30,10 +30,7 @@ If any single day fails, the spike fails — abort and resume the Kotlin path.
 
 1. Add `tree-sitter` and `tree-sitter-c` (or fork the C grammar) as a starting point.
 2. Modify the grammar for XS specifics:
-   - `k[A-Z]\w*` — game-state constants (e.g. `cUnitTypeVillagerGreek`)
-   - `g[A-Z]\w*` — globals
-   - `s[A-Z]\w*` — statics
-   - `[A-Z][A-Z_0-9]+` — uppercase constants
+   - **Note:** the first draft of this spike planned prefix-based heuristics (`k[A-Z]\w*`, `g[A-Z]\w*`, `s[A-Z]\w*`). The actual redesigned LSP uses no prefix heuristics for semantics; see `openspec/changes/xs-language-server/explore.md` §3.4 for the locked semantic rules (`const`, `extern`, `mutable`) and Doxygen-sourced engine API.
    - XS-specific keywords: `rule`, `void`, `bool`, `vector`
    - Strip C-specific stuff XS doesn't have: preprocessor, headers, struct/union, bit fields
 3. Test by parsing `mod/intelligent_auto_repair_and_scout/game/ai/human_assist/human_assist.xs` and asserting it parses with no errors.
@@ -85,40 +82,47 @@ If any single day fails, the spike fails — abort and resume the Kotlin path.
 
 ---
 
-## Project layout (proposed)
+## Project layout (as built)
 
 ```
 tools/
-├── intellij-xs-plugin/        # ~300 LOC after pivot (file type, TextMate, brace match)
+├── intellij-xs-plugin/        # thin LSP client (~1,000 LOC Kotlin)
 │   ├── build.gradle.kts
 │   ├── src/main/kotlin/com/aomr/xs/
 │   │   ├── XsLanguage.kt
 │   │   ├── XsFileType.kt
-│   │   ├── XsFileTypeFactory.kt
+│   │   ├── settings/XsSettings.kt            # PersistentStateComponent
+│   │   ├── settings/XsConfigurable.kt        # Settings UI
+│   │   ├── settings/XsModAutoDetector.kt     # Recursive game/ scan
+│   │   ├── lsp/XsLspServerManager.kt         # LSP lifecycle
+│   │   ├── startup/XsStartupActivity.kt      # First-run UX
 │   │   ├── textmate/XsTextMateBundleProvider.kt
-│   │   ├── editor/XsBraceMatcher.kt
-│   │   ├── editor/XsCommenter.kt
-│   │   ├── editor/XsQuoteHandler.kt
-│   │   └── editor/XsSurroundingPairsProvider.kt
+│   │   └── editor/XsBraceMatcher.kt
 │   └── src/main/resources/
 │       ├── syntaxes/xs.tmLanguage.json    # vendored from extracted/xs.vsix
-│       └── icons/xs.svg
-└── xs-language-server/        # NEW — Rust crate
+│       └── META-INF/plugin.xml
+└── xs-language-server/        # Rust crate — real language implementation
     ├── Cargo.toml
     ├── src/
-    │   ├── main.rs           # binary entry, tower-lsp setup
+    │   ├── main.rs           # binary entry, CLI/env game-path parsing
     │   ├── server.rs         # LanguageServer impl
     │   ├── parser.rs         # tree-sitter wrapper
-    │   ├── diagnostics.rs    # parse-error → LSP diagnostic conversion
-    │   ├── engine_api.rs     # syscalls.json + aiplans.json loaders
-    │   └── completion.rs     # textDocument/completion handler
-    ├── resources/
-    │   ├── syscalls.json     # copied from extracted/xs.vsix
-    │   └── aiplans.json      # copied from extracted/xs.vsix
-    └── tree-sitter-xs/       # the XS grammar submodule or subdir
+    │   ├── diagnostics.rs    # parse-error + semantic diagnostics
+    │   ├── engine_api.rs     # Doxygen-extracted engine API loader
+    │   ├── cache.rs          # SHA-256 cache for engine + per-file parse results
+    │   ├── doxygen.rs        # 7z extraction + HTML scraping
+    │   ├── workspace.rs      # virtual project + mod overlay
+    │   ├── symbols.rs        # symbol table extraction
+    │   ├── semantic.rs       # extern/mutable/forward-decl diagnostics
+    │   ├── typecheck.rs      # engine-call and cross-file type checks
+    │   ├── completion.rs     # textDocument/completion handler
+    │   └── references.rs / word.rs / rename.rs
+    └── tree-sitter-xs/       # forked tree-sitter XS grammar
         ├── grammar.js
         └── src/
 ```
+
+Engine data is no longer loaded from static `syscalls.json`/`aiplans.json`; it is extracted at runtime from `doxygen_retail.7z` and cached under `~/.local/state/aomr_lsp/v1/`.
 
 ---
 
@@ -213,6 +217,18 @@ cargo add serde_json
 If any of step 1-3 reveals a problem (no cargo, broken state, etc.), pause and ask the user.
 
 ---
+
+## Outcome
+
+The spike succeeded and the pivot was justified. The redesigned XS Language Server was implemented across five phases:
+
+1. Doxygen 7z extraction + SHA-256 cache + `--game-path` CLI/env parsing.
+2. Virtual project workspace with vanilla `game/` folder + per-mod overlay + `include` resolution.
+3. Cross-file semantic diagnostics: `extern` collision detection, forward-declaration validation, `mutable` redefinition checks, and cross-file type checking.
+4. IntelliJ plugin converted to a thin LSP client with settings UI, mod auto-detect, and LSP lifecycle management.
+5. VS Code `.vsix` removed from scope; `extracted/xs.vsix` is no longer tracked.
+
+The full design, specs, implementation record, and verification report live under `openspec/changes/xs-language-server/`. See `apply-progress.md` for the implementation record and `verify-report.md` for the final verification results.
 
 ## What this doc is NOT
 
