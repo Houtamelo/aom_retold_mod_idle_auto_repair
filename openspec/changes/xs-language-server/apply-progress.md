@@ -242,7 +242,7 @@ After the user-reported container recreation interrupted the agent mid-cleanup, 
 ## Tasks completed
 
 - [x] **T27** — Removed `extracted/xs.vsix` from the working tree (was already absent) and added `*.vsix` to `.gitignore`; left week 7 commit `1628aa6` stranded in history rather than rewriting history. Also removed the deprecated `syscalls.json`/`aiplans.json` from `tools/intellij-xs-plugin/src/main/resources/` and removed the sibling-JSON fallback path from `EngineApi`.
-- [x] **T28** — Updated `AGENTS.md` to describe the Rust LSP as the real language implementation, the IntelliJ plugin as a thin LSP client, the cache directory (`~/.local/state/aomr_lsp/v1/` or `~/.aomr_lsp`), IntelliJ settings scope (game folder global, mod paths project-local), and the mod auto-detect algorithm.
+- [x] **T28** — Updated `AGENTS.md` to describe the Rust LSP as the real language implementation, the IntelliJ plugin as a thin LSP client, the cache directory (`~/.local/state/aomr_lsp/v2/` or `~/.aomr_lsp`), IntelliJ settings scope (game folder global, mod paths project-local), and the mod auto-detect algorithm.
 - [x] **T29** — Updated `docs/xs-lsp-spike.md`: marked it as historical/superseded, replaced incorrect prefix-based examples with the real `const`/`extern`/`mutable` + Doxygen architecture, updated the project layout, and added an Outcome section.
 - [x] **T30** — Final verification: `cargo test` green (75 tests), `cargo run --bin lsp_roundtrip_test` green, `./gradlew test` green, `./gradlew buildPlugin` green. Created `openspec/changes/xs-language-server/verify-report.md`.
 
@@ -263,6 +263,7 @@ After the user-reported container recreation interrupted the agent mid-cleanup, 
 | `3f66c98` | `docs(xs-lsp): correct and mark xs-lsp-spike.md as historical` |
 | `9a656c5` | `chore(xs-lsp): remove legacy engine JSON fallback and bundled resources` |
 | `d9ec21b` | `fix(intellij-xs-plugin): make settings UI headless-safe and tests sandbox-friendly` |
+| `a4b3d08` | `fix(xs-lsp): bump engine-data cache schema to v2 after removing legacy backfill` |
 
 ## Test results
 
@@ -275,7 +276,8 @@ After the user-reported container recreation interrupted the agent mid-cleanup, 
 
 1. **No legacy JSON backfill.** Direct Doxygen extraction yields 1,804 syscalls (not the historical 1,805) because `xsExecute` is absent from `docs/doxygen_retail.7z`. The LSP now reports exactly what the archive contains.
 2. **Manual end-to-end smoke test in IntelliJ cannot run in CI.** It requires a non-headless IDE and a real AoM:R install. The automated compile/test/package gates pass.
-3. **Per-keystroke diagnostic latency not instrumented on a representative corpus.** The implementation uses per-file parse cache and single-file passes, but no corpus benchmark was run.
+3. **Engine-data cache bumped from `v1/` to `v2/`.** The `v2/` schema avoids loading stale `v1/` caches that still contain the legacy `xsExecute` backfill. Older `v1/` files are left in place and ignored per the original schema-version strategy.
+4. **Per-keystroke diagnostic latency not instrumented on a representative corpus.** The implementation uses per-file parse cache and single-file passes, but no corpus benchmark was run.
 4. **Week 7 commit `1628aa6` remains stranded in history.** Per user direction, no rebase or history rewrite was performed.
 
 ## Final summary
