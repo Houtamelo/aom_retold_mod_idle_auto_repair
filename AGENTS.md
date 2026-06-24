@@ -24,8 +24,8 @@ Five deployable mod packages live under `mod/`:
 
 ## Tooling under `tools/`
 
-- `tools/intellij-xs-plugin/` — IntelliJ Platform plugin (Kotlin/Gradle) for XS. Currently a thin client + file-type + TextMate highlighting + brace matcher. Was previously intended to be a full language implementation; that work was paused in favor of the LSP approach. See `openspec/changes/intellij-xs-plugin/` for the prior Kotlin plan, and `docs/xs-lsp-spike.md` for the pivot rationale.
-- `tools/xs-language-server/` (planned, not yet created) — Rust LSP server (tree-sitter + tower-lsp). The "real" language implementation. The goal is to run error checks on XS without booting the game. See `docs/xs-lsp-spike.md` for the spike plan and post-spike roadmap.
+- `tools/xs-language-server/` — Rust LSP server (tree-sitter + tower-lsp). The "real" language implementation for XS. Diagnoses mod scripts using a 3-source workspace: engine API extracted from `doxygen_retail.7z`, the vanilla AoM:R `game/` folder, and per-mod `game/` overlays. See `openspec/changes/xs-language-server/` for the full proposal, design, specs, and implementation record.
+- `tools/intellij-xs-plugin/` — IntelliJ Platform plugin (Kotlin/Gradle) for XS. Now a thin LSP client that provides file-type registration, TextMate syntax highlighting, brace matching, and editor helpers. It also provides a settings page for the LSP server connection and can auto-detect mod roots.
 
 ## XS language reference
 
@@ -35,7 +35,8 @@ XS is the C-like scripting language loaded by the AoM:R engine. Consult these re
 - `docs/MythRMConstants.txt` and `docs/MythTRConstants.txt` — full lists of XS global constants (unit types, ages, god powers, resources, plan states, etc.). Grep these to discover valid IDs and ranges
 - `~/.steam/steam/steamapps/common/Age of Mythology Retold/game` — every `.xs` script shipped by the developers, including `game/ai/human_assist/`, `game/ai/core/`, `game/ai/campaign/`, etc. Inspect freely for research, inspiration, and live examples of engine API usage. Read-only from this repo's perspective
 - `docs/doxygen_retail/` — official developer-built doxygen documentation of most built-in game functions, including descriptions, signatures, and parameter semantics. When unsure about a `kb*`, `ai*`, `tr*`, or `xs*` call, search here first
-- `docs/xs-lsp-spike.md` — the current pivot toward a Rust LSP for diagnostics; explains why this approach was chosen over a pure-Kotlin implementation
+- `docs/xs-lsp-spike.md` — historical spike plan that led to the Rust LSP pivot. Now superseded by `openspec/changes/xs-language-server/`; kept as a record of the original investigation.
+- `openspec/changes/xs-language-server/` — SDD artifacts for the redesigned LSP (proposal, design, specs, apply progress, verify report).
 
 ## XS quirks and pitfalls
 
@@ -83,21 +84,30 @@ XS is the C-like scripting language loaded by the AoM:R engine. Consult these re
 2. `./gradlew buildPlugin` — produces `build/distributions/intellij-xs-plugin-*.zip`
 3. Install in Rider/IDEA via Settings → Plugins → ⚙️ → Install Plugin from Disk
 
-### For `tools/xs-language-server/` (once it exists)
+The plugin is now a thin LSP client. Settings live under **Settings → Languages & Frameworks → XS**:
 
-1. Edit Rust sources
+- **Game folder** is stored globally (per IDE installation). Point it at the AoM:R install root (the directory containing `game/` and `doxygen_retail.7z`).
+- **Mod paths** are stored project-local. Add them manually or click **Auto-detect mods**.
+- **Auto-detect** recursively scans the project for directories named exactly `game` and stops recursion at each `game/` boundary. The parent of each found `game/` directory is added as a mod root.
+
+### For `tools/xs-language-server/`
+
+1. Edit Rust sources under `tools/xs-language-server/src/`
 2. `cargo build` to build
 3. `cargo test` for unit tests
-4. Integration test: connect an LSP client (Neovim with LSP plugin, or `vscode-languageclient` test harness) and verify diagnostics appear
+4. `cargo run --bin lsp_roundtrip_test` for the end-to-end LSP message sequence
+5. Integration test: open the IntelliJ plugin and verify diagnostics arrive for a mod `.xs` file
+
+The server caches extracted engine API data under `~/.local/state/aomr_lsp/v1/` (or `~/.aomr_lsp` if `XDG_STATE_HOME` is unavailable). The cache key is the SHA-256 of `doxygen_retail.7z`; warm starts load the cached JSON directly instead of re-extracting the archive.
 
 ## Where to look for more
 
 - `README.md` — player-facing changelog + compatibility matrix.
 - `mod/<name>/README.md` — per-mod design notes, patch-maintenance caveats, rollback notes.
-- `docs/xs-lsp-spike.md` — current state of the LSP pivot (READ THIS before working on the LSP).
+- `docs/xs-lsp-spike.md` — historical spike plan that led to the Rust LSP pivot.
 - `openspec/config.yaml` — SDD rules, proposal/spec/design conventions, verification method.
 - `openspec/sdd-init/aom_retold_mod_idle_auto_repair.md` — full SDD-init context (stack, conventions, testing capability).
-- `openspec/changes/intellij-xs-plugin/` — completed Kotlin plugin planning (P0, P0.5, P1). P1 was fully verified (PASS, 36 tests green). P2-P5 paused in favor of the LSP pivot. The Kotlin plugin remains useful as a thin client.
-- `openspec/changes/` — current in-flight and archived SDD changes. A future `xs-language-server/` change will live here.
+- `openspec/changes/intellij-xs-plugin/` — completed Kotlin plugin planning (P0, P0.5, P1). P1 was fully verified (PASS, 36 tests green). P2-P5 paused in favor of the LSP pivot. The Kotlin plugin is now a thin LSP client.
+- `openspec/changes/xs-language-server/` — current SDD change for the redesigned Rust LSP (Phases 1–5).
 - `docs/` — proto_mods syntax, BANG docs, research notes, playtest records, XS language syntax notes.
 - skill: `playtest-log-analysis/` — project-local skill for parsing AI playtest logs.
