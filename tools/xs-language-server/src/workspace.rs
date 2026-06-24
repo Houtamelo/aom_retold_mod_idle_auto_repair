@@ -83,6 +83,49 @@ pub enum WorkspaceError {
     MissingGameDirectory(PathBuf),
 }
 
+/// Errors that can occur while resolving an `include "..."` directive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    /// The includer's path does not lie under a known include root.
+    UnknownIncludeRoot,
+    /// The resolved relative path does not exist in the project or vanilla game.
+    NotFound {
+        /// Raw include target as it appeared in the directive.
+        target: String,
+        /// Include root that was used for resolution.
+        root: IncludeRoot,
+    },
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::UnknownIncludeRoot => write!(f, "include target has no known include root"),
+            ResolveError::NotFound { target, root } => write!(
+                f,
+                "include target {:?} not found under {:?} root",
+                target,
+                root.rel_prefix()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
+/// A single resolved include relationship between two files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeEdge {
+    /// Absolute path of the file containing the `include` directive.
+    pub from: PathBuf,
+    /// Absolute path of the resolved include target.
+    pub to: PathBuf,
+    /// Include-root context used for resolution (`AI`, `TRIGGER`, `RANDOM_MAP`).
+    pub root: IncludeRoot,
+    /// 0-indexed line of the `include` directive in `from`.
+    pub include_line: u32,
+}
+
 impl std::fmt::Display for WorkspaceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -197,10 +240,42 @@ impl Workspace {
         self.resolve_file(project, &rel)
     }
 
+    /// Resolve an include and return both the target path and an `IncludeEdge`
+    /// describing the relationship.
+    pub fn resolve_include_edge(
+        &self,
+        project: &VirtualProject,
+        from_rel: &str,
+        include_target: &str,
+        from_path: &Path,
+        include_line: u32,
+    ) -> Result<(PathBuf, IncludeEdge), ResolveError> {
+        let root = detect_include_root(from_rel).ok_or(ResolveError::UnknownIncludeRoot)?;
+        let rel = format!("{}{}", root.rel_prefix(), include_target);
+        let to_path = self.resolve_file(project, &rel).ok_or_else(|| ResolveError::NotFound {
+            target: include_target.to_string(),
+            root,
+        })?;
+        let edge = IncludeEdge {
+            from: from_path.to_path_buf(),
+            to: to_path.clone(),
+            root,
+            include_line,
+        };
+        Ok((to_path, edge))
+    }
+
     /// Absolute path to a file under the game folder given its relative path
     /// under `game/`.
     pub fn game_file_path(&self, rel: &str) -> PathBuf {
         self.game_path.join("game").join(rel)
+    }
+
+    /// Relative path under `game/` for an absolute file path, if it lies inside
+    /// the workspace game folder.
+    pub fn game_relative_path(&self, abs_path: &Path) -> Option<String> {
+        let game_root = self.game_path.join("game");
+        relativize(&game_root, abs_path)
     }
 
     /// The game-path root used by this workspace.
@@ -285,7 +360,7 @@ fn walk_game_files(
 
 /// Compute the POSIX-style relative path of `file` with respect to `base`,
 /// using `/` as the separator regardless of the host platform.
-fn relativize(base: &Path, file: &Path) -> Option<String> {
+pub(crate) fn relativize(base: &Path, file: &Path) -> Option<String> {
     let rel = file.strip_prefix(base).ok()?;
     let rel_str = rel.to_string_lossy();
     let normalized = if std::path::MAIN_SEPARATOR == '/' {
@@ -299,6 +374,7 @@ fn relativize(base: &Path, file: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser;
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -539,5 +615,66 @@ mod tests {
         assert_eq!(ws.mods().len(), 1);
         ws.unregister_mod(&uri);
         assert!(ws.mods().is_empty());
+    }
+
+    #[test]
+    fn direct_include_resolves_via_tree_sitter() {
+        // Scenario 4: an includer references an include target using an
+        // AST-based walker, not a line regex.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let includer_rel = "ai/human_assist/a.xs";
+        let includer = root.join("game").join("ai").join("human_assist").join("a.xs");
+        let target = root.join("game").join("ai").join("b.xs");
+        write(&includer, "include \"b.xs\";\n").unwrap();
+        write(&target, "void helper() {}").unwrap();
+
+        let ws = Workspace::new(root.to_path_buf());
+        let project = VirtualProject::default();
+
+        let source = std::fs::read_to_string(&includer).unwrap();
+        let tree = parser::parse(&source).unwrap();
+        let directives = parser::extract_include_directives(&tree, &source);
+        assert_eq!(directives.len(), 1);
+        assert_eq!(directives[0].0, "b.xs");
+
+        let resolved = ws.resolve_include(&project, includer_rel, "b.xs").unwrap();
+        assert_eq!(resolved, target);
+    }
+
+    #[test]
+    fn include_edge_prefers_mod_overlay() {
+        // Scenario 8: include resolution prefers the mod overlay over vanilla.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let includer = root
+            .join("mod_a")
+            .join("game")
+            .join("ai")
+            .join("human_assist")
+            .join("a.xs");
+        let vanilla = root.join("game").join("ai").join("b.xs");
+        let overlay = root.join("mod_a").join("game").join("ai").join("b.xs");
+        write(&includer, "include \"b.xs\";\n").unwrap();
+        write(&vanilla, "void vanilla() {}").unwrap();
+        write(&overlay, "void overlay() {}").unwrap();
+
+        let mut ws = Workspace::new(root.to_path_buf());
+        ws.register_mod(Url::from_file_path(root.join("mod_a")).unwrap())
+            .unwrap();
+        let project = ws.build_virtual_project(ws.mods().first().unwrap());
+
+        let (resolved, edge) = ws
+            .resolve_include_edge(
+                &project,
+                "ai/human_assist/a.xs",
+                "b.xs",
+                &includer,
+                0,
+            )
+            .unwrap();
+        assert_eq!(resolved, overlay);
+        assert_eq!(edge.to, overlay);
+        assert_eq!(edge.root, IncludeRoot::Ai);
     }
 }

@@ -4,12 +4,49 @@
 //! startup cost — kept here so call sites can `parse(src)` without
 //! touching the tree-sitter API directly.
 
+use tower_lsp::lsp_types::{Position, Range};
 use tree_sitter::{Language, Parser, Tree};
 use tree_sitter_language::LanguageFn;
 
 /// Convenience: hand back the tree-sitter `Language` for XS.
 pub fn xs_language() -> Language {
     (tree_sitter_xs::LANGUAGE as LanguageFn).into()
+}
+
+/// Extract every `include_directive` from a parsed XS file.
+///
+/// Returns the include target with quotes stripped and the full source range
+/// of the directive. This replaces the line-regex approximation previously
+/// used in `completion.rs`.
+pub fn extract_include_directives(tree: &Tree, source: &str) -> Vec<(String, Range)> {
+    let mut out = Vec::new();
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if child.kind() != "include_directive" {
+            continue;
+        }
+        let range = node_range(child);
+        let Some(path_node) = child.child_by_field_name("path") else {
+            continue;
+        };
+        let text = &source[path_node.byte_range()];
+        let target = text
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(text);
+        out.push((target.to_string(), range));
+    }
+    out
+}
+
+fn node_range(node: tree_sitter::Node<'_>) -> Range {
+    let start = node.start_position();
+    let end = node.end_position();
+    Range::new(
+        Position::new(start.row as u32, start.column as u32),
+        Position::new(end.row as u32, end.column as u32),
+    )
 }
 
 /// Parse `source` as XS. Returns `None` if the language fails to install
