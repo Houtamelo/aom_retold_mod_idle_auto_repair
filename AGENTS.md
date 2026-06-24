@@ -94,9 +94,16 @@ The plugin is now a thin LSP client. Settings live under **Settings → Language
 
 1. Edit Rust sources under `tools/xs-language-server/src/`
 2. `cargo build` to build
-3. `cargo test` for unit tests
+3. `cargo test` for unit tests (75 tests)
 4. `cargo run --bin lsp_roundtrip_test` for the end-to-end LSP message sequence
-5. Integration test: open the IntelliJ plugin and verify diagnostics arrive for a mod `.xs` file
+5. **Game folder integration test** (optional, requires the game installed):
+   ```bash
+   AOMR_GAME_PATH=/path/to/Age\ of\ Mythology\ Retold \
+     cargo test --manifest-path tools/xs-language-server/Cargo.toml \
+       --test game_folder_parse -- --nocapture
+   ```
+   Walks `game/**/*.xs` (302 parseable files), asserts no unexpected parse errors, asserts every file resolves through the `Workspace`, and asserts the semantic pipeline produces a bounded number of unresolved-symbol diagnostics (the threshold accounts for the known include-paste approximation; see `docs/blockers/pending-task-include-paste.md`). The three tests skip cleanly if `AOMR_GAME_PATH` is not set, so plain `cargo test` on CI still passes.
+6. Integration test: open the IntelliJ plugin and verify diagnostics arrive for a mod `.xs` file
 
 The server caches extracted engine API data under `~/.local/state/aomr_lsp/v2/` (or `~/.aomr_lsp/v2/` if `XDG_STATE_HOME` is unavailable). The cache key is the SHA-256 of `doxygen_retail.7z`; warm starts load the cached JSON directly instead of re-extracting the archive. The `v2/` schema was introduced when the legacy JSON backfill was removed in Phase 5; older `v1/` cache files are ignored.
 

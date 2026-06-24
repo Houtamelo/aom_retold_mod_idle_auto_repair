@@ -20,3 +20,6 @@ tree-sitter = "0.26.9"
 tree-sitter-c = "0.24.2"
 tree-sitter-language = "0.1"
 tree-sitter-xs = { version = "0.1.0", path = "tree-sitter-xs" }
+
+[dev-dependencies]
+walkdir = "2"

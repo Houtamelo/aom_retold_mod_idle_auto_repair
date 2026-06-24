@@ -6,6 +6,7 @@ extracted/
 # CryBar tools (download, not source).
 tools/*
 !tools/intellij-xs-plugin/
+!tools/xs-language-server/
 
 # Smoke-test artifacts (LSP binary + plugin zip). Built fresh per smoke test.
 # See docs/smoke-test-setup.md for what these are and how to use them.
@@ -20,6 +21,8 @@ tools/intellij-xs-plugin/src/main/resources/bin/
 # OS / editor noise
 .DS_Store
 *.swp
+# Rust build artifacts (target/ is per-developer; do not commit).
+**/target/
 # Local AI runtime state
 .atl/
 .idea/

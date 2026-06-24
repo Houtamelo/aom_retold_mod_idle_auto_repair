@@ -7,21 +7,9 @@ use tower_lsp::{LspService, Server};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-mod cache;
-mod completion;
-mod diagnostics;
-mod doxygen;
-mod engine_api;
-mod parser;
-mod references;
-mod semantic;
-mod server;
-mod symbols;
-mod typecheck;
-mod word;
-mod workspace;
-
-use server::XsLanguageServer;
+use xs_language_server::cache;
+use xs_language_server::engine_api;
+use xs_language_server::server::XsLanguageServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
