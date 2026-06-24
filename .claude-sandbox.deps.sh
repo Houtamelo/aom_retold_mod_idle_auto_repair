@@ -4,4 +4,4 @@
 set -euo pipefail
 
 apt-get update -y
-apt-get install -y build-essential gcc cargo
+apt-get install -y build-essential gcc cargo openjdk-21-jdk-headless

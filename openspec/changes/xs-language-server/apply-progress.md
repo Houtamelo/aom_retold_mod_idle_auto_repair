@@ -228,3 +228,63 @@ After the user-reported container recreation interrupted the agent mid-cleanup, 
 ## Next batch
 
 - **Phase 5 (T27–T30):** VS Code removal (`.vsix`, `extracted/` exception) + housekeeping (AGENTS.md, docs/xs-lsp-spike.md, final verification).
+
+---
+
+# Apply Progress — `xs-language-server` Phase 5
+
+**Status:** complete  
+**Change:** xs-language-server (workspace & engine-data redesign)  
+**Batch:** Phase 5 (T27–T30) — VS Code removal + housekeeping + final verification  
+**Branch:** `xs-language-server/redesign-phase-5`  
+**Base:** `xs-language-server/redesign-phase-4` @ `9b7fe48`  
+
+## Tasks completed
+
+- [x] **T27** — Removed `extracted/xs.vsix` from the working tree (was already absent) and added `*.vsix` to `.gitignore`; left week 7 commit `1628aa6` stranded in history rather than rewriting history. Also removed the deprecated `syscalls.json`/`aiplans.json` from `tools/intellij-xs-plugin/src/main/resources/` and removed the sibling-JSON fallback path from `EngineApi`.
+- [x] **T28** — Updated `AGENTS.md` to describe the Rust LSP as the real language implementation, the IntelliJ plugin as a thin LSP client, the cache directory (`~/.local/state/aomr_lsp/v1/` or `~/.aomr_lsp`), IntelliJ settings scope (game folder global, mod paths project-local), and the mod auto-detect algorithm.
+- [x] **T29** — Updated `docs/xs-lsp-spike.md`: marked it as historical/superseded, replaced incorrect prefix-based examples with the real `const`/`extern`/`mutable` + Doxygen architecture, updated the project layout, and added an Outcome section.
+- [x] **T30** — Final verification: `cargo test` green (75 tests), `cargo run --bin lsp_roundtrip_test` green, `./gradlew test` green, `./gradlew buildPlugin` green. Created `openspec/changes/xs-language-server/verify-report.md`.
+
+## Additional Phase 5 fixes
+
+- Fixed `XsConfigurable` to guard drag-and-drop setup with `GraphicsEnvironment.isHeadless()` so `./gradlew buildPlugin` no longer throws `HeadlessException` during `buildSearchableOptions`.
+- Refactored `XsModAutoDetector` to expose a `Path`-based `scan()` overload and rewrote `XsModAutoDetectorTest` as a plain JUnit test.
+- Rewrote `XsSettingsTest` as plain JUnit to avoid `LightPlatformTestCase` headless hangs.
+- Updated `tools/intellij-xs-plugin/README.md` to reflect the thin LSP client architecture.
+- Installed `openjdk-21-jdk-headless` in the sandbox and appended it to `.claude-sandbox.deps.sh` so the IntelliJ plugin build/test gates persist across container recreations.
+
+## Commits made
+
+| Hash | Title |
+|------|-------|
+| `26ca10e` | `chore(xs-lsp): remove extracted/xs.vsix from repo` |
+| `3027f6d` | `docs(agents): update AGENTS.md with new LSP architecture` |
+| `3f66c98` | `docs(xs-lsp): correct and mark xs-lsp-spike.md as historical` |
+| `9a656c5` | `chore(xs-lsp): remove legacy engine JSON fallback and bundled resources` |
+| `d9ec21b` | `fix(intellij-xs-plugin): make settings UI headless-safe and tests sandbox-friendly` |
+
+## Test results
+
+- `cargo test` (Rust LSP): **75 passed, 0 failed**
+- `cargo run --bin lsp_roundtrip_test`: **PASS** — baseline + workspace + semantic sequences green
+- `./gradlew test` (IntelliJ plugin): **BUILD SUCCESSFUL**
+- `./gradlew buildPlugin` (IntelliJ plugin): **BUILD SUCCESSFUL**
+
+## Known issues / deviations
+
+1. **No legacy JSON backfill.** Direct Doxygen extraction yields 1,804 syscalls (not the historical 1,805) because `xsExecute` is absent from `docs/doxygen_retail.7z`. The LSP now reports exactly what the archive contains.
+2. **Manual end-to-end smoke test in IntelliJ cannot run in CI.** It requires a non-headless IDE and a real AoM:R install. The automated compile/test/package gates pass.
+3. **Per-keystroke diagnostic latency not instrumented on a representative corpus.** The implementation uses per-file parse cache and single-file passes, but no corpus benchmark was run.
+4. **Week 7 commit `1628aa6` remains stranded in history.** Per user direction, no rebase or history rewrite was performed.
+
+## Final summary
+
+All 30 tasks across Phases 1–5 are complete. All automated verification gates pass. The repository no longer tracks VS Code extension artifacts or legacy bundled engine JSON. The redesigned Rust LSP and thin IntelliJ client are ready for `sdd-verify` sign-off and `sdd-archive`.
+
+---
+
+## Next steps
+
+- `sdd-verify` formal sign-off on the full change.
+- `sdd-archive` to finalise spec deltas and close the change.

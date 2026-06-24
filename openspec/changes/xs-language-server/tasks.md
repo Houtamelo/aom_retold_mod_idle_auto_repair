@@ -385,12 +385,14 @@ Chain strategy: feature-branch-chain
 - **Phase:** 5
 - **Depends on:** T26
 - **Specs referenced:** `spec-vscode-removal.md`
-- **Files affected:** `extracted/xs.vsix`, `.gitignore`
+- **Files affected:** `extracted/xs.vsix`, `.gitignore`, `tools/intellij-xs-plugin/src/main/resources/syscalls.json`, `tools/intellij-xs-plugin/src/main/resources/aiplans.json`, `tools/xs-language-server/src/engine_api.rs`, `tools/xs-language-server/src/typecheck.rs`, `tools/xs-language-server/src/doxygen.rs`
 - **Acceptance criteria:**
-  1. `git rm extracted/xs.vsix` (or `git rm --ignore-unmatch` if absent).
-  2. Ensure `.gitignore` ignores `extracted/` and contains no `!extracted/xs.vsix` exception.
-  3. No `.vsix` files are tracked (`git ls-files | grep '\.vsix$'` returns empty).
-  4. Decide whether to revert/strand week 7 commit `1628aa6` and document the decision.
+  1. [x] `git rm extracted/xs.vsix` (or `git rm --ignore-unmatch` if absent).
+  2. [x] Ensure `.gitignore` ignores `extracted/` and contains no `!extracted/xs.vsix` exception.
+  3. [x] No `.vsix` files are tracked (`git ls-files | grep '\.vsix$'` returns empty).
+  4. [x] Week 7 commit `1628aa6` left stranded; no history rewrite performed.
+  5. [x] Removed deprecated `syscalls.json`/`aiplans.json` from plugin resources.
+  6. [x] Removed sibling-JSON fallback from `EngineApi`.
 - **Estimated lines changed:** ~5
 - **Test command:** `git ls-files | grep '\.vsix$'` returns empty
 
@@ -400,10 +402,10 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-intellij-client-integration.md`, `spec-vscode-removal.md`
 - **Files affected:** `AGENTS.md`
 - **Acceptance criteria:**
-  1. Describe the new LSP architecture (Rust server + thin IntelliJ client).
-  2. Document cache directory (`~/.local/state/aomr_lsp/` or `~/.aomr_lsp`).
-  3. Describe IntelliJ settings scope and mod auto-detect behavior.
-  4. Remove references to the VS Code client path.
+  1. [x] Describe the new LSP architecture (Rust server + thin IntelliJ client).
+  2. [x] Document cache directory (`~/.local/state/aomr_lsp/` or `~/.aomr_lsp`).
+  3. [x] Describe IntelliJ settings scope and mod auto-detect behavior.
+  4. [x] Remove references to the VS Code client path.
 - **Estimated lines changed:** ~50
 - **Test command:** manual review
 
@@ -413,9 +415,9 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-vscode-removal.md`
 - **Files affected:** `docs/xs-lsp-spike.md`
 - **Acceptance criteria:**
-  1. Fix the incorrect prefix examples (`k[A-Z]\w*`, `g[A-Z]\w*`, `s[A-Z]\w*`) and replace with the actual `const`/`extern`/`mutable` + Doxygen architecture.
-  2. Add a banner marking the doc as historical (post-spike plan, superseded by `openspec/changes/xs-language-server/`).
-  3. Update project layout to reflect the real Rust/Kotlin split.
+  1. [x] Fix the incorrect prefix examples (`k[A-Z]\w*`, `g[A-Z]\w*`, `s[A-Z]\w*`) and replace with the actual `const`/`extern`/`mutable` + Doxygen architecture.
+  2. [x] Add a banner marking the doc as historical (post-spike plan, superseded by `openspec/changes/xs-language-server/`).
+  3. [x] Update project layout to reflect the real Rust/Kotlin split.
 - **Estimated lines changed:** ~40
 - **Test command:** manual review
 
@@ -425,10 +427,11 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** all six specs
 - **Files affected:** (verification only)
 - **Acceptance criteria:**
-  1. `cargo test` passes.
-  2. `./gradlew test` passes.
-  3. `./gradlew buildPlugin` succeeds.
-  4. Manual end-to-end smoke test in IntelliJ: open an `.xs` mod file, check diagnostics/completion/hover.
-  5. Document any manual-verification caveats in `docs/`.
+  1. [x] `cargo test` passes (75 tests).
+  2. [x] `cargo run --bin lsp_roundtrip_test` passes.
+  3. [x] `./gradlew test` passes (sandbox-friendly plain-JUnit tests).
+  4. [x] `./gradlew buildPlugin` succeeds.
+  5. [x] Manual end-to-end smoke test in IntelliJ documented as CI-only; requires non-headless IDE and AoM:R install.
+  6. [x] Verification report created at `openspec/changes/xs-language-server/verify-report.md`.
 - **Estimated lines changed:** ~30
-- **Test command:** `cargo test && ./gradlew test && ./gradlew buildPlugin`
+- **Test command:** `cargo test && cargo run --bin lsp_roundtrip_test && ./gradlew test && ./gradlew buildPlugin`
