@@ -1,11 +1,19 @@
 //! Convert a tree-sitter parse tree into LSP `Diagnostic`s.
 //!
 //! Day 4-5 of the spike only reports syntax-level errors — `ERROR` and
-//! `MISSING` nodes from the parser. Richer diagnostics (wrong arg count,
-//! undefined identifier, etc.) come later in the post-spike roadmap.
+//! `MISSING` nodes from the parser. Phase 3 adds cross-file semantic
+//! diagnostics (extern collisions, forward declarations, mutable redefinition,
+//! user-function type checks) on top of the parse diagnostics.
+
+use std::path::Path;
 
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use tree_sitter::{Node, Tree};
+
+use crate::engine_api::EngineApi;
+use crate::semantic::VirtualProject;
+use crate::symbols::SymbolTable;
+use crate::{semantic, typecheck};
 
 /// Walk the tree and collect one `Diagnostic` per error site.
 pub fn collect_diagnostics(tree: &Tree, _source: &str) -> Vec<Diagnostic> {
@@ -21,6 +29,26 @@ fn walk(node: Node, out: &mut Vec<Diagnostic>) {
     for child in node.children(&mut node.walk()) {
         walk(child, out);
     }
+}
+
+/// Full diagnostic pass for a file: parse errors + type-check + semantic.
+///
+/// `project` and `current_file` are `None` for unowned files; in that case
+/// only engine-API-based checks run.
+pub fn collect_all(
+    tree: &Tree,
+    source: &str,
+    engine: &EngineApi,
+    table: &SymbolTable,
+    project: Option<&VirtualProject>,
+    current_file: Option<&Path>,
+) -> Vec<Diagnostic> {
+    let mut diags = collect_diagnostics(tree, source);
+    diags.extend(typecheck::check_calls(tree, source, engine, table, project));
+    if let (Some(p), Some(cf)) = (project, current_file) {
+        diags.extend(semantic::check_all(p, cf));
+    }
+    diags
 }
 
 fn to_diagnostic(node: Node) -> Diagnostic {

@@ -8,7 +8,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info, warn};
 
-use crate::{completion, diagnostics, engine_api, parser, references, symbols, typecheck, word, workspace};
+use crate::{completion, diagnostics, engine_api, parser, references, semantic, symbols, word, workspace};
 
 /// Holds the parsed-but-not-yet-processed text of every document the client
 /// has opened. Populated by `did_open` / `did_change`, cleared by `did_close`.
@@ -378,7 +378,19 @@ impl LanguageServer for XsLanguageServer {
             let docs = self.documents.lock().await;
             docs.get(uri).unwrap_or("").to_string()
         };
-        let items = completion::complete(&self.engine, &text, &params);
+        let current_file = uri.to_file_path().ok();
+        let project = if current_file.is_some() {
+            self.build_semantic_project(uri).await
+        } else {
+            None
+        };
+        let items = completion::complete(
+            &self.engine,
+            project.as_ref(),
+            current_file.as_deref(),
+            &text,
+            &params,
+        );
         debug!("completion: {} item(s) at {:?}", items.len(), params.text_document_position.position);
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -710,28 +722,37 @@ impl XsLanguageServer {
         }
     }
 
-    /// Parse `text` as XS and publish any parse errors AND engine-API call
-    /// type errors as LSP diagnostics. An empty `Vec` (clean parse) is
-    /// also published so clients clear stale diagnostics for this URI.
+    /// Parse `text` as XS and publish parse, type-check, and semantic
+    /// diagnostics. An empty `Vec` (clean parse) is also published so clients
+    /// clear stale diagnostics for this URI.
     async fn publish_diagnostics(&self, uri: &Url, text: &str, version: i32) {
+        let current_file = uri.to_file_path().ok();
+        let project = if current_file.is_some() {
+            self.build_semantic_project(uri).await
+        } else {
+            None
+        };
+
         let diagnostics = match parser::parse(text) {
             Some(tree) => {
-                let mut all = diagnostics::collect_diagnostics(&tree, text);
-                // Week 5: type-check engine API calls (arg count + arg type).
-                // We hold the symbol-tables lock briefly to look up the
-                // per-file table; releasing before `publish_diagnostics`
-                // keeps the lock window minimal.
-                let typecheck_diags = {
+                // Hold the symbol-tables lock briefly to look up the
+                // per-file table; releasing before the heavier checks keeps
+                // the lock window minimal.
+                let table = {
                     let tables = self.symbol_tables.lock().await;
-                    match tables.get(uri) {
-                        Some(table) => {
-                            typecheck::check_calls(&tree, text, &self.engine, table)
-                        }
-                        None => Vec::new(),
-                    }
+                    tables.get(uri).cloned()
                 };
-                all.extend(typecheck_diags);
-                all
+                match table {
+                    Some(table) => diagnostics::collect_all(
+                        &tree,
+                        text,
+                        &self.engine,
+                        &table,
+                        project.as_ref(),
+                        current_file.as_deref(),
+                    ),
+                    None => diagnostics::collect_diagnostics(&tree, text),
+                }
             }
             None => vec![Diagnostic {
                 range: Range::new(Position::new(0, 0), Position::new(0, 0)),
@@ -753,6 +774,19 @@ impl XsLanguageServer {
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, Some(version))
             .await;
+    }
+
+    /// Build a semantic virtual project for the mod that owns `uri`.
+    /// Returns `None` for unowned files or if the project cannot be read.
+    async fn build_semantic_project(&self, uri: &Url) -> Option<semantic::VirtualProject> {
+        let (ws_clone, project) = {
+            let ws = self.workspace.lock().await;
+            let entry = ws.lookup_mod(uri).cloned()?;
+            let project = ws.build_virtual_project(&entry);
+            (ws.clone(), project)
+        };
+        let cache_dir = crate::cache::state_cache_dir();
+        semantic::VirtualProject::load_from_workspace(&ws_clone, &project, &cache_dir).ok()
     }
 }
 
