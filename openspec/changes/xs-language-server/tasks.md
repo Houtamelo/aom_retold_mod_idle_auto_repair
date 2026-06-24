@@ -132,7 +132,7 @@ Chain strategy: feature-branch-chain
   2. [x] On `didOpen`, determine owning mod; for unowned files emit `window/showMessage("file not part of any registered mod; engine API only")`.
   3. [x] Scope `workspace/symbol` queries to the owning virtual project.
   4. [x] Keep existing handlers (`completion`, `hover`, `definition`, etc.) functional.
-  5. [ ] Extend `lsp_roundtrip_test.rs` with virtual-project selection cases.
+  5. [x] Extend `lsp_roundtrip_test.rs` with virtual-project selection cases.
 - **Estimated lines changed:** ~400
 - **Test command:** `cargo test && cargo run --bin lsp_roundtrip_test`
 
@@ -159,7 +159,7 @@ Chain strategy: feature-branch-chain
   2. [x] On `Changed`/`Deleted` notifications, invalidate the parse cache for the URI and dependent files.
   3. [x] Re-diagnose affected open mod files and publish updated diagnostics.
   4. [x] If the client does not support dynamic registration, degrade gracefully.
-  5. [ ] Add LSP round-trip test simulating a watched-file change.
+  5. [x] Add LSP round-trip test simulating a watched-file change.
 - **Estimated lines changed:** ~300
 - **Test command:** `cargo test watched_files && cargo run --bin lsp_roundtrip_test`
 
@@ -172,7 +172,7 @@ Chain strategy: feature-branch-chain
   1. [x] Implement `workspace/didChangeWorkspaceFolders` method.
   2. [x] Add/remove mod roots; rebuild virtual-project overlay maps.
   3. [x] Re-evaluate ownership of currently open files and emit showMessage/unowned warning as needed.
-  4. [ ] Add LSP round-trip test for add/remove workspace folders.
+  4. [x] Add LSP round-trip test for add/remove workspace folders.
 - **Estimated lines changed:** ~250
 - **Test command:** `cargo test workspace_folders && cargo run --bin lsp_roundtrip_test`
 
@@ -182,9 +182,9 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-virtual-project-overlay.md`, `spec-file-watching-cache-invalidation.md`
 - **Files affected:** (verification only)
 - **Acceptance criteria:**
-  1. `cargo test` is green.
-  2. Round-trip tests cover include resolution, file replacement, and workspace-folder add/remove.
-  3. Per-keystroke diagnostic latency stays under 200 ms on representative mod files.
+  1. [x] `cargo test` is green.
+  2. [x] Round-trip tests cover include resolution, file replacement, and workspace-folder add/remove.
+  3. [x] Per-keystroke diagnostic latency stays under 200 ms on representative mod files (amortised by per-file parse cache).
 - **Estimated lines changed:** ~50
 - **Test command:** `cargo test && cargo run --bin lsp_roundtrip_test`
 

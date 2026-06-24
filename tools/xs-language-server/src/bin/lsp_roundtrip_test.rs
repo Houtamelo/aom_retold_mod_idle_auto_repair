@@ -11,6 +11,9 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
+use serde_json::json;
+use tower_lsp::lsp_types::Url;
+
 // Reference LSP messages. Kept as constants so the framing and the body
 // can never drift apart at the test site.
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"capabilities":{},"trace":"off","rootUri":null,"workspaceFolders":null}}"#;
@@ -39,10 +42,10 @@ const DEFINITION_AI: &str = r#"{"jsonrpc":"2.0","id":5,"method":"textDocument/de
 //   7:
 //   8: int helper(int a, int b)
 //   9: {
-//  10:    return a + b;
-//  11: }
-//  12:
-//  13: const int cMagic = 42;
+//   10:    return a + b;
+//   11: }
+//   12:
+//   13: const int cMagic = 42;
 //
 // Hover at line 7 col 6 is on 'h' in `helper`. Definition at the same
 // place should jump to line 7 col 5.
@@ -157,7 +160,7 @@ fn locate_server_binary() -> std::path::PathBuf {
 /// game folder. `docs/doxygen_retail.7z` is committed in the repo.
 fn resolve_test_game_path() -> std::path::PathBuf {
     let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    // tools/xs-language-server -> tools -> repo root
+    // tools/xs-language-server -> tools/ -> aom_retold_mod/
     let repo_root = crate_dir
         .parent()
         .and_then(|p| p.parent())
@@ -166,7 +169,8 @@ fn resolve_test_game_path() -> std::path::PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
 }
 
-fn main() {
+/// Run the original Phase 1 message sequence unchanged.
+fn run_baseline() -> bool {
     let server_path = locate_server_binary();
     let game_path = resolve_test_game_path();
 
@@ -584,7 +588,321 @@ fn main() {
         init_resp.to_string().chars().take(200).collect::<String>()
     );
 
-    if all_pass {
+    all_pass
+}
+
+/// Phase 2: test virtual-project ownership, file replacement, include
+/// resolution scoping, watched-file registration, and dynamic workspace-folder
+/// add/remove.
+fn run_workspace_tests() -> bool {
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir();
+
+    let game_root = tmp.join(format!("aomr_lsp_game_{pid}"));
+    let mod_a = tmp.join(format!("aomr_lsp_mod_a_{pid}"));
+    let mod_b = tmp.join(format!("aomr_lsp_mod_b_{pid}"));
+    let unowned = tmp.join(format!("aomr_lsp_unowned_{pid}.xs"));
+
+    // Clean up any leftovers from previous runs.
+    let _ = std::fs::remove_dir_all(&game_root);
+    let _ = std::fs::remove_dir_all(&mod_a);
+    let _ = std::fs::remove_dir_all(&mod_b);
+    let _ = std::fs::remove_file(&unowned);
+
+    // Copy the committed doxygen archive into the synthetic game folder.
+    let doxy_src = resolve_test_game_path().join("doxygen_retail.7z");
+    std::fs::create_dir_all(&game_root).expect("create game root");
+    std::fs::copy(&doxy_src, game_root.join("doxygen_retail.7z"))
+        .expect("copy doxygen archive");
+
+    // Vanilla game files.
+    let vanilla_core = game_root.join("game").join("ai").join("core").join("core.xs");
+    std::fs::create_dir_all(vanilla_core.parent().unwrap()).unwrap();
+    std::fs::write(&vanilla_core, "void vanillaCore() {}\n").unwrap();
+
+    // Mod A overlay: shadows the vanilla core and provides a main file that
+    // includes it.
+    let mod_a_main = mod_a
+        .join("game")
+        .join("ai")
+        .join("human_assist")
+        .join("human_assist.xs");
+    let mod_a_core = mod_a.join("game").join("ai").join("core").join("core.xs");
+    std::fs::create_dir_all(mod_a_main.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(mod_a_core.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mod_a_main,
+        "include \"core/core.xs\"\n\nvoid mainAssistance() { modCore(); }\n",
+    )
+    .unwrap();
+    std::fs::write(&mod_a_core, "void modCore() {}\n").unwrap();
+
+    // Mod B overlay: a simple file used to test dynamic add.
+    let mod_b_file = mod_b.join("game").join("ai").join("foo.xs");
+    std::fs::create_dir_all(mod_b_file.parent().unwrap()).unwrap();
+    std::fs::write(&mod_b_file, "void modBFoo() {}\n").unwrap();
+
+    std::fs::write(&unowned, "void orphan() {}\n").unwrap();
+
+    let game_root = std::fs::canonicalize(&game_root).unwrap();
+    let mod_a = std::fs::canonicalize(&mod_a).unwrap();
+    let mod_b = std::fs::canonicalize(&mod_b).unwrap();
+    let unowned = std::fs::canonicalize(&unowned).unwrap();
+
+    let mod_a_uri = Url::from_file_path(&mod_a).unwrap();
+    let mod_b_uri = Url::from_file_path(&mod_b).unwrap();
+    let mod_a_main_uri = Url::from_file_path(&mod_a_main).unwrap();
+    let mod_b_file_uri = Url::from_file_path(&mod_b_file).unwrap();
+    let unowned_uri = Url::from_file_path(&unowned).unwrap();
+    let vanilla_core_uri = Url::from_file_path(&vanilla_core).unwrap();
+
+    let server_path = locate_server_binary();
+
+    let mut child = Command::new(&server_path)
+        .arg("--game-path")
+        .arg(&game_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn xs-language-server for workspace tests");
+
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut stdout = child.stdout.take().expect("child stdout");
+
+    let with_uri = |uri: &Url| uri.to_string();
+
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 100,
+        "method": "initialize",
+        "params": {
+            "processId": null,
+            "capabilities": {
+                "workspace": {
+                    "workspaceFolders": true,
+                    "didChangeWatchedFiles": { "dynamicRegistration": true }
+                }
+            },
+            "trace": "off",
+            "rootUri": null,
+            "workspaceFolders": [{ "uri": mod_a_uri, "name": "mod_a" }]
+        }
+    })
+    .to_string();
+
+    let initialized = json!({"jsonrpc":"2.0","method":"initialized","params":{}}).to_string();
+
+    let did_open_unowned = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": unowned_uri,
+                "languageId": "xs",
+                "version": 1,
+                "text": "void orphan() {}\n"
+            }
+        }
+    })
+    .to_string();
+
+    let did_open_mod_a = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": mod_a_main_uri,
+                "languageId": "xs",
+                "version": 1,
+                "text": "include \"core/core.xs\"\n\nvoid mainAssistance() { modCore(); }\n"
+            }
+        }
+    })
+    .to_string();
+
+    let workspace_symbol_mod_a = json!({
+        "jsonrpc": "2.0",
+        "id": 101,
+        "method": "workspace/symbol",
+        "params": { "query": "Core" }
+    })
+    .to_string();
+
+    let watched_change = json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didChangeWatchedFiles",
+        "params": {
+            "changes": [{
+                "uri": vanilla_core_uri,
+                "type": 2 // Changed
+            }]
+        }
+    })
+    .to_string();
+
+    let change_folders = json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didChangeWorkspaceFolders",
+        "params": {
+            "event": {
+                "added": [{ "uri": mod_b_uri, "name": "mod_b" }],
+                "removed": []
+            }
+        }
+    })
+    .to_string();
+
+    let did_open_mod_b = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": mod_b_file_uri,
+                "languageId": "xs",
+                "version": 1,
+                "text": "void modBFoo() {}\n"
+            }
+        }
+    })
+    .to_string();
+
+    let workspace_symbol_mod_b = json!({
+        "jsonrpc": "2.0",
+        "id": 102,
+        "method": "workspace/symbol",
+        "params": { "query": "foo" }
+    })
+    .to_string();
+
+    let shutdown = json!({"jsonrpc":"2.0","id":103,"method":"shutdown"}).to_string();
+    let exit = json!({"jsonrpc":"2.0","method":"exit"}).to_string();
+
+    for msg in &[
+        init,
+        initialized,
+        did_open_unowned,
+        did_open_mod_a,
+        workspace_symbol_mod_a,
+        watched_change,
+        change_folders,
+        did_open_mod_b,
+        workspace_symbol_mod_b,
+        shutdown,
+        exit,
+    ] {
+        stdin.write_all(frame(msg).as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    drop(stdin);
+
+    let status = child.wait().expect("wait on workspace-test child");
+    let mut stderr_text = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut stderr_text)
+        .unwrap();
+
+    let mut all_bytes = Vec::new();
+    stdout.read_to_end(&mut all_bytes).unwrap();
+    let raw = String::from_utf8_lossy(&all_bytes);
+
+    let mut all_pass = true;
+
+    if status.success() {
+        println!("PASS (workspace): server exited cleanly");
+    } else {
+        println!("FAIL (workspace): server exited with {}", status);
+        all_pass = false;
+    }
+
+    // The server should have requested dynamic watched-file registration.
+    if raw.contains("client/registerCapability") && raw.contains("workspace/didChangeWatchedFiles") {
+        println!("PASS (workspace): server registered didChangeWatchedFiles watcher");
+    } else {
+        println!("FAIL (workspace): missing client/registerCapability for watched files");
+        all_pass = false;
+    }
+
+    // An unowned file should trigger the engine-API-only warning.
+    if raw.contains("window/showMessage")
+        && raw.contains("File not part of any registered mod")
+    {
+        println!("PASS (workspace): unowned file warning emitted");
+    } else {
+        println!("FAIL (workspace): missing unowned-file warning");
+        all_pass = false;
+    }
+
+    // A file inside mod_a should receive diagnostics.
+    if raw.contains(&with_uri(&mod_a_main_uri))
+        && raw.contains("textDocument/publishDiagnostics")
+    {
+        println!("PASS (workspace): diagnostics published for mod_a file");
+    } else {
+        println!("FAIL (workspace): missing diagnostics for mod_a file");
+        all_pass = false;
+    }
+
+    // workspace/symbol scoped to mod_a should expose modCore (from the mod's
+    // shadow core.xs) and NOT vanillaCore from the game folder.
+    let symbol_resp = read_response_with_id(&mut std::io::Cursor::new(&all_bytes), 101).ok();
+    let symbol_raw = symbol_resp.map(|v| v.to_string()).unwrap_or_default();
+    if symbol_raw.contains("modCore") && !symbol_raw.contains("vanillaCore") {
+        println!("PASS (workspace): workspace symbol scoped to mod_a shows overlay, not vanilla");
+    } else {
+        println!("FAIL (workspace): workspace symbol did not respect overlay (resp={})", symbol_raw);
+        all_pass = false;
+    }
+
+    // After adding mod_b and opening its file, there should be diagnostics for
+    // it and no additional unowned-file warnings for it.
+    if raw.contains(&with_uri(&mod_b_file_uri)) && raw.contains("textDocument/publishDiagnostics")
+    {
+        println!("PASS (workspace): mod_b file diagnosed after didChangeWorkspaceFolders add");
+    } else {
+        println!("FAIL (workspace): mod_b file not diagnosed after add");
+        all_pass = false;
+    }
+
+    // workspace/symbol scoped to mod_b should find modBFoo.
+    let symbol_resp_b = read_response_with_id(&mut std::io::Cursor::new(&all_bytes), 102).ok();
+    let symbol_raw_b = symbol_resp_b.map(|v| v.to_string()).unwrap_or_default();
+    if symbol_raw_b.contains("modBFoo") {
+        println!("PASS (workspace): workspace symbol scoped to mod_b finds modBFoo");
+    } else {
+        println!("FAIL (workspace): workspace symbol did not find mod_b symbol (resp={})", symbol_raw_b);
+        all_pass = false;
+    }
+
+    let has_panic = stderr_text.lines().any(|l| l.contains("panic") || l.contains("FATAL"));
+    if has_panic {
+        println!("FAIL (workspace): stderr contains panic/FATAL");
+        for line in stderr_text.lines() {
+            println!("  {line}");
+        }
+        all_pass = false;
+    } else {
+        println!("PASS (workspace): no stderr panic");
+    }
+
+    // Cleanup.
+    let _ = std::fs::remove_dir_all(&game_root);
+    let _ = std::fs::remove_dir_all(&mod_a);
+    let _ = std::fs::remove_dir_all(&mod_b);
+    let _ = std::fs::remove_file(&unowned);
+
+    all_pass
+}
+
+fn main() {
+    let baseline_ok = run_baseline();
+    let workspace_ok = run_workspace_tests();
+
+    if baseline_ok && workspace_ok {
         std::process::exit(0);
     } else {
         std::process::exit(1);
