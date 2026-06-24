@@ -786,7 +786,13 @@ impl XsLanguageServer {
             (ws.clone(), project)
         };
         let cache_dir = crate::cache::state_cache_dir();
-        semantic::VirtualProject::load_from_workspace(&ws_clone, &project, &cache_dir).ok()
+        match semantic::VirtualProject::load_from_workspace(&ws_clone, &project, &cache_dir) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                warn!("failed to build semantic project for {}: {}", uri, e);
+                None
+            }
+        }
     }
 }
 

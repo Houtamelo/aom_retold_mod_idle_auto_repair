@@ -898,11 +898,274 @@ fn run_workspace_tests() -> bool {
     all_pass
 }
 
+/// Phase 3: semantic diagnostics via synthetic mod fixtures.
+///
+/// For each fixture we start a fresh server, register a mod workspace folder
+/// containing the fixture files, `didOpen` the file of interest, then inspect
+/// the `textDocument/publishDiagnostics` notifications.
+fn run_semantic_tests() -> bool {
+    let fixtures = [
+        (
+            "forward_decl_ok",
+            vec![("forward_decl_ok.xs", include_str!("../semantic_fixtures/forward_decl_ok.xs"))],
+            vec!["forward_decl_ok.xs"],
+            Vec::<&str>::new(),
+            vec!["before declaration"],
+        ),
+        (
+            "forward_decl_missing",
+            vec![("forward_decl_missing.xs", include_str!("../semantic_fixtures/forward_decl_missing.xs"))],
+            vec!["forward_decl_missing.xs"],
+            vec!["before declaration"],
+            Vec::<&str>::new(),
+        ),
+        (
+            "mutable_ok",
+            vec![("mutable_ok.xs", include_str!("../semantic_fixtures/mutable_ok.xs"))],
+            vec!["mutable_ok.xs"],
+            Vec::<&str>::new(),
+            vec!["different signature"],
+        ),
+        (
+            "mutable_different_sig",
+            vec![("mutable_different_sig.xs", include_str!("../semantic_fixtures/mutable_different_sig.xs"))],
+            vec!["mutable_different_sig.xs"],
+            vec!["different signature"],
+            Vec::<&str>::new(),
+        ),
+        (
+            "int_to_float_widening",
+            vec![("int_to_float_widening.xs", include_str!("../semantic_fixtures/int_to_float_widening.xs"))],
+            vec!["int_to_float_widening.xs"],
+            Vec::<&str>::new(),
+            vec!["expected argument"],
+        ),
+        (
+            "float_to_int_loss",
+            vec![("float_to_int_loss.xs", include_str!("../semantic_fixtures/float_to_int_loss.xs"))],
+            vec!["float_to_int_loss.xs"],
+            vec!["expected argument 1 of type `int`"],
+            Vec::<&str>::new(),
+        ),
+        (
+            "extern_collision",
+            vec![
+                ("extern_collision_a.xs", include_str!("../semantic_fixtures/extern_collision_a.xs")),
+                ("extern_collision_b.xs", include_str!("../semantic_fixtures/extern_collision_b.xs")),
+            ],
+            vec!["extern_collision_b.xs"],
+            vec!["extern collision"],
+            Vec::<&str>::new(),
+        ),
+    ];
+
+    let mut all_pass = true;
+    for (name, files, open_files, expected, forbidden) in fixtures {
+        let ok = run_semantic_fixture(name, &files, &open_files, &expected, &forbidden);
+        if !ok {
+            all_pass = false;
+        }
+    }
+    all_pass
+}
+
+fn run_semantic_fixture(
+    name: &str,
+    files: &[(&str, &str)],
+    open_files: &[&str],
+    expected: &[&str],
+    forbidden: &[&str],
+) -> bool {
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir();
+    let game_root = tmp.join(format!("aomr_sem_game_{}_{}", name, pid));
+    let mod_root = tmp.join(format!("aomr_sem_mod_{}_{}", name, pid));
+
+    let _ = std::fs::remove_dir_all(&game_root);
+    let _ = std::fs::remove_dir_all(&mod_root);
+
+    // Minimal game folder with the doxygen archive.
+    let doxy_src = resolve_test_game_path().join("doxygen_retail.7z");
+    std::fs::create_dir_all(&game_root).expect("create game root");
+    std::fs::copy(&doxy_src, game_root.join("doxygen_retail.7z")).expect("copy doxygen archive");
+
+    // Write the fixture files into the mod overlay.
+    let mod_game = mod_root.join("game").join("ai").join("test");
+    for (rel, content) in files {
+        let path = mod_game.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+    }
+
+    let game_root = std::fs::canonicalize(&game_root).unwrap();
+    let mod_root = std::fs::canonicalize(&mod_root).unwrap();
+    let mod_uri = Url::from_file_path(&mod_root).unwrap();
+
+    // Build file URIs for every opened file.
+    let file_uris: Vec<(String, Url)> = open_files
+        .iter()
+        .map(|rel| {
+            let path = mod_game.join(rel);
+            let uri = Url::from_file_path(&path).unwrap();
+            ((*rel).to_string(), uri)
+        })
+        .collect();
+
+    let server_path = locate_server_binary();
+    let mut child = Command::new(&server_path)
+        .arg("--game-path")
+        .arg(&game_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn xs-language-server for semantic tests");
+
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut stdout = child.stdout.take().expect("child stdout");
+
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 900,
+        "method": "initialize",
+        "params": {
+            "processId": null,
+            "capabilities": {},
+            "trace": "off",
+            "rootUri": null,
+            "workspaceFolders": [{ "uri": mod_uri, "name": name }]
+        }
+    })
+    .to_string();
+
+    let initialized = json!({"jsonrpc":"2.0","method":"initialized","params":{}}).to_string();
+
+    stdin.write_all(frame(&init).as_bytes()).unwrap();
+    stdin.write_all(frame(&initialized).as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let file_content: std::collections::HashMap<&str, &str> =
+        files.iter().copied().collect();
+
+    for (rel, uri) in &file_uris {
+        let content = file_content.get(rel.as_str()).unwrap();
+        let did_open = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "xs",
+                    "version": 1,
+                    "text": content
+                }
+            }
+        })
+        .to_string();
+        stdin.write_all(frame(&did_open).as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let shutdown = json!({"jsonrpc":"2.0","id":901,"method":"shutdown"}).to_string();
+    let exit = json!({"jsonrpc":"2.0","method":"exit"}).to_string();
+    stdin.write_all(frame(&shutdown).as_bytes()).unwrap();
+    stdin.write_all(frame(&exit).as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    drop(stdin);
+
+    let status = child.wait().expect("wait on semantic-test child");
+    let mut stderr_text = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut stderr_text)
+        .unwrap();
+
+    let mut all_bytes = Vec::new();
+    stdout.read_to_end(&mut all_bytes).unwrap();
+
+    let mut all_messages: Vec<String> = Vec::new();
+    let mut cursor = std::io::Cursor::new(&all_bytes);
+    loop {
+        match read_framed_message(&mut cursor) {
+            Ok(msg) => {
+                if msg.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics") {
+                    if let Some(params) = msg.get("params") {
+                        if let Some(diagnostics) = params.get("diagnostics").and_then(|d| d.as_array()) {
+                            for d in diagnostics {
+                                if let Some(message) = d.get("message").and_then(|m| m.as_str()) {
+                                    all_messages.push(message.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let mut pass = true;
+
+    if status.success() {
+        println!("PASS (semantic {}): server exited cleanly", name);
+    } else {
+        println!("FAIL (semantic {}): server exited with {}", name, status);
+        pass = false;
+    }
+
+    let joined = all_messages.join("\n");
+    for exp in expected {
+        if joined.contains(exp) {
+            println!("PASS (semantic {}): found expected diagnostic '{}'", name, exp);
+        } else {
+            println!("FAIL (semantic {}): missing expected diagnostic '{}'", name, exp);
+            println!("  diagnostics: {:?}", all_messages);
+            pass = false;
+        }
+    }
+
+    for forb in forbidden {
+        if !joined.contains(forb) {
+            println!("PASS (semantic {}): no spurious '{}' diagnostic", name, forb);
+        } else {
+            println!("FAIL (semantic {}): unexpected '{}' diagnostic", name, forb);
+            println!("  diagnostics: {:?}", all_messages);
+            pass = false;
+        }
+    }
+
+    if !stderr_text.is_empty() {
+        println!("--- stderr for semantic {} ---", name);
+        for line in stderr_text.lines() {
+            println!("  {line}");
+        }
+        println!("--- end stderr ---");
+    }
+
+    let has_panic = stderr_text.lines().any(|l| l.contains("panic") || l.contains("FATAL"));
+    if has_panic {
+        println!("FAIL (semantic {}): stderr contains panic/FATAL", name);
+        pass = false;
+    }
+
+    let _ = std::fs::remove_dir_all(&game_root);
+    let _ = std::fs::remove_dir_all(&mod_root);
+
+    pass
+}
+
 fn main() {
     let baseline_ok = run_baseline();
     let workspace_ok = run_workspace_tests();
+    let semantic_ok = run_semantic_tests();
 
-    if baseline_ok && workspace_ok {
+    if baseline_ok && workspace_ok && semantic_ok {
         std::process::exit(0);
     } else {
         std::process::exit(1);
