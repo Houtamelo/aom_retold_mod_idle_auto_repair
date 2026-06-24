@@ -24,12 +24,16 @@ import javax.swing.TransferHandler
  * Settings UI for the XS Language Server client.
  *
  * Appears under Settings → Languages & Frameworks → XS Language Server.
- * Lets the user configure the AoM:R install root, manage the list of mod
- * folders, and auto-detect mod roots by scanning for `game/` directories.
+ *
+ * Two scopes of settings:
+ * - **Game folder** is global (one game install per machine). Backed by
+ *   [XsAppSettings] and shared across every project.
+ * - **Mod paths** are per-project. Backed by [XsSettings].
  */
 class XsConfigurable(private val project: Project) : Configurable {
 
-    private val settings = XsSettings.getInstance(project)
+    private val appSettings = XsAppSettings.getInstance()
+    private val projectSettings = XsSettings.getInstance(project)
     private val gamePathField = TextFieldWithBrowseButton()
     private val modModel = CollectionListModel<String>()
     private val modList = JBList(modModel)
@@ -78,23 +82,28 @@ class XsConfigurable(private val project: Project) : Configurable {
     }
 
     override fun isModified(): Boolean {
-        return gamePathField.text != settings.state.gamePath ||
-            modModel.items != settings.state.modPaths
+        return gamePathField.text != appSettings.state.gamePath ||
+            modModel.items != projectSettings.state.modPaths
     }
 
     override fun apply() {
-        val newState = XsSettings.State(
-            gamePath = gamePathField.text.trim(),
-            modPaths = modModel.items.toMutableList()
+        // Game folder is global — persists across every project.
+        appSettings.setGamePath(gamePathField.text.trim())
+        // Mod paths are project-local.
+        projectSettings.setModPaths(modModel.items)
+        // Notify the LSP manager so it can update its workspace folders
+        // (no restart needed for a mod list change) or restart (if the
+        // game path changed).
+        XsLspServerManager.getInstance(project).updateSettings(
+            gamePath = appSettings.state.gamePath,
+            modPaths = projectSettings.state.modPaths
         )
-        settings.loadState(newState)
-        XsLspServerManager.getInstance(project)?.updateSettings(newState)
     }
 
     override fun reset() {
-        gamePathField.text = settings.state.gamePath
+        gamePathField.text = appSettings.state.gamePath
         modModel.removeAll()
-        modModel.add(settings.state.modPaths)
+        modModel.add(projectSettings.state.modPaths)
     }
 
     override fun disposeUIResources() {

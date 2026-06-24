@@ -10,6 +10,14 @@ import com.intellij.openapi.project.Project
 /**
  * Project-level persistent settings for the XS Language Server client.
  *
+ * Stores the list of mod roots for the current project. Project-local
+ * because the user's "current project" is typically one mod (or a small
+ * group of related mods), and that set changes as the user opens
+ * different projects.
+ *
+ * The AoM:R install root (which is the same for every project) lives in
+ * the application-level [XsAppSettings].
+ *
  * State is written to `.idea/xsLsp.xml` (or the equivalent per-project
  * IDEA state location) and restored when the project reopens.
  */
@@ -21,7 +29,6 @@ import com.intellij.openapi.project.Project
 class XsSettings : PersistentStateComponent<XsSettings.State> {
 
     data class State(
-        var gamePath: String = "",
         var modPaths: MutableList<String> = mutableListOf()
     )
 

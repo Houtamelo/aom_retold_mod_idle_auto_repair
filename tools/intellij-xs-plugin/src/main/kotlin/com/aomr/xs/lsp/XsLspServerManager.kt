@@ -1,5 +1,6 @@
 package com.aomr.xs.lsp
 
+import com.aomr.xs.settings.XsAppSettings
 import com.aomr.xs.settings.XsSettings
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
@@ -24,10 +25,11 @@ import java.io.File
  * Per-project service that owns the LSP connection and wires IntelliJ's
  * editor events to LSP didOpen / didChange / didClose.
  *
- * Settings changes drive the lifecycle:
- * - On game-path change the server is restarted with the new `--game-path`.
- * - On mod-list change `workspace/didChangeWorkspaceFolders` is sent with the
- *   delta so the server updates its virtual projects without a restart.
+ * Settings drive the lifecycle:
+ * - The **game folder** is read from [XsAppSettings] (application-level,
+ *   global) and triggers a server restart when it changes.
+ * - The **mod list** is read from [XsSettings] (project-level) and is
+ *   sent as a `workspace/didChangeWorkspaceFolders` delta on change.
  */
 @Service(Service.Level.PROJECT)
 class XsLspServerManager(private val project: Project) : Disposable {
@@ -44,39 +46,44 @@ class XsLspServerManager(private val project: Project) : Disposable {
     }
 
     /**
-     * Starts the LSP server with the given settings, applying workspace folders
-     * and the game-folder watcher once the handshake completes.
+     * Starts the LSP server using the current [XsAppSettings] game folder
+     * and the current [XsSettings] mod list. If the game path is blank,
+     * the server is not started (the user is expected to set it).
      */
     @Synchronized
-    fun start(settings: XsSettings.State = XsSettings.getInstance(project).state) {
-        if (settings.gamePath.isBlank()) {
-            log.info("Game path not configured; LSP server will not start.")
-            return
-        }
-        val wasRunning = connection != null
-        if (wasRunning && settings.gamePath == currentGamePath) {
-            // Game path unchanged; just ensure workspace folders are current.
-            updateWorkspaceFolders(settings.modPaths)
-            return
-        }
-        stop()
-        val conn = XsLspConnection(project, settings.gamePath)
-        if (!conn.start()) {
-            showError("Failed to start XS Language Server for game path: ${settings.gamePath}")
-            return
-        }
-        connection = conn
-        currentGamePath = settings.gamePath
-        installGameFolderWatcher(settings.gamePath)
-        updateWorkspaceFolders(settings.modPaths)
+    fun start() {
+        val appSettings = XsAppSettings.getInstance()
+        val projectSettings = XsSettings.getInstance(project)
+        val gamePath = appSettings.state.gamePath
+        val modPaths = projectSettings.state.modPaths
+        updateSettings(gamePath, modPaths)
     }
 
     /**
      * Reacts to a settings change. Restarts the server when the game path
      * changes; re-sends workspace folders when the mod list changes.
      */
-    fun updateSettings(settings: XsSettings.State) {
-        start(settings)
+    @Synchronized
+    fun updateSettings(gamePath: String, modPaths: List<String>) {
+        if (gamePath.isBlank()) {
+            log.info("Game path not configured; LSP server will not start.")
+            return
+        }
+        if (connection != null && gamePath == currentGamePath) {
+            // Game path unchanged; just ensure workspace folders are current.
+            updateWorkspaceFolders(modPaths)
+            return
+        }
+        stop()
+        val conn = XsLspConnection(project, gamePath)
+        if (!conn.start()) {
+            showError("Failed to start XS Language Server for game path: $gamePath")
+            return
+        }
+        connection = conn
+        currentGamePath = gamePath
+        installGameFolderWatcher(gamePath)
+        updateWorkspaceFolders(modPaths)
     }
 
     @Synchronized

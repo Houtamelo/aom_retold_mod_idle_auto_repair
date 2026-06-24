@@ -5,13 +5,17 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/**
+ * Project-local settings store. Holds the list of mod roots for the
+ * current project. The game folder is **not** here — that lives in
+ * [XsAppSettings] at the application level.
+ */
 class XsSettingsTest {
 
     @Test
     fun testDefaultsAreEmpty() {
         val settings = XsSettings()
         val state = settings.state
-        assertEquals("", state.gamePath)
         assertTrue(state.modPaths.isEmpty())
     }
 
@@ -19,13 +23,11 @@ class XsSettingsTest {
     fun testLoadStateRestoresValues() {
         val settings = XsSettings()
         val loaded = XsSettings.State(
-            gamePath = "/game/aom",
             modPaths = mutableListOf("/mod/one", "/mod/two")
         )
         settings.loadState(loaded)
 
         val state = settings.state
-        assertEquals("/game/aom", state.gamePath)
         assertEquals(listOf("/mod/one", "/mod/two"), state.modPaths)
     }
 
