@@ -32,10 +32,7 @@ static SELECTOR_SUMMARY_RIGHT: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("td.memItemRight").expect("valid selector"));
 static SELECTOR_SUMMARY_DESC: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(r#"tr[class^="memdesc"]"#).expect("valid selector"));
-static SELECTOR_VAR_NAME: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("tr[class^=\"memitem\"] td.memItemRight b").expect("valid selector"));
-static SELECTOR_VAR_VARDESC: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse(r#"tr[class^="memdesc"] td.mdescRight"#).expect("valid selector"));
+
 
 /// Extract syscalls and AI-plan constants from `<game-path>/doxygen_retail.7z`.
 ///
@@ -313,40 +310,60 @@ fn parse_aiplans_file(path: &Path) -> Result<Vec<AiplanConstant>> {
         .with_context(|| format!("reading {path:?}"))?;
     let doc = Html::parse_document(&html);
 
-    let names: Vec<String> = doc
-        .select(&SELECTOR_VAR_NAME)
-        .map(|e| {
-            let text = normalize_text(&e.text().collect::<String>());
-            text.split('=').next().unwrap_or(&text).trim().to_string()
-        })
-        .collect();
-    let descriptions: Vec<String> = doc
-        .select(&SELECTOR_VAR_VARDESC)
-        .map(|e| normalize_text(&e.text().collect::<String>()))
-        .collect();
-
+    let desc_by_hash = parse_summary_descriptions(&doc);
     let mut constants = Vec::new();
-    for (name, desc) in names.into_iter().zip(descriptions.into_iter()) {
-        if let Some(c) = parse_aiplan_constant(&name, &desc) {
-            constants.push(c);
-        } else {
-            warn!(
-                "skipping malformed AI-plan constant in {path:?}: name={name} desc={desc}"
-            );
-        }
+
+    for row in doc.select(&SELECTOR_SUMMARY_ITEM) {
+        let Some(class) = row.value().attr("class") else { continue; };
+        let Some(hash) = class.strip_prefix("memitem:") else { continue; };
+
+        let Some(right_text) = row
+            .select(&SELECTOR_SUMMARY_RIGHT)
+            .next()
+            .map(|e| normalize_text(&e.text().collect::<String>()))
+        else {
+            continue;
+        };
+
+        let Some((name, value_str)) = parse_aiplan_name_value(&right_text) else {
+            continue;
+        };
+        let Ok(value) = value_str.parse::<i64>() else {
+            warn!("skipping AI-plan constant with non-integer value: {right_text:?}");
+            continue;
+        };
+
+        let desc = desc_by_hash
+            .get(hash)
+            .cloned()
+            .unwrap_or_default();
+        let (variable_type, variable_value) = parse_aiplan_description(&desc);
+
+        constants.push(AiplanConstant {
+            name,
+            value,
+            variable_type,
+            variable_value,
+        });
     }
 
     Ok(constants)
 }
 
-/// Convert `cAttackPlanAttackRouteID = 0` plus
-/// `variable type = int, initial value = -1` into [`AiplanConstant`].
-fn parse_aiplan_constant(name_and_value: &str, description: &str) -> Option<AiplanConstant> {
-    let mut parts = name_and_value.splitn(2, '=');
-    let name = parts.next()?.trim().to_string();
-    let value_str = parts.next()?.trim();
-    let value = value_str.parse::<i64>().ok()?;
+/// Parse `cAttackPlanAttackRouteID = 0` from a summary cell.
+fn parse_aiplan_name_value(text: &str) -> Option<(String, String)> {
+    let text = text.trim();
+    let Some(eq) = text.find('=') else { return None; };
+    let name = text[..eq].trim().to_string();
+    let value = text[eq + 1..].trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, value))
+}
 
+/// Convert `variable type = int, initial value = -1` into `(type, value)`.
+fn parse_aiplan_description(description: &str) -> (String, String) {
     let mut variable_type = "?".to_string();
     let mut variable_value = String::new();
 
@@ -359,12 +376,7 @@ fn parse_aiplan_constant(name_and_value: &str, description: &str) -> Option<Aipl
         }
     }
 
-    Some(AiplanConstant {
-        name,
-        value,
-        variable_type,
-        variable_value,
-    })
+    (variable_type, variable_value)
 }
 
 /// Collapse whitespace and trim HTML-derived text.
