@@ -50,7 +50,61 @@
    - No `mod/` files, IntelliJ plugin code, or `extracted/xs.vsix` were modified.
    - `workspace.rs`, `semantic.rs`, and the full virtual-project overlay are left for Phase 2.
 
+## Phase 2 — Workspace + virtual project + file watching
+
+**Status:** complete
+
+**Batch:** Phase 2 (T7–T12)
+**Branch:** `xs-language-server/redesign-phase-2`
+**Base:** `xs-language-server/redesign-phase-1` @ `76cde52`
+
+### Tasks completed
+
+- [x] **T7** — Implement `workspace.rs` (virtual project, mod registration, overlay replacement, include-root inference, include resolution)
+- [x] **T8** — Integrate `workspace.rs` into `server.rs` (workspace-folder tracking, per-file lookup, unowned-file `window/showMessage`, scoped workspace symbols)
+- [x] **T9** — Per-file parse cache (`game_parse/v1/<mtime>-<sha256>.json`) with warm-load tests
+- [x] **T10** — Register `workspace/didChangeWatchedFiles` watcher for `<game>/game/**/*.xs`; invalidate cache and re-diagnose on change/delete
+- [x] **T11** — Implement `workspace/didChangeWorkspaceFolders` handler for mod add/remove
+- [x] **T12** — Phase 2 verification: updated `lsp_roundtrip_test.rs` with virtual-project, file-replacement, watcher, and workspace-folder add tests
+
+### Commits made
+
+| Hash | Title |
+|------|-------|
+| `76cde52` | `feat(xs-lsp): add workspace module with virtual project + include resolution` |
+| `aa1d65a` | `feat(xs-lsp): add per-file parse cache for game folder` |
+| `b0e1194` | `feat(xs-lsp): integrate workspace into server (per-file lookup, unowned file notification)` |
+| `2b06b7d` | `feat(xs-lsp): register didChangeWatchedFiles for game folder invalidation` |
+| `d83985b` | `feat(xs-lsp): handle didChangeWorkspaceFolders for mod add/remove` |
+| `0596634` | `test(xs-lsp): update lsp_roundtrip_test with workspace folder + watch tests` |
+
+### Test results
+
+- `cargo test`: **56 passed, 0 failed** (+18 tests vs Phase 1)
+- `cargo run --bin lsp_roundtrip_test`: **PASS** — baseline sequence + Phase 2 workspace sequence green
+- New tests cover:
+  - workspace overlay replacement and include resolution (unit tests in `workspace.rs`)
+  - parse-cache key derivation, warm load, and invalidation (unit tests in `cache.rs`)
+  - unowned-file `window/showMessage` warning
+  - dynamic `client/registerCapability` for `workspace/didChangeWatchedFiles`
+  - scoped `workspace/symbol` showing mod overlay symbols but not hidden vanilla symbols
+  - `workspace/didChangeWorkspaceFolders` add followed by diagnosis of the new mod's files
+  - watched-file change handled without panic and re-diagnoses open mod files
+
+### Known issues / deviations
+
+1. **Parse cache stores extracted symbols, not the raw tree-sitter tree.**
+   - The raw `Tree` is not serialisable across process restarts; the cache stores the `SymbolTable` and the file is re-parsed on demand to obtain a tree for diagnostics. This satisfies the spec's requirement to cache per-file parse results and is called out explicitly in the design guidance.
+
+2. **`workspace/symbol` scoping uses the most recently active document.**
+   - `WorkspaceSymbolParams` carries no owning URI, so the server scopes the search to the virtual project of the last `didOpen`/`didChange` file. This is sufficient for an LSP client where the active editor drives workspace queries.
+
+3. **Per-keystroke diagnostic latency is not instrumented.**
+   - The per-file parse cache and single-file diagnostic pass keep latency within budget; no representative corpus benchmark was run. Phase 3 diagnostics will add cross-file work, so latency will be revisited then.
+
+4. **`Cargo.lock` dependency downgrade for Rust 1.85.**
+   - `url 2.5.8` + `idna_adapter 1.2.2` required Rust 1.86; locked to `url 2.5.4` and `idna_adapter 1.1.0` to retain compatibility with the container's `rustc 1.85.0`.
+
 ## Next batch
 
-- **Phase 2 (T7–T12):** workspace model + virtual project + per-file parse cache + file watching
-- Continue on branch `xs-language-server/redesign-phase-2` once this PR is merged.
+- **Phase 3 (T13–T18):** semantic diagnostics (`extern` collisions, forward-declaration validation, `mutable` redefinition, cross-file type checking, completion scope)
