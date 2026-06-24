@@ -6,9 +6,9 @@ use tokio::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use crate::{completion, diagnostics, engine_api, parser, references, symbols, typecheck, word};
+use crate::{completion, diagnostics, engine_api, parser, references, symbols, typecheck, word, workspace};
 
 /// Holds the parsed-but-not-yet-processed text of every document the client
 /// has opened. Populated by `did_open` / `did_change`, cleared by `did_close`.
@@ -33,6 +33,10 @@ impl DocumentStore {
     pub fn get(&self, uri: &Url) -> Option<&str> {
         self.inner.get(uri).map(String::as_str)
     }
+
+    pub fn uris(&self) -> Vec<Url> {
+        self.inner.keys().cloned().collect()
+    }
 }
 
 pub struct XsLanguageServer {
@@ -42,16 +46,46 @@ pub struct XsLanguageServer {
     pub symbol_tables: Arc<Mutex<HashMap<Url, symbols::SymbolTable>>>,
     pub engine: engine_api::SharedEngineApi,
     pub game_path: PathBuf,
+    /// Registered workspace folders, each representing one mod.
+    pub workspace: Arc<Mutex<workspace::Workspace>>,
+    /// Most recently touched document, used to scope `workspace/symbol`.
+    pub last_active_uri: Arc<Mutex<Option<Url>>>,
 }
 
 impl XsLanguageServer {
-    pub fn new(client: Client, engine: engine_api::SharedEngineApi, game_path: PathBuf) -> Self {
+    pub fn new(
+        client: Client,
+        engine: engine_api::SharedEngineApi,
+        game_path: PathBuf,
+    ) -> Self {
+        let workspace = workspace::Workspace::new(game_path.clone());
         Self {
             client,
             documents: Arc::new(Mutex::new(DocumentStore::default())),
             symbol_tables: Arc::new(Mutex::new(HashMap::new())),
             engine,
             game_path,
+            workspace: Arc::new(Mutex::new(workspace)),
+            last_active_uri: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Re-evaluate ownership for every open document after the workspace
+    /// folder set changes. Newly-unowned files receive the engine-API-only
+    /// warning; newly-owned files are silently re-analysed on the next edit.
+    async fn revalidate_open_document_ownership(&self) {
+        let uris = {
+            let docs = self.documents.lock().await;
+            docs.uris()
+        };
+        for uri in uris {
+            let owned = {
+                let ws = self.workspace.lock().await;
+                ws.lookup_mod(&uri).is_some()
+            };
+            if !owned {
+                warn_unowned_file(&self.client, &uri).await;
+            }
         }
     }
 }
@@ -59,10 +93,24 @@ impl XsLanguageServer {
 #[tower_lsp::async_trait]
 impl LanguageServer for XsLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Seed workspace folders from the initialize request (added by clients
+        // such as IntelliJ at startup).
+        if let Some(folders) = params.workspace_folders {
+            let mut ws = self.workspace.lock().await;
+            for folder in folders {
+                let uri = folder.uri.clone();
+                if let Err(e) = ws.register_mod(uri.clone()) {
+                    warn!("failed to register workspace folder {}: {}", uri, e);
+                }
+            }
+        }
+
         info!(
-            "initialize: client={:?}, root_uri={:?}, capabilities=present ({} syscalls, {} aiplans loaded)",
+            "initialize: client={:?}, root_uri={:?}, workspace_folders={}\
+             , capabilities=present ({} syscalls, {} aiplans loaded)",
             params.client_info.map(|i| i.name),
             params.root_uri,
+            self.workspace.lock().await.mods().len(),
             self.engine.syscalls.len(),
             self.engine.aiplans.len(),
         );
@@ -107,6 +155,24 @@ impl LanguageServer for XsLanguageServer {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
                 })),
+                // Phase 2: workspace symbols are scoped to the active mod.
+                workspace_symbol_provider: Some(OneOf::Left(true)),
+                // Phase 2: workspace folders and dynamic file watching.
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
+                }),
+                diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
+                    DiagnosticOptions {
+                        identifier: Some("xs-language-server".to_string()),
+                        inter_file_dependencies: true,
+                        workspace_diagnostics: false,
+                        work_done_progress_options: Default::default(),
+                    },
+                )),
                 ..Default::default()
             },
             ..Default::default()
@@ -131,6 +197,25 @@ impl LanguageServer for XsLanguageServer {
             let mut docs = self.documents.lock().await;
             docs.open(uri.clone(), text.clone());
         }
+
+        // Track the active document for workspace-symbol scoping.
+        {
+            let mut active = self.last_active_uri.lock().await;
+            *active = Some(uri.clone());
+        }
+
+        // Determine whether this file belongs to a registered mod.
+        let owning_mod = {
+            let ws = self.workspace.lock().await;
+            ws.lookup_mod(&uri).cloned()
+        };
+
+        if owning_mod.is_none() {
+            warn_unowned_file(&self.client, &uri).await;
+        } else {
+            debug!("did_open: {} owned by {:?}", uri, owning_mod.as_ref().map(|m| &m.mod_uri));
+        }
+
         self.rebuild_symbol_table(&uri, &text).await;
         self.publish_diagnostics(&uri, &text, version).await;
     }
@@ -150,6 +235,10 @@ impl LanguageServer for XsLanguageServer {
             let mut docs = self.documents.lock().await;
             docs.change(&uri, text.clone());
         }
+        {
+            let mut active = self.last_active_uri.lock().await;
+            *active = Some(uri.clone());
+        }
         self.rebuild_symbol_table(&uri, &text).await;
         self.publish_diagnostics(&uri, &text, version).await;
     }
@@ -161,6 +250,76 @@ impl LanguageServer for XsLanguageServer {
         docs.close(&uri);
         let mut tables = self.symbol_tables.lock().await;
         tables.remove(&uri);
+    }
+
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        let added = params.event.added.len();
+        let removed = params.event.removed.len();
+        info!(
+            "did_change_workspace_folders: +{} -{}",
+            added, removed
+        );
+
+        {
+            let mut ws = self.workspace.lock().await;
+            for folder in params.event.added {
+                if let Err(e) = ws.register_mod(folder.uri) {
+                    warn!("failed to add workspace folder: {}", e);
+                }
+            }
+            for folder in params.event.removed {
+                ws.unregister_mod(&folder.uri);
+            }
+        }
+
+        self.revalidate_open_document_ownership().await;
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        info!("did_change_watched_files: {} change(s)", params.changes.len());
+        for change in &params.changes {
+            debug!("watched file change: {:?} {:?}", change.typ, change.uri);
+            if let Ok(path) = change.uri.to_file_path() {
+                let rel = {
+                    let ws = self.workspace.lock().await;
+                    path.strip_prefix(ws.game_path().join("game"))
+                        .ok()
+                        .map(|p| p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+                };
+                if let Some(rel) = rel {
+                    let cache_dir = crate::cache::state_cache_dir();
+                    if let Err(e) = crate::cache::invalidate_parse_cache(&rel, &cache_dir) {
+                        warn!("failed to invalidate parse cache for {}: {}", rel, e);
+                    }
+                }
+            }
+        }
+
+        // Re-diagnose open mod files whose dependencies may have changed.
+        // In Phase 3 this will be narrowed to true include-graph dependents.
+        let uris = {
+            let docs = self.documents.lock().await;
+            docs.uris()
+        };
+        for uri in uris {
+            let is_owned = {
+                let ws = self.workspace.lock().await;
+                ws.lookup_mod(&uri).is_some()
+            };
+            if !is_owned {
+                continue;
+            }
+            let (text, version) = {
+                let docs = self.documents.lock().await;
+                docs.get(&uri)
+                    .map(|t| (t.to_string(), 0i32))
+                    .unwrap_or_default()
+            };
+            if !text.is_empty() {
+                self.rebuild_symbol_table(&uri, &text).await;
+                self.publish_diagnostics(&uri, &text, version).await;
+            }
+        }
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -286,6 +445,57 @@ impl LanguageServer for XsLanguageServer {
             uri
         );
         Ok(Some(DocumentSymbolResponse::Nested(items)))
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let query = params.query.to_lowercase();
+
+        let active_uri = {
+            let active = self.last_active_uri.lock().await;
+            match active.clone() {
+                Some(uri) => uri,
+                None => return Ok(None),
+            }
+        };
+
+        // Find the owning mod to scope the search.
+        let project = {
+            let ws = self.workspace.lock().await;
+            let Some(entry) = ws.lookup_mod(&active_uri) else {
+                return Ok(None);
+            };
+            ws.build_virtual_project(entry)
+        };
+
+        let ws_locked = self.workspace.lock().await;
+        let files = project.visible_files(&ws_locked);
+        drop(ws_locked);
+
+        let mut items = Vec::new();
+        for (rel, path) in files {
+            let Ok(uri) = Url::from_file_path(&path) else {
+                continue;
+            };
+            let Ok(text) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            let Some(tree) = parser::parse(&text) else {
+                continue;
+            };
+            let table = symbols::build_symbol_table(&tree, &text);
+            for sym in &table.symbols {
+                if !query.is_empty() && !sym.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                items.push(symbol_to_workspace_symbol(&sym, &uri, &rel));
+            }
+        }
+
+        debug!("workspace_symbol: {} item(s)", items.len());
+        Ok(Some(items))
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -496,6 +706,20 @@ impl XsLanguageServer {
     }
 }
 
+/// Notify the client that a file is not covered by any registered mod.
+async fn warn_unowned_file(client: &Client, uri: &Url) {
+    warn!(
+        "file not part of any registered mod; engine API only: {}",
+        uri
+    );
+    client
+        .show_message(
+            MessageType::WARNING,
+            "File not part of any registered mod; engine API only",
+        )
+        .await;
+}
+
 /// Format a syscall as a Markdown hover card.
 fn format_hover_syscall(s: &engine_api::Syscall) -> String {
     let params = s
@@ -553,5 +777,27 @@ fn symbol_to_lsp(s: &symbols::Symbol) -> DocumentSymbol {
         range: s.full_range,
         selection_range: s.selection_range,
         children: None,
+    }
+}
+
+/// Convert a workspace symbol to the LSP `SymbolInformation` shape for
+/// `workspace/symbol` responses.
+fn symbol_to_workspace_symbol(s: &symbols::Symbol, uri: &Url, _rel: &str) -> SymbolInformation {
+    let kind = match s.kind {
+        symbols::SymbolKind::Rule => SymbolKind::FUNCTION,
+        symbols::SymbolKind::Function => SymbolKind::FUNCTION,
+        symbols::SymbolKind::Variable => SymbolKind::VARIABLE,
+        symbols::SymbolKind::Constant => SymbolKind::CONSTANT,
+    };
+    SymbolInformation {
+        name: s.name.clone(),
+        kind,
+        tags: None,
+        deprecated: None,
+        location: Location {
+            uri: uri.clone(),
+            range: s.selection_range,
+        },
+        container_name: None,
     }
 }

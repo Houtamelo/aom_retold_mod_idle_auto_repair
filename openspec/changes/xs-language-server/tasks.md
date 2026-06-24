@@ -128,11 +128,11 @@ Chain strategy: feature-branch-chain
 - **Specs referenced:** `spec-virtual-project-overlay.md`
 - **Files affected:** `tools/xs-language-server/src/server.rs`
 - **Acceptance criteria:**
-  1. Track registered workspace folders and map each to a `VirtualProject`.
-  2. On `didOpen`, determine owning mod; for unowned files emit `window/showMessage("file not part of any registered mod; engine API only")`.
-  3. Scope `workspace/symbol` queries to the owning virtual project.
-  4. Keep existing handlers (`completion`, `hover`, `definition`, etc.) functional.
-  5. Extend `lsp_roundtrip_test.rs` with virtual-project selection cases.
+  1. [x] Track registered workspace folders and map each to a `VirtualProject`.
+  2. [x] On `didOpen`, determine owning mod; for unowned files emit `window/showMessage("file not part of any registered mod; engine API only")`.
+  3. [x] Scope `workspace/symbol` queries to the owning virtual project.
+  4. [x] Keep existing handlers (`completion`, `hover`, `definition`, etc.) functional.
+  5. [ ] Extend `lsp_roundtrip_test.rs` with virtual-project selection cases.
 - **Estimated lines changed:** ~400
 - **Test command:** `cargo test && cargo run --bin lsp_roundtrip_test`
 
