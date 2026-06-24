@@ -39,11 +39,36 @@ impl SymbolKind {
     }
 }
 
+/// Visibility of a top-level symbol for cross-file lookup.
+///
+/// * `Local`  — file-local (no `extern`, no `const`).
+/// * `Const`  — `const` declaration; file-local but read-only.
+/// * `Extern` — `extern` declaration; visible to other files without `include`.
+/// * `Public` — global function/variable not marked `extern` or `static`.
+///   Functions default to public; non-`extern` variables are `Local`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    Local,
+    Const,
+    Extern,
+    Public,
+}
+
+impl Default for Visibility {
+    fn default() -> Self {
+        Visibility::Local
+    }
+}
+
 /// A function parameter — `int x` or `string s = "default"`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Param {
     pub ty: String,
     pub name: String,
+    /// Raw default-value expression text, e.g. `"-1"` or `"\"hi\""`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
 }
 
 impl Param {
@@ -68,7 +93,17 @@ pub struct Symbol {
     /// Function params; empty for non-functions.
     pub params: Vec<Param>,
     /// `extern` storage class on a function/variable declaration.
+    #[serde(default)]
     pub is_extern: bool,
+    /// `mutable` modifier on a function.
+    #[serde(default)]
+    pub is_mutable: bool,
+    /// Forward-only declaration (function header without body).
+    #[serde(default)]
+    pub is_forward: bool,
+    /// Cross-file visibility.
+    #[serde(default)]
+    pub visibility: Visibility,
     /// Full range of the declaration (for hover).
     pub full_range: Range,
     /// Range of just the identifier (for outline / go-to-selection).
@@ -116,6 +151,11 @@ pub fn build_symbol_table(tree: &tree_sitter::Tree, source: &str) -> SymbolTable
                 extract_function(child, source, &mut table.symbols)
             }
             "declaration" => extract_declaration(child, source, &mut table.symbols),
+            // The XS grammar currently parses function forward declarations
+            // (`void bar(int x = -1);`) as an ERROR node containing the type,
+            // identifier and parameter list. Extract them so callers get
+            // forward-declaration symbols anyway.
+            "ERROR" => extract_error_forward_declaration(child, source, &mut table.symbols),
             _ => {}
         }
     }
@@ -136,6 +176,9 @@ fn extract_rule(node: tree_sitter::Node<'_>, _source: &str, out: &mut Vec<Symbol
         ty: String::new(),
         params: Vec::new(),
         is_extern: false,
+        is_mutable: false,
+        is_forward: false,
+        visibility: Visibility::Public,
         full_range,
         selection_range,
         detail: format!("rule {}", node_text(name_node, _source)),
@@ -156,14 +199,8 @@ fn extract_function(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<Sym
         .map(|n| node_text(n, source).to_string())
         .unwrap_or_default();
 
-    // The `mutable` / `extern` storage class.
-    let is_extern = find_named_child(node, "storage_class_specifier")
-        .map(|n| {
-            let mut sub = n.walk();
-            n.children(&mut sub)
-                .any(|c| matches!(c.kind(), "extern" | "static" | "mutable"))
-        })
-        .unwrap_or(false);
+    // Storage-class / qualifier modifiers on the declaration.
+    let modifiers = extract_modifiers(node);
 
     // Parameters from the `parameter_list` child.
     let params = find_named_child(node, "parameter_list")
@@ -172,27 +209,17 @@ fn extract_function(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<Sym
 
     let full_range = node_range(node);
     let selection_range = node_range(name_node);
-    let detail = if params.is_empty() {
-        format!("{} {}()", ty, name)
-    } else {
-        format!(
-            "{} {}({})",
-            ty,
-            name,
-            params
-                .iter()
-                .map(|p| format!("{} {}", p.ty, p.name))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
+    let detail = format_function_detail(&ty, &name, &params);
 
     out.push(Symbol {
         name,
         kind: SymbolKind::Function,
         ty,
         params,
-        is_extern,
+        is_extern: modifiers.is_extern,
+        is_mutable: modifiers.is_mutable,
+        is_forward: false,
+        visibility: function_visibility(&modifiers),
         full_range,
         selection_range,
         detail,
@@ -200,6 +227,13 @@ fn extract_function(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<Sym
 }
 
 fn extract_declaration(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<Symbol>) {
+    // Forward function declaration: `void bar();` parses as a `declaration`
+    // whose declarator is a `function_declarator` with no body.
+    if let Some(declarator) = find_named_child(node, "function_declarator") {
+        extract_forward_declaration(node, declarator, source, out);
+        return;
+    }
+
     // The declared name lives inside `init_declarator` (since XS doesn't have
     // bare `declarator`s — every variable is initialized at the point of
     // declaration).
@@ -218,9 +252,8 @@ fn extract_declaration(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<
         .map(|n| node_text(n, source).to_string())
         .unwrap_or_default();
 
-    let is_const = find_named_child(node, "type_qualifier")
-        .map(|n| node_text(n, source).trim() == "const")
-        .unwrap_or(false);
+    let modifiers = extract_modifiers(node);
+    let visibility = variable_visibility(&modifiers);
 
     let full_range = node_range(node);
     let selection_range = node_range(name_node);
@@ -231,18 +264,182 @@ fn extract_declaration(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<
 
     out.push(Symbol {
         name,
-        kind: if is_const {
+        kind: if modifiers.is_const {
             SymbolKind::Constant
         } else {
             SymbolKind::Variable
         },
         ty,
         params: Vec::new(),
-        is_extern: false,
+        is_extern: modifiers.is_extern,
+        is_mutable: modifiers.is_mutable,
+        is_forward: false,
+        visibility,
         full_range,
         selection_range,
         detail,
     });
+}
+
+fn extract_forward_declaration(
+    decl: tree_sitter::Node<'_>,
+    declarator: tree_sitter::Node<'_>,
+    source: &str,
+    out: &mut Vec<Symbol>,
+) {
+    let name_node = match find_named_child(declarator, "identifier") {
+        Some(n) => n,
+        // Nested function pointers are not valid XS; ignore them.
+        None => return,
+    };
+    let name = node_text(name_node, source).to_string();
+
+    let ty = find_named_child(decl, "primitive_type")
+        .or_else(|| find_named_child(decl, "array_type"))
+        .map(|n| node_text(n, source).to_string())
+        .unwrap_or_default();
+
+    let modifiers = extract_modifiers(decl);
+    let params = find_named_child(declarator, "parameter_list")
+        .map(|n| extract_params(n, source))
+        .unwrap_or_default();
+
+    let full_range = node_range(decl);
+    let selection_range = node_range(name_node);
+    let detail = format_function_detail(&ty, &name, &params);
+
+    out.push(Symbol {
+        name,
+        kind: SymbolKind::Function,
+        ty,
+        params,
+        is_extern: modifiers.is_extern,
+        is_mutable: modifiers.is_mutable,
+        is_forward: true,
+        visibility: function_visibility(&modifiers),
+        full_range,
+        selection_range,
+        detail,
+    });
+}
+
+/// Try to recover a forward function declaration from a grammar ERROR node.
+///
+/// The current tree-sitter XS grammar does not have a dedicated rule for
+/// function declarations without bodies, so signatures like
+/// `void bar(int x = -1);` surface as an `ERROR` node containing the type,
+/// identifier and parameter list. We intentionally keep the condition narrow:
+/// it must have a type, identifier and parameters, and no body.
+fn extract_error_forward_declaration(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    out: &mut Vec<Symbol>,
+) {
+    if node.kind() != "ERROR" {
+        return;
+    }
+    // If the ERROR has a function body, it's a malformed definition, not a
+    // forward declaration.
+    if find_named_child(node, "compound_statement").is_some() {
+        return;
+    }
+    let ty = find_named_child(node, "primitive_type")
+        .or_else(|| find_named_child(node, "array_type"))
+        .map(|n| node_text(n, source).to_string())
+        .unwrap_or_default();
+    let name_node = match find_named_child(node, "identifier") {
+        Some(n) => n,
+        None => return,
+    };
+    let params = match find_named_child(node, "parameter_list") {
+        Some(n) => extract_params(n, source),
+        None => return,
+    };
+
+    let name = node_text(name_node, source).to_string();
+    let modifiers = extract_modifiers(node);
+    let full_range = node_range(node);
+    let selection_range = node_range(name_node);
+    let detail = format_function_detail(&ty, &name, &params);
+
+    out.push(Symbol {
+        name,
+        kind: SymbolKind::Function,
+        ty,
+        params,
+        is_extern: modifiers.is_extern,
+        is_mutable: modifiers.is_mutable,
+        is_forward: true,
+        visibility: function_visibility(&modifiers),
+        full_range,
+        selection_range,
+        detail,
+    });
+}
+
+/// Modifiers parsed from a declaration/function header.
+#[derive(Debug, Default)]
+struct Modifiers {
+    is_extern: bool,
+    is_static: bool,
+    is_mutable: bool,
+    is_const: bool,
+}
+
+fn extract_modifiers(node: tree_sitter::Node<'_>) -> Modifiers {
+    let mut m = Modifiers::default();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() != "storage_class_specifier" && child.kind() != "type_qualifier" {
+            continue;
+        }
+        let mut sub = child.walk();
+        for token in child.children(&mut sub) {
+            match token.kind() {
+                "extern" => m.is_extern = true,
+                "static" => m.is_static = true,
+                "mutable" => m.is_mutable = true,
+                "const" => m.is_const = true,
+                _ => {}
+            }
+        }
+    }
+    m
+}
+
+fn function_visibility(m: &Modifiers) -> Visibility {
+    if m.is_extern {
+        Visibility::Extern
+    } else if m.is_static {
+        Visibility::Local
+    } else {
+        Visibility::Public
+    }
+}
+
+fn variable_visibility(m: &Modifiers) -> Visibility {
+    if m.is_extern {
+        Visibility::Extern
+    } else if m.is_const {
+        Visibility::Const
+    } else {
+        Visibility::Local
+    }
+}
+
+fn format_function_detail(ty: &str, name: &str, params: &[Param]) -> String {
+    if params.is_empty() {
+        format!("{} {}()", ty, name)
+    } else {
+        let rendered: Vec<String> = params
+            .iter()
+            .map(|p| match &p.default {
+                Some(d) => format!("{} {} = {}", p.ty, p.name, d),
+                None => format!("{} {}", p.ty, p.name),
+            })
+            .collect();
+        format!("{} {}({})", ty, name, rendered.join(", "))
+    }
 }
 
 fn extract_params(node: tree_sitter::Node<'_>, source: &str) -> Vec<Param> {
@@ -259,9 +456,25 @@ fn extract_params(node: tree_sitter::Node<'_>, source: &str) -> Vec<Param> {
         let name = find_named_child(child, "identifier")
             .map(|n| node_text(n, source).to_string())
             .unwrap_or_default();
-        params.push(Param { ty, name });
+        let default = extract_param_default(child, source);
+        params.push(Param { ty, name, default });
     }
     params
+}
+
+/// Extract the raw default-value expression following `=` in a parameter
+/// declaration, if any.
+fn extract_param_default(node: tree_sitter::Node<'_>, source: &str) -> Option<String> {
+    let mut saw_eq = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "=" {
+            saw_eq = true;
+        } else if saw_eq {
+            return Some(node_text(child, source).trim().to_string());
+        }
+    }
+    None
 }
 
 // --- node helpers ---
@@ -307,6 +520,8 @@ mod tests {
         assert_eq!(s.name, "gReservePlan");
         assert_eq!(s.kind, SymbolKind::Variable);
         assert_eq!(s.ty, "int");
+        assert!(s.is_extern);
+        assert_eq!(s.visibility, Visibility::Extern);
         assert!(s.detail.contains("gReservePlan"));
     }
 
@@ -318,6 +533,7 @@ mod tests {
         assert_eq!(s.name, "cAllowFoo");
         assert_eq!(s.kind, SymbolKind::Constant);
         assert_eq!(s.ty, "bool");
+        assert_eq!(s.visibility, Visibility::Const);
     }
 
     #[test]
@@ -327,10 +543,34 @@ mod tests {
         let s = t.find("setFoo").expect("setFoo symbol");
         assert_eq!(s.kind, SymbolKind::Function);
         assert_eq!(s.ty, "void");
+        assert!(s.is_mutable);
+        assert_eq!(s.visibility, Visibility::Public);
         assert_eq!(s.params.len(), 2);
         assert_eq!(s.params[0].ty, "int");
         assert_eq!(s.params[0].name, "x");
         assert!(s.detail.contains("int x"));
+    }
+
+    #[test]
+    fn extracts_forward_declaration() {
+        let src = "void bar(int x = -1);\n";
+        let t = table_for(src);
+        assert_eq!(t.symbols.len(), 1);
+        let s = &t.symbols[0];
+        assert_eq!(s.name, "bar");
+        assert_eq!(s.kind, SymbolKind::Function);
+        assert!(s.is_forward);
+        assert_eq!(s.params.len(), 1);
+        assert_eq!(s.params[0].default.as_deref(), Some("-1"));
+    }
+
+    #[test]
+    fn extracts_extern_function() {
+        let src = "extern void shared(int a) {}\n";
+        let t = table_for(src);
+        let s = t.find("shared").expect("shared symbol");
+        assert!(s.is_extern);
+        assert_eq!(s.visibility, Visibility::Extern);
     }
 
     #[test]
