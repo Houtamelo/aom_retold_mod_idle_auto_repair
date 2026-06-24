@@ -1,6 +1,7 @@
 use tower_lsp::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 
+mod cache;
 mod completion;
 mod diagnostics;
 mod engine_api;
