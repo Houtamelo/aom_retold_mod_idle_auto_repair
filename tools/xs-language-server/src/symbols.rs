@@ -154,8 +154,12 @@ pub fn build_symbol_table(tree: &tree_sitter::Tree, source: &str) -> SymbolTable
             // The XS grammar currently parses function forward declarations
             // (`void bar(int x = -1);`) as an ERROR node containing the type,
             // identifier and parameter list. Extract them so callers get
-            // forward-declaration symbols anyway.
-            "ERROR" => extract_error_forward_declaration(child, source, &mut table.symbols),
+            // forward-declaration symbols anyway.  ERROR nodes that contain a
+            // body are recovered as full function definitions.
+            "ERROR" => {
+                extract_error_forward_declaration(child, source, &mut table.symbols);
+                extract_error_function_definition(child, source, &mut table.symbols);
+            }
             _ => {}
         }
     }
@@ -323,6 +327,54 @@ fn extract_forward_declaration(
     });
 }
 
+/// Try to recover a full function definition from a grammar ERROR node that
+/// contains a body. This is a safety net for lambda variants or other
+/// function-header syntax that the main `function_definition` rule does not
+/// yet accept.
+fn extract_error_function_definition(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    out: &mut Vec<Symbol>,
+) {
+    if node.kind() != "ERROR" {
+        return;
+    }
+    if find_named_child(node, "compound_statement").is_none() {
+        return;
+    }
+    let ty = find_named_child(node, "primitive_type")
+        .or_else(|| find_named_child(node, "array_type"))
+        .map(|n| node_text(n, source).to_string())
+        .unwrap_or_default();
+    let name_node = match find_named_child(node, "identifier") {
+        Some(n) => n,
+        None => return,
+    };
+    let params = match find_named_child(node, "parameter_list") {
+        Some(n) => extract_params(n, source),
+        None => return,
+    };
+
+    let name = node_text(name_node, source).to_string();
+    let modifiers = extract_modifiers(node);
+    let full_range = node_range(node);
+    let selection_range = node_range(name_node);
+    let detail = format_function_detail(&ty, &name, &params);
+    out.push(Symbol {
+        name,
+        kind: SymbolKind::Function,
+        ty,
+        params,
+        is_extern: modifiers.is_extern,
+        is_mutable: modifiers.is_mutable,
+        is_forward: false,
+        visibility: function_visibility(&modifiers),
+        full_range,
+        selection_range,
+        detail,
+    });
+}
+
 /// Try to recover a forward function declaration from a grammar ERROR node.
 ///
 /// The current tree-sitter XS grammar does not have a dedicated rule for
@@ -449,10 +501,14 @@ fn extract_params(node: tree_sitter::Node<'_>, source: &str) -> Vec<Param> {
         if child.kind() != "parameter_declaration" {
             continue;
         }
-        let ty = find_named_child(child, "primitive_type")
-            .or_else(|| find_named_child(child, "array_type"))
-            .map(|n| node_text(n, source).to_string())
-            .unwrap_or_default();
+        let ty = if let Some(fp) = find_named_child(child, "function_pointer_type") {
+            format_function_pointer_type(fp, source)
+        } else {
+            find_named_child(child, "primitive_type")
+                .or_else(|| find_named_child(child, "array_type"))
+                .map(|n| node_text(n, source).to_string())
+                .unwrap_or_default()
+        };
         let name = find_named_child(child, "identifier")
             .map(|n| node_text(n, source).to_string())
             .unwrap_or_default();
@@ -460,6 +516,18 @@ fn extract_params(node: tree_sitter::Node<'_>, source: &str) -> Vec<Param> {
         params.push(Param { ty, name, default });
     }
     params
+}
+
+fn format_function_pointer_type(node: tree_sitter::Node<'_>, source: &str) -> String {
+    let ret = node
+        .child_by_field_name("return")
+        .map(|n| node_text(n, source).to_string())
+        .unwrap_or_default();
+    let params = node
+        .child_by_field_name("parameters")
+        .map(|n| node_text(n, source).to_string())
+        .unwrap_or_else(|| "()".to_string());
+    format!("{}{}", ret, params)
 }
 
 /// Extract the raw default-value expression following `=` in a parameter
@@ -595,5 +663,62 @@ mod tests {
     fn empty_source_yields_empty_table() {
         let t = table_for("");
         assert!(t.symbols.is_empty());
+    }
+
+    #[test]
+    fn extracts_function_pointer_parameter_type_and_lambda_default() {
+        let src = "void foo(int x = -1, void(int) cb = [](int id = -1) {}) { }\n";
+        let t = table_for(src);
+        let s = t.find("foo").expect("foo symbol");
+        assert_eq!(s.kind, SymbolKind::Function);
+        assert_eq!(s.ty, "void");
+        assert_eq!(s.params.len(), 2);
+        assert_eq!(s.params[0].name, "x");
+        assert_eq!(s.params[0].default.as_deref(), Some("-1"));
+        assert_eq!(s.params[1].ty, "void(int)");
+        assert_eq!(s.params[1].name, "cb");
+        assert_eq!(
+            s.params[1].default.as_deref(),
+            Some("[](int id = -1) {}")
+        );
+        assert!(s.detail.contains("void(int) cb = [](int id = -1) {}"));
+    }
+
+    #[test]
+    fn extracts_lambda_default_with_return_type() {
+        let src = "void boConditionalWait(int planID = -1, bool() condition = []() -> bool { return(true); }) { }\n";
+        let t = table_for(src);
+        let s = t.find("boConditionalWait").expect("boConditionalWait symbol");
+        assert_eq!(s.params.len(), 2);
+        assert_eq!(s.params[1].ty, "bool()");
+        assert_eq!(
+            s.params[1].default.as_deref(),
+            Some("[]() -> bool { return(true); }")
+        );
+    }
+
+    #[test]
+    fn extracts_simple_default_parameter_still() {
+        let src = "void bar(int x = -1) { }\n";
+        let t = table_for(src);
+        let s = t.find("bar").expect("bar symbol");
+        assert_eq!(s.kind, SymbolKind::Function);
+        assert_eq!(s.params.len(), 1);
+        assert_eq!(s.params[0].ty, "int");
+        assert_eq!(s.params[0].default.as_deref(), Some("-1"));
+    }
+
+    #[test]
+    fn recovers_function_definition_from_error_node_with_body() {
+        // A header the main `function_definition` rule does not accept: a
+        // param with an ERROR default. The compound_statement body lets the
+        // error-recovery path produce a Function symbol.
+        let src = "void broken(int x = [ ] { }) { }\n";
+        let t = table_for(src);
+        let s = t.find("broken").expect("broken symbol from ERROR recovery");
+        assert_eq!(s.kind, SymbolKind::Function);
+        assert!(!s.is_forward);
+        assert_eq!(s.params.len(), 1);
+        assert_eq!(s.params[0].name, "x");
     }
 }
