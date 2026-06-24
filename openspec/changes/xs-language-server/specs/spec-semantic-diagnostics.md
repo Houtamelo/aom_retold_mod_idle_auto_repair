@@ -61,6 +61,7 @@ These are the errors that currently only surface inside AoM:R. Catching them at 
 
 ## Verification approach
 - Automated: parser/LSP integration tests with fixture files for each error and happy path.
+- Type compatibility: unit tests assert `int` is accepted where `float` is expected (widening) and `float` is rejected where `int` is expected (loss of precision); string/bool are never implicitly converted to numeric types.
 - Manual: load representative mod files in IntelliJ and confirm diagnostics match known engine behavior.
 
 ## Acceptance criteria
