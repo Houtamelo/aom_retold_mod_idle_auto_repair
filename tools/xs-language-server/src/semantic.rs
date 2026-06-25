@@ -17,8 +17,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
+use crate::merged_view::{MergedView, VisibilityProvenance};
 use crate::parser;
 use crate::symbols::{Symbol, SymbolKind, SymbolTable, Visibility};
+use crate::workspace::{Workspace, VirtualProject as WorkspaceVirtualProject};
 
 /// A single file inside the virtual project, ready for semantic analysis.
 #[derive(Debug, Clone)]
@@ -94,11 +96,66 @@ impl SemanticChecker {
 
 /// Run all semantic checks and return the combined diagnostics.
 pub fn check_all(project: &VirtualProject, current_file: &Path) -> Vec<Diagnostic> {
+    let merged = build_merged_view_from_project(project, current_file);
     let mut out = Vec::new();
     out.extend(check_extern_collisions(project));
-    out.extend(check_forward_declarations(project, current_file));
-    out.extend(check_mutable_redefinitions(project));
+    if let Some(mv) = merged.as_ref() {
+        out.extend(check_forward_declarations_for_merged_view(
+            project, current_file, mv,
+        ));
+        out.extend(check_mutable_redefinitions_for_merged_view(mv));
+    } else {
+        // Fallback for tests/fixtures that don't sit under a `game/` root.
+        out.extend(check_forward_declarations(project, current_file));
+        out.extend(check_mutable_redefinitions(project));
+    }
     out
+}
+
+// --- merged-view helpers ---------------------------------------------------
+
+/// Try to infer the game-install root for an absolute file path.
+///
+/// Walks up ancestors looking for a directory that contains a `game/`
+/// subdirectory and where `current_file` lies inside that `game/` tree.
+fn infer_game_root(current_file: &Path) -> Option<PathBuf> {
+    let mut dir = current_file.parent()?;
+    loop {
+        let game_dir = dir.join("game");
+        if game_dir.is_dir() && current_file.starts_with(&game_dir) {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Build a `MergedView` for `current_file` from an in-memory semantic project.
+///
+/// This lets the integration test harness (`tests/game_folder_parse.rs`)
+/// benefit from true include-paste semantics without changing its public API.
+fn build_merged_view_from_project(
+    project: &VirtualProject,
+    current_file: &Path,
+) -> Option<MergedView> {
+    let game_root = infer_game_root(current_file)?;
+    let file = project.files.get(current_file)?;
+    let source = &file.source;
+    let own_table = &file.table;
+    let ws = Workspace::new(game_root);
+    let project = WorkspaceVirtualProject::default();
+    let cache_dir = crate::cache::state_cache_dir();
+    MergedView::build(current_file, source, own_table, &ws, &project, &cache_dir).ok()
+}
+
+/// Effective line for ordering symbols in the merged translation unit.
+///
+/// Own-file symbols keep their source position; included symbols are treated
+/// as pasted at the line of the `include` directive that introduced them.
+fn effective_line(ms: &crate::merged_view::MergedSymbol) -> u32 {
+    match ms.provenance {
+        VisibilityProvenance::OwnFile => ms.symbol.selection_range.start.line,
+        _ => ms.provenance.include_line(),
+    }
 }
 
 /// Detect `extern` collisions: if any file declares `X` as `extern`, no other
@@ -308,6 +365,153 @@ pub fn check_mutable_redefinitions(project: &VirtualProject) -> Vec<Diagnostic> 
     diags
 }
 
+/// Validate forward declarations using the merged include-paste scope.
+///
+/// A call resolves if the callee is defined or forward-declared earlier in
+/// the same file, is declared `mutable`, or is pasted from an `include`
+/// directive whose line precedes the call.
+pub fn check_forward_declarations_for_merged_view(
+    project: &VirtualProject,
+    current_file: &Path,
+    merged: &MergedView,
+) -> Vec<Diagnostic> {
+    let Some(file) = project.files.get(current_file) else {
+        return Vec::new();
+    };
+    let Some(tree) = parser::parse(&file.source) else {
+        return Vec::new();
+    };
+
+    // Ranges of own-file function definitions, used to detect a call that
+    // sits inside its own definition (self-recursion is allowed).
+    let own_function_ranges: Vec<(String, Range)> = merged
+        .own_table()
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Function && !s.is_forward)
+        .map(|s| (s.name.clone(), s.full_range))
+        .collect();
+
+    let calls = collect_calls(&tree, &file.source);
+    let mut diags = Vec::new();
+
+    for (callee, callee_range) in calls {
+        // Skip self-calls.
+        if own_function_ranges
+            .iter()
+            .any(|(n, r)| n == &callee && contains_range(*r, callee_range) && r.start.line < callee_range.start.line)
+        {
+            continue;
+        }
+
+        if forward_callable_merged(merged, &callee, callee_range.start.line) {
+            continue;
+        }
+
+        // If the symbol is present anywhere in the merged scope, the call
+        // is a use-before-definition; otherwise it's a true unknown symbol.
+        let resolved_anywhere = merged.find(&callee).is_some();
+
+        let message = if resolved_anywhere {
+            format!(
+                "'{}' used at line {} before declaration; add forward declaration or mark 'mutable'",
+                callee,
+                callee_range.start.line + 1
+            )
+        } else {
+            format!(
+                "Error 0310: invalid symbol lookup '{}' at line {}",
+                callee,
+                callee_range.start.line + 1
+            )
+        };
+
+        diags.push(Diagnostic {
+            range: callee_range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(tower_lsp::lsp_types::NumberOrString::String("E0310".to_string())),
+            code_description: None,
+            source: Some("xs-language-server".to_string()),
+            message,
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+    }
+
+    diags
+}
+
+/// Check `mutable` redefinitions across the merged include-paste scope.
+///
+/// Included files behave like textual paste, so the effective translation
+/// unit for redefinition is the current file plus its resolved includes.
+pub fn check_mutable_redefinitions_for_merged_view(merged: &MergedView) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+
+    let mut by_name: HashMap<String, Vec<&crate::merged_view::MergedSymbol>> = HashMap::new();
+    for ms in merged
+        .symbols()
+        .iter()
+        .filter(|ms| ms.symbol.kind == SymbolKind::Function)
+    {
+        by_name.entry(ms.symbol.name.clone()).or_default().push(ms);
+    }
+
+    for (name, syms) in by_name {
+        let mut ordered = syms;
+        ordered.sort_by_key(|ms| effective_line(ms));
+        for (i, ms) in ordered.iter().enumerate() {
+            if !ms.symbol.is_mutable {
+                continue;
+            }
+            for later in &ordered[i + 1..] {
+                if !same_signature(&ms.symbol, &later.symbol) {
+                    diags.push(Diagnostic {
+                        range: later.symbol.selection_range,
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                            "E0310".to_string(),
+                        )),
+                        code_description: None,
+                        source: Some("xs-language-server".to_string()),
+                        message: format!(
+                            "mutable function '{}' redefined with different signature at line {}",
+                            name,
+                            later.symbol.selection_range.start.line + 1
+                        ),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+fn forward_callable_merged(merged: &MergedView, callee: &str, call_line: u32) -> bool {
+    for ms in merged
+        .symbols()
+        .iter()
+        .filter(|ms| ms.symbol.kind == SymbolKind::Function && ms.symbol.name == callee)
+    {
+        if ms.symbol.is_mutable {
+            return true;
+        }
+        let def_line = match ms.provenance {
+            VisibilityProvenance::OwnFile => ms.symbol.selection_range.start.line,
+            _ => ms.provenance.include_line(),
+        };
+        if def_line < call_line {
+            return true;
+        }
+    }
+    false
+}
+
 // --- internal helpers ---
 
 fn contains_range(outer: Range, inner: Range) -> bool {
@@ -437,7 +641,13 @@ fn find_named_child<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::path::PathBuf;
+
+    use tempfile::TempDir;
+
+    use crate::merged_view::MergedView;
+    use crate::workspace::{VirtualProject as WorkspaceVirtualProject, Workspace};
 
     fn p(name: &str) -> PathBuf {
         PathBuf::from(name)
@@ -449,6 +659,37 @@ mod tests {
             .map(|(path, src)| (p(path), src.to_string()))
             .collect();
         VirtualProject::from_files(map)
+    }
+
+    /// Write fixtures under a temporary `game/` root, build a semantic
+    /// `VirtualProject` for the files, and a `MergedView` for `current_rel`.
+    ///
+    /// The `TempDir` is returned so callers can keep the fixture files alive
+    /// on disk for code paths that re-infer the game root.
+    fn merged_fixture(
+        files: &[(&str, &str)],
+        current_rel: &str,
+    ) -> (TempDir, VirtualProject, MergedView, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut map = HashMap::new();
+        for (rel, src) in files {
+            let path = root.join("game").join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(src.as_bytes()).unwrap();
+            map.insert(path.clone(), src.to_string());
+        }
+        let prj = VirtualProject::from_files(map);
+        let current = root.join("game").join(current_rel);
+        let source = prj.files.get(&current).unwrap().source.clone();
+        let own = prj.files.get(&current).unwrap().table.clone();
+        let ws = Workspace::new(root.to_path_buf());
+        let project = WorkspaceVirtualProject::default();
+        let cache_dir = TempDir::new().unwrap();
+        let merged = MergedView::build(&current, &source, &own, &ws, &project, cache_dir.path())
+            .unwrap();
+        (tmp, prj, merged, current)
     }
 
     #[test]
@@ -539,5 +780,90 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("Error 0310"));
         assert!(diags[0].message.contains("doesNotExist"));
+    }
+
+    #[test]
+    fn call_before_include_is_error() {
+        // spec-semantic-diagnostics.md: `bar()` before `include "b.xs"` must
+        // error even though b.xs defines bar.
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "void foo() { bar(); }\ninclude \"b.xs\";\n"),
+                ("ai/b.xs", "void bar() {}\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("before declaration"));
+        assert!(diags[0].message.contains("bar"));
+    }
+
+    #[test]
+    fn call_after_include_is_clean() {
+        // Scenario 11: included public function is visible after the include.
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "include \"b.xs\";\nvoid foo() { bar(); }\n"),
+                ("ai/b.xs", "void bar() {}\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        assert!(diags.is_empty(), "expected clean diagnostics, got {diags:?}");
+    }
+
+    #[test]
+    fn included_static_function_is_unresolved() {
+        // Scenario 9 variant: `static` makes a function local to its file.
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "include \"b.xs\";\nvoid foo() { hidden(); }\n"),
+                ("ai/b.xs", "static void hidden() {}\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("Error 0310"));
+        assert!(diags[0].message.contains("hidden"));
+    }
+
+    #[test]
+    fn mutable_function_in_included_file_is_callable() {
+        // Scenario 12: mutable helper from an include resolves anywhere.
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                (
+                    "ai/a.xs",
+                    "include \"b.xs\";\nvoid foo() { helper(5); }\n",
+                ),
+                ("ai/b.xs", "mutable void helper(int x = -1) {}\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        assert!(
+            diags.is_empty(),
+            "mutable included function should resolve, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn mutable_redefinition_across_include_is_checked() {
+        // The mutable definition (own file) precedes the included
+        // redefinition with a different default.
+        let (_tmp, _prj, merged, _current) = merged_fixture(
+            &[
+                (
+                    "ai/a.xs",
+                    "mutable void helper(int x = 1) {}\ninclude \"b.xs\";\n",
+                ),
+                ("ai/b.xs", "void helper(int x = 2) {}\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_mutable_redefinitions_for_merged_view(&merged);
+        assert!(diags.iter().any(|d| d.message.contains("different signature")));
     }
 }
