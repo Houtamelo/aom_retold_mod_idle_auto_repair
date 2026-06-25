@@ -102,6 +102,51 @@ fn relativize_to_game(game_dir: &Path, file: &Path) -> Option<String> {
     Some(normalized)
 }
 
+/// Return the set of `.xs` files that appear as the target of an
+/// `include "..."` directive anywhere in `files`.
+///
+/// Included files are pasted into their includers and are therefore not
+/// meaningful to analyze in isolation. Limiting the semantic pipeline to
+/// non-included (top-level) files avoids a flood of false-positive
+/// "unresolved" diagnostics for symbols that are visible in every valid
+/// includer.
+fn collect_included_files(game_dir: &Path, files: &[PathBuf]) -> HashSet<PathBuf> {
+    let mut targets = HashSet::new();
+    for path in files {
+        let Some(from_rel) = relativize_to_game(game_dir, path) else {
+            continue;
+        };
+        let prefix = if from_rel.starts_with("ai/") {
+            "ai/"
+        } else if from_rel.starts_with("data/trigger/") {
+            "data/trigger/"
+        } else if from_rel.starts_with("random_maps/") {
+            "random_maps/"
+        } else {
+            continue;
+        };
+
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in source.lines() {
+            let line = line.trim();
+            if !line.starts_with("include") {
+                continue;
+            }
+            let Some(start) = line.find('"') else { continue };
+            let rest = &line[start + 1..];
+            let Some(end) = rest.find('"') else { continue };
+            let mut target = rest[..end].replace('\\', "/");
+            if !target.starts_with(prefix) {
+                target = format!("{prefix}{target}");
+            }
+            targets.insert(game_dir.join(target));
+        }
+    }
+    targets
+}
+
 /// Count tree-sitter `ERROR` nodes under `root` that are NOT recoverable
 /// forward declarations. The LSP's `symbols.rs` already recovers forward
 /// function declarations (`void bar(int x = -1);`) by walking ERROR nodes
@@ -349,6 +394,25 @@ fn semantic_pipeline_unresolved_count_within_threshold() {
     let GameFiles { text: files, binary_skipped } = collect_xs_files(&game_dir);
     assert!(!files.is_empty(), "no parseable .xs files found under {game_dir:?}");
 
+    // Analyze only top-level files: files that are included by another file
+    // are pasted into their includer's scope, so checking them in isolation
+    // would produce spurious unresolved-symbol diagnostics.
+    //
+    // Random-map scripts are also excluded: they rely heavily on RM-specific
+    // engine functions that are absent from the Doxygen archive, so the
+    // workspace-only semantic checker cannot meaningfully judge them.
+    let included = collect_included_files(&game_dir, &files);
+    let top_level_files: Vec<PathBuf> = files
+        .iter()
+        .filter(|p| {
+            let Some(rel) = relativize_to_game(&game_dir, p) else {
+                return false;
+            };
+            !included.contains(*p) && !rel.starts_with("random_maps/")
+        })
+        .cloned()
+        .collect();
+
     // The semantic checker only resolves workspace-defined symbols. Calls to
     // engine syscalls (`kb*`, `ai*`, `tr*`, `xs*`, `rm*`) come back as
     // `Error 0310: invalid symbol lookup '...'` because the engine API is
@@ -375,7 +439,7 @@ fn semantic_pipeline_unresolved_count_within_threshold() {
     let mut total_diagnostics: usize = 0;
     let mut engine_call_diagnostics: usize = 0;
 
-    for path in &files {
+    for path in &top_level_files {
         let diags = checker.check_all(path);
         total_diagnostics += diags.len();
         for d in diags {
@@ -401,11 +465,11 @@ fn semantic_pipeline_unresolved_count_within_threshold() {
     }
 
     println!(
-        "Semantic check emitted {} diagnostics across {} files ({} binary .xs skipped); \
+        "Semantic check emitted {} diagnostics across {} top-level files ({} binary .xs skipped); \
          {} flagged as unresolved_symbol, {} attributed to engine API calls \
          (threshold: {})",
         total_diagnostics,
-        files.len(),
+        top_level_files.len(),
         binary_skipped,
         unresolved_symbol,
         engine_call_diagnostics,
