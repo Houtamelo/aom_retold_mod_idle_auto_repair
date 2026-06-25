@@ -236,7 +236,7 @@ impl Workspace {
         include_target: &str,
     ) -> Option<PathBuf> {
         let root = detect_include_root(from_rel)?;
-        let rel = format!("{}{}", root.rel_prefix(), include_target);
+        let rel = format!("{}{}", root.rel_prefix(), normalize_include_target(include_target));
         self.resolve_file(project, &rel)
     }
 
@@ -251,7 +251,8 @@ impl Workspace {
         include_line: u32,
     ) -> Result<(PathBuf, IncludeEdge), ResolveError> {
         let root = detect_include_root(from_rel).ok_or(ResolveError::UnknownIncludeRoot)?;
-        let rel = format!("{}{}", root.rel_prefix(), include_target);
+        let target = normalize_include_target(include_target);
+        let rel = format!("{}{}", root.rel_prefix(), target);
         let to_path = self.resolve_file(project, &rel).ok_or_else(|| ResolveError::NotFound {
             target: include_target.to_string(),
             root,
@@ -282,6 +283,12 @@ impl Workspace {
     pub fn game_path(&self) -> &Path {
         &self.game_path
     }
+}
+
+/// Normalize an include target so backslashes from Windows-style paths are
+/// treated as path separators on all platforms.
+fn normalize_include_target(target: &str) -> String {
+    target.replace('\\', "/")
 }
 
 /// Infer the include-root context for a file from its path under `game/`.
