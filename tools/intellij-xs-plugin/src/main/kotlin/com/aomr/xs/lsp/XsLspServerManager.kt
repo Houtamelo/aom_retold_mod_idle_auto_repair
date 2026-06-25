@@ -172,10 +172,11 @@ class XsLspServerManager(private val project: Project) : Disposable {
         val removed = (previous - next).toList()
         currentModPaths = updated
         if (added.isEmpty() && removed.isEmpty()) return
-        connection?.changeWorkspaceFolders(
-            added.map { File(it).toURI().toString() },
-            removed.map { File(it).toURI().toString() }
-        )
+        // Pass paths (not pre-converted URIs). XsLspConnection handles the
+        // single path->URI conversion itself; doing it here as well used to
+        // produce double-prefixed URIs (`file:///home/.../file:/home/.../mod/foo`)
+        // that the LSP could never match against real file paths.
+        connection?.changeWorkspaceFolders(added, removed)
     }
 
     private fun onFileOpened(file: VirtualFile) {

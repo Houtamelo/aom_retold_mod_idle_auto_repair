@@ -140,15 +140,30 @@ class XsLspConnection(
     fun isAlive(): Boolean = process?.isAlive == true && server != null
 
     @Synchronized
-    fun changeWorkspaceFolders(added: List<String>, removed: List<String>) {
+    fun changeWorkspaceFolders(addedPaths: List<String>, removedPaths: List<String>) {
         val s = server ?: return
-        val addedFolders = added.map { WorkspaceFolder(it.toFileUri(), File(it).name) }
-        val removedFolders = removed.map { WorkspaceFolder(it.toFileUri(), File(it).name) }
+        // The input here is filesystem paths (from XsSettings.state.modPaths),
+        // NOT already-converted URI strings. We convert each path to a URI
+        // exactly once here. The previous version called it.toFileUri() on
+        // inputs that the manager had already converted, producing URIs like
+        // `file:///home/.../file:/home/.../mod/foo` (double-prefixed with a
+        // `file:` segment) and percent-encoding chars twice (`Extra%2520Ai`
+        // instead of `Extra%20Ai`). That made lookup_mod fail because the
+        // registered prefix never matched the actual file path.
+        val addedFolders = addedPaths.map { path ->
+            WorkspaceFolder(File(path).toURI().toString(), File(path).name)
+        }
+        val removedFolders = removedPaths.map { path ->
+            WorkspaceFolder(File(path).toURI().toString(), File(path).name)
+        }
         val event = WorkspaceFoldersChangeEvent(addedFolders, removedFolders)
         val params = org.eclipse.lsp4j.DidChangeWorkspaceFoldersParams().apply { this.event = event }
         try {
             s.workspaceService.didChangeWorkspaceFolders(params)
-            log.info("Sent workspace/didChangeWorkspaceFolders: +${added.size} -${removed.size}")
+            log.info("Sent workspace/didChangeWorkspaceFolders: +${addedPaths.size} -${removedPaths.size}")
+            for (path in addedPaths) {
+                log.info("  + mod folder (path): $path")
+            }
         } catch (e: Exception) {
             log.warn("Failed to send workspace/didChangeWorkspaceFolders", e)
         }
@@ -271,8 +286,6 @@ class XsLspConnection(
             try { stream.close() } catch (_: Exception) {}
         }
     }
-
-    private fun String.toFileUri(): String = File(this).toURI().toString()
 
     companion object {
         /**
