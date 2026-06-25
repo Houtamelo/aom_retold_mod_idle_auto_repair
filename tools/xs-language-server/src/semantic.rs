@@ -58,24 +58,57 @@ impl VirtualProject {
     /// Build a semantic project from a `workspace::VirtualProject` by parsing
     /// every visible file. `cache_dir` is used to reuse cached symbol tables
     /// for game-folder files.
+    ///
+    /// Files that fail to load (binary `.xs` random-map data, IO error,
+    /// unreadable due to permissions, etc.) are SKIPPED with a warning
+    /// log rather than aborting the whole project build. The semantic
+    /// analysis proceeds with the remaining files; a file that fails to
+    /// parse in one pass will be retried on the next pass if its content
+    /// has changed.
     pub fn load_from_workspace(
         workspace: &crate::workspace::Workspace,
         project: &crate::workspace::VirtualProject,
         cache_dir: &Path,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let mut files = HashMap::new();
-        for (rel, path) in project.visible_files(workspace) {
+        let visible = project.visible_files(workspace);
+        tracing::debug!(
+            "semantic::load_from_workspace: walking {} visible files",
+            visible.len()
+        );
+        for (rel, path) in visible {
             // Prefer the cached symbol table when available; otherwise parse
-            // directly from disk.
-            let symbols = crate::cache::load_or_parse_symbols(&path, &rel, cache_dir)?;
-            let source = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading source for semantic analysis: {path:?}"))?;
-            files.insert(path, ParsedFile {
-                source,
-                table: symbols,
-            });
+            // directly from disk. load_or_parse_symbols already swallows
+            // parse / read failures and returns an empty table for the
+            // offending file, so a single bad file in the workspace can't
+            // abort the build of the other 300+.
+            let symbols = match crate::cache::load_or_parse_symbols(&path, &rel, cache_dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        "load_or_parse_symbols failed for {} ({}); skipping",
+                        path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            // If the source can't be read as UTF-8 (a random-map binary
+            // .xs that slipped through), skip the file with a warning.
+            let source = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        "could not read source for {} ({}); excluding from semantic project",
+                        path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            files.insert(path, ParsedFile { source, table: symbols });
         }
-        Ok(Self { files })
+        Self { files }
     }
 }
 
@@ -144,7 +177,7 @@ fn build_merged_view_from_project(
     let ws = Workspace::new(game_root);
     let project = WorkspaceVirtualProject::default();
     let cache_dir = crate::cache::state_cache_dir();
-    MergedView::build(current_file, source, own_table, &ws, &project, &cache_dir).ok()
+    Some(MergedView::build(current_file, source, own_table, &ws, &project, &cache_dir))
 }
 
 /// Effective line for ordering symbols in the merged translation unit.
@@ -687,8 +720,7 @@ mod tests {
         let ws = Workspace::new(root.to_path_buf());
         let project = WorkspaceVirtualProject::default();
         let cache_dir = TempDir::new().unwrap();
-        let merged = MergedView::build(&current, &source, &own, &ws, &project, cache_dir.path())
-            .unwrap();
+        let merged = MergedView::build(&current, &source, &own, &ws, &project, cache_dir.path());
         (tmp, prj, merged, current)
     }
 
@@ -1017,6 +1049,64 @@ mod tests {
         assert!(
             merged.find("gHidden").is_none(),
             "static variable from included file should be hidden"
+        );
+    }
+
+    /// Regression guard for the user's complaint:
+    ///   "The LSP needs to be more robust, it can't give up on every
+    ///    single bad file."
+    ///
+    /// `load_from_workspace` MUST NOT panic or abort when one of the
+    /// visible files is unreadable (random-map binary `.xs`). It must
+    /// silently skip the bad file with a `tracing::warn!` and return a
+    /// `VirtualProject` that still contains the good files' symbols.
+    #[test]
+    fn load_from_workspace_skips_bad_files() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("game").join("ai")).unwrap();
+
+        let good_path = root.join("game").join("ai").join("human_assist.xs");
+        std::fs::write(&good_path, "void liveHelper() {}\n").unwrap();
+
+        // Mimic the AoM:R random-map binary `.xs` layout: a `.xs` file that
+        // exists but cannot be decoded as UTF-8. The walker skips it via
+        // `is_readable_xs_file`, but this test exercises the
+        // `load_from_workspace` fallback for paths that slip through.
+        let bad_path = root.join("game").join("random_maps").join("aso_grasslands.xs");
+        std::fs::create_dir_all(bad_path.parent().unwrap()).unwrap();
+        std::fs::write(&bad_path, [0xffu8, 0xfe, 0x00, 0xab, 0xcd]).unwrap();
+
+        let ws = Workspace::new(root.to_path_buf());
+        let project = WorkspaceVirtualProject::default();
+        let cache_dir = TempDir::new().unwrap();
+
+        let semantic_project = VirtualProject::load_from_workspace(&ws, &project, cache_dir.path());
+
+        // The good file must be in the project.
+        assert!(
+            semantic_project.files.contains_key(&good_path),
+            "good file must be in the semantic project; got: {:?}",
+            semantic_project.files.keys().collect::<Vec<_>>()
+        );
+        // The good file's symbol must be parseable.
+        let good_table = semantic_project
+            .files
+            .get(&good_path)
+            .expect("good file present")
+            .table
+            .clone();
+        assert!(
+            good_table.find("liveHelper").is_some(),
+            "good file's symbols must be present in the project"
+        );
+
+        // The bad file must NOT be in the project (it was either skipped
+        // by the walker before reaching this layer, or skipped inside
+        // load_or_parse_symbols).
+        assert!(
+            !semantic_project.files.contains_key(&bad_path),
+            "unreadable .xs file must be skipped by load_from_workspace"
         );
     }
 }

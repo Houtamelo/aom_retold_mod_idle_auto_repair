@@ -139,18 +139,33 @@ pub fn load_or_parse_symbols(
     relative_path: &str,
     cache_dir: &Path,
 ) -> Result<symbols::SymbolTable> {
-    // Defensive: even though the workspace walkers filter by extension,
-    // guard the cache layer too. If a non-`.xs` path ever reaches here,
-    // bail out cleanly rather than attempting to UTF-8-decode binary data
-    // (.bar archives, .dtt tables, .png textures, etc.) and crashing
-    // every semantic check that touches this file's include graph.
+    // Defensive: even though the workspace walkers filter by extension and
+    // UTF-8 head probe, guard the cache layer too. If a non-`.xs` path ever
+    // reaches here, return an empty table rather than attempting to
+    // UTF-8-decode binary data (.bar archives, .dtt tables, .png textures,
+    // binary `.xs` random-map data, etc.) and crashing every semantic check
+    // that touches this file's include graph.
     if !crate::workspace::is_xs_file(path) {
         return Ok(symbols::SymbolTable::default());
     }
-    let (key, content_hash, mtime_millis) = parse_file_key(path)?;
+
+    // First try to use a cached parse result. If anything fails — missing
+    // cache, IO error during cache read, JSON decode error — fall back to
+    // a fresh parse.
+    let (key, content_hash, mtime_millis) = match parse_file_key(path) {
+        Ok(parts) => parts,
+        Err(e) => {
+            tracing::warn!(
+                "could not compute cache key for {}: {}; treating as empty",
+                path.display(),
+                e
+            );
+            return Ok(symbols::SymbolTable::default());
+        }
+    };
     let cache_path = parse_cache_path(cache_dir, &key);
 
-    if let Some(entry) = read_json::<ParseCacheEntry>(&cache_path)? {
+    if let Ok(Some(entry)) = read_json::<ParseCacheEntry>(&cache_path) {
         if entry.relative_path == relative_path
             && entry.content_hash == content_hash
             && entry.mtime_millis == mtime_millis
@@ -159,20 +174,48 @@ pub fn load_or_parse_symbols(
         }
     }
 
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("re-reading source for parse cache: {path:?}"))?;
-    let tree = parser::parse(&text)
-        .with_context(|| format!("installing XS parser for {path:?}"))?;
+    // Read the source. If it isn't valid UTF-8 (e.g. an AoM:R random-map
+    // serialised `.xs` that slipped past the walker), treat the file as
+    // empty for this compilation rather than aborting the whole project
+    // build. The file is still in the include graph; it just contributes
+    // no symbols.
+    let text = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                "could not read {} as UTF-8: {}; treating as empty for this compilation",
+                path.display(),
+                e
+            );
+            return Ok(symbols::SymbolTable::default());
+        }
+    };
+    let tree = match parser::parse(&text) {
+        Some(t) => t,
+        None => {
+            tracing::warn!(
+                "tree-sitter XS parser failed to install for {}; treating as empty for this compilation",
+                path.display(),
+            );
+            return Ok(symbols::SymbolTable::default());
+        }
+    };
     let table = symbols::build_symbol_table(&tree, &text);
 
+    // Best-effort write to cache. A failure here doesn't affect correctness.
     let entry = ParseCacheEntry {
         relative_path: relative_path.to_string(),
         mtime_millis,
         content_hash,
         symbols: table.clone(),
     };
-    write_json(&cache_path, &entry)
-        .with_context(|| format!("writing parse cache file {cache_path:?}"))?;
+    if let Err(e) = write_json(&cache_path, &entry) {
+        tracing::debug!(
+            "could not write parse cache {} (non-fatal): {}",
+            cache_path.display(),
+            e
+        );
+    }
 
     Ok(table)
 }
@@ -436,5 +479,72 @@ mod tests {
         let t = load_or_parse_symbols(&file, "ai/core/core.xs", &cache_dir).unwrap();
         assert!(t.find("newName").is_some());
         assert!(t.find("oldName").is_none());
+    }
+
+    /// Regression guard for the user's complaint:
+    ///   "The LSP needs to be more robust, it can't give up on every
+    ///    single bad file. If a file fails to parse, it should simply
+    ///    output an error message, then temporarily exclude that file
+    ///    from compilation."
+    ///
+    /// A `.xs` file that exists but cannot be read as UTF-8 (the AoM:R
+    /// random-map binary case) MUST return `Ok(default)` from
+    /// `load_or_parse_symbols` — NOT `Err`. The semantic pipeline needs
+    /// the empty table to continue processing the rest of the workspace.
+    #[test]
+    fn load_or_parse_symbols_returns_default_on_unreadable_file() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let file = tmp.path().join("binary.xs");
+        // Random-map-style binary content: invalid UTF-8 sequence at byte 1.
+        fs::write(&file, [0xffu8, 0xfe, 0x00, 0xab, 0xcd, 0xef]).unwrap();
+
+        let result = load_or_parse_symbols(&file, "ai/binary.xs", &cache_dir);
+        assert!(
+            result.is_ok(),
+            "load_or_parse_symbols must return Ok for an unreadable .xs file; got {result:?}"
+        );
+        let table = result.unwrap();
+        assert!(
+            table.symbols.is_empty(),
+            "unreadable .xs file should produce an empty SymbolTable, got {} symbols",
+            table.symbols.len()
+        );
+    }
+
+    /// A `.xs` file that doesn't exist on disk (e.g. stale include target)
+    /// MUST also return `Ok(default)` rather than `Err`. The semantic
+    /// pipeline treats this as "no symbols contributed by this file" and
+    /// moves on.
+    #[test]
+    fn load_or_parse_symbols_returns_default_on_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let file = tmp.path().join("does_not_exist.xs");
+
+        let result = load_or_parse_symbols(&file, "ai/does_not_exist.xs", &cache_dir);
+        assert!(
+            result.is_ok(),
+            "load_or_parse_symbols must return Ok for a missing .xs file; got {result:?}"
+        );
+        let table = result.unwrap();
+        assert!(table.symbols.is_empty());
+    }
+
+    /// A non-`.xs` file (e.g. a `.bar` archive that somehow reaches the
+    /// cache layer through a regression in the upstream filters) MUST
+    /// return `Ok(default)` immediately without attempting to parse it.
+    /// Without this guard, the cache layer would crash with a UTF-8
+    /// decode error the first time the walker ever missed a filter.
+    #[test]
+    fn load_or_parse_symbols_returns_default_on_non_xs_extension() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let file = tmp.path().join("asset.bar");
+        fs::write(&file, [0xffu8, 0xfe, 0x00]).unwrap();
+
+        let result = load_or_parse_symbols(&file, "asset.bar", &cache_dir);
+        assert!(result.is_ok());
+        assert!(result.unwrap().symbols.is_empty());
     }
 }

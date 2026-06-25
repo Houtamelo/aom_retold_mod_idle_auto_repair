@@ -132,8 +132,7 @@ impl XsLanguageServer {
             &ws_clone,
             &project,
             &cache_dir,
-        )
-        .ok()?;
+        );
         let key = merged_view::MergedViewCacheKey::new(text, &view);
         {
             let mut views = self.merged_views.lock().await;
@@ -967,7 +966,10 @@ impl XsLanguageServer {
     }
 
     /// Build a semantic virtual project for the mod that owns `uri`.
-    /// Returns `None` for unowned files or if the project cannot be read.
+    /// Returns `None` for unowned files. Loads every visible file in the
+    /// mod; files that fail to load (binary `.xs` random-map data, IO
+    /// errors, malformed UTF-8) are skipped with a warning log rather than
+    /// aborting the whole build.
     async fn build_semantic_project(&self, uri: &Url) -> Option<semantic::VirtualProject> {
         let (ws_clone, project) = {
             let ws = self.workspace.lock().await;
@@ -976,13 +978,11 @@ impl XsLanguageServer {
             (ws.clone(), project)
         };
         let cache_dir = crate::cache::state_cache_dir();
-        match semantic::VirtualProject::load_from_workspace(&ws_clone, &project, &cache_dir) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                warn!("failed to build semantic project for {}: {}", uri, e);
-                None
-            }
-        }
+        Some(semantic::VirtualProject::load_from_workspace(
+            &ws_clone,
+            &project,
+            &cache_dir,
+        ))
     }
 }
 

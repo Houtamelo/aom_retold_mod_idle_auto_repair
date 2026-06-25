@@ -178,7 +178,7 @@ mod tests {
         let tree = parser::parse(&source).unwrap();
         let own = symbols::build_symbol_table(&tree, &source);
         let cache_dir = TempDir::new().unwrap();
-        MergedView::build(&current, &source, &own, &ws, &project, cache_dir.path()).unwrap()
+        MergedView::build(&current, &source, &own, &ws, &project, cache_dir.path())
     }
 
     #[test]

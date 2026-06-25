@@ -4,12 +4,18 @@
 //! the visibility-filtered symbols from every directly and transitively
 //! included file. Included `static`/file-local variables are hidden;
 //! `extern` variables and public functions are visible. Cycles terminate
-//! cleanly and missing targets become diagnostics rather than fatal errors.
+//! cleanly and missing or unreadable targets become diagnostics rather than
+//! fatal errors.
+//!
+//! Resilience: a single bad include target (binary `.xs` random-map data,
+//! permission error, etc.) produces a `tracing::warn!` and is omitted from
+//! the merged view, but the merged view for the rest of the file STILL
+//! builds. The user-visible diagnostic is preserved on
+//! [`MergedView::missing_includes`] and [`MergedView::unreadable_includes`].
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
 use tower_lsp::lsp_types::Range;
 
 use crate::symbols::{Symbol, SymbolKind, SymbolTable, Visibility};
@@ -112,13 +118,50 @@ impl IncludeGraph {
     }
 }
 
-/// Diagnostic produced when an include target cannot be resolved.
+/// Why an include target was not folded into the merged scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncludeDiagnosticKind {
+    /// The include target could not be resolved — no file exists at the
+    /// resolved relative path under the mod overlay or vanilla game folder.
+    Missing,
+    /// The include target exists but could not be read or parsed (binary
+    /// `.xs` random-map data, invalid UTF-8, parse failure, etc.).
+    Unreadable,
+}
+
+/// Diagnostic produced when an include target cannot be brought into scope.
 #[derive(Debug, Clone)]
 pub struct IncludeDiagnostic {
     pub target: String,
     pub from: PathBuf,
     pub root: IncludeRoot,
     pub range: Range,
+    pub kind: IncludeDiagnosticKind,
+}
+
+impl IncludeDiagnostic {
+    /// A `Missing` diagnostic — the include target does not resolve.
+    pub fn missing(target: String, from: PathBuf, root: IncludeRoot, range: Range) -> Self {
+        Self {
+            target,
+            from,
+            root,
+            range,
+            kind: IncludeDiagnosticKind::Missing,
+        }
+    }
+
+    /// An `Unreadable` diagnostic — the include target exists but failed
+    /// to read or parse.
+    pub fn unreadable(target: String, from: PathBuf, root: IncludeRoot, range: Range) -> Self {
+        Self {
+            target,
+            from,
+            root,
+            range,
+            kind: IncludeDiagnosticKind::Unreadable,
+        }
+    }
 }
 
 /// The resolved, filtered scope of one file.
@@ -167,35 +210,17 @@ impl MergedViewCacheKey {
 /// Error returned when `MergedView::build` cannot complete due to an I/O
 /// failure or an include cycle. Missing include targets are **not** errors;
 /// they are surfaced as `IncludeDiagnostic`s.
-#[derive(Debug)]
-pub enum MergeError {
-    Io { path: PathBuf, source: anyhow::Error },
-    Cycle(Vec<PathBuf>),
-}
-
-impl std::fmt::Display for MergeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MergeError::Io { path, source } => {
-                write!(f, "failed to read include {}: {source}", path.display())
-            }
-            MergeError::Cycle(paths) => write!(
-                f,
-                "include cycle detected: {}",
-                paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" -> ")
-            ),
-        }
-    }
-}
-
-impl std::error::Error for MergeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            MergeError::Io { source, .. } => Some(source.as_ref()),
-            MergeError::Cycle(_) => None,
-        }
-    }
-}
+///
+/// **Removed** in the LSP robustness refactor: the merged view builder no
+/// longer propagates I/O or parse failures to its caller. Each `Result` from
+/// per-include work is matched locally; on error a `tracing::warn!` is
+/// emitted and the include target is skipped via an `IncludeDiagnostic` of
+/// kind [`IncludeDiagnosticKind::Unreadable`]. This guarantees that a single
+/// bad include target in the workspace (a binary `.xs` random-map file, a
+/// permissions error, etc.) can never abort the merged-view build for the
+/// rest of the file. The previous `MergeError` enum is intentionally gone so
+/// callers cannot accidentally reintroduce fail-fast behaviour by `?`-ing
+/// the builder's result.
 
 impl MergedView {
     /// Build the merged view for `file` from its (already-parsed) source text.
@@ -203,7 +228,10 @@ impl MergedView {
     /// * Resolves every `include` through `workspace::resolve_include_edge`.
     /// * Loads included-file symbol tables through `cache::load_or_parse_symbols`.
     /// * Cycles are terminated cleanly; symbols seen up to the re-entry remain.
-    /// * Missing targets become `IncludeDiagnostic`s, not fatal errors.
+    /// * Missing targets become `IncludeDiagnostic`s of kind
+    ///   [`IncludeDiagnosticKind::Missing`]; unreadable / unparseable targets
+    ///   become diagnostics of kind [`IncludeDiagnosticKind::Unreadable`].
+    ///   Neither aborts the build.
     pub fn build(
         file: &Path,
         source: &str,
@@ -211,7 +239,7 @@ impl MergedView {
         workspace: &Workspace,
         project: &VirtualProject,
         cache_dir: &Path,
-    ) -> Result<MergedView, MergeError> {
+    ) -> MergedView {
         let mut view = MergedView {
             current_file: file.to_path_buf(),
             own_table: own_table.clone(),
@@ -263,20 +291,42 @@ impl MergedView {
                     }
 
                     let rel = relative_path_for(project, workspace, &to_path);
-                    let table = cache::load_or_parse_symbols(&to_path, &rel, cache_dir)
-                        .with_context(|| {
-                            format!("loading symbol table for {}", to_path.display())
-                        })
-                        .map_err(|e| MergeError::Io {
-                            path: to_path.clone(),
-                            source: e,
-                        })?;
-                    let child_source = std::fs::read_to_string(&to_path)
-                        .with_context(|| format!("reading source for {}", to_path.display()))
-                        .map_err(|e| MergeError::Io {
-                            path: to_path.clone(),
-                            source: e,
-                        })?;
+                    let table = match cache::load_or_parse_symbols(&to_path, &rel, cache_dir) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "merged_view",
+                                include = %to_path.display(),
+                                error = %e,
+                                "skipping bad include target (load_or_parse_symbols failed)"
+                            );
+                            view.missing.push(IncludeDiagnostic::unreadable(
+                                target,
+                                file.to_path_buf(),
+                                edge.root,
+                                range,
+                            ));
+                            continue;
+                        }
+                    };
+                    let child_source = match std::fs::read_to_string(&to_path) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "merged_view",
+                                include = %to_path.display(),
+                                error = %e,
+                                "skipping bad include target (could not read source)"
+                            );
+                            view.missing.push(IncludeDiagnostic::unreadable(
+                                target,
+                                file.to_path_buf(),
+                                edge.root,
+                                range,
+                            ));
+                            continue;
+                        }
+                    };
 
                     add_included_symbols(&table, &to_path, file, line, 1, &mut view);
                     view.sources.insert(to_path.clone(), child_source.clone());
@@ -291,24 +341,24 @@ impl MergedView {
                         cache_dir,
                         &mut visited,
                         &mut view,
-                    )?;
+                    );
                 }
                 Err(e) => {
                     let root = match &e {
                         crate::workspace::ResolveError::NotFound { root, .. } => *root,
                         crate::workspace::ResolveError::UnknownIncludeRoot => IncludeRoot::Ai,
                     };
-                    view.missing.push(IncludeDiagnostic {
+                    view.missing.push(IncludeDiagnostic::missing(
                         target,
-                        from: file.to_path_buf(),
+                        file.to_path_buf(),
                         root,
                         range,
-                    });
+                    ));
                 }
             }
         }
 
-        Ok(view)
+        view
     }
 
     /// Find a merged symbol by exact name. Later declarations shadow earlier
@@ -329,9 +379,28 @@ impl MergedView {
         &self.graph
     }
 
-    /// Diagnostics for include targets that could not be resolved.
+    /// All include diagnostics: missing targets, unreadable targets, and
+    /// any future reason a target could not be folded into scope.
     pub fn missing_includes(&self) -> &[IncludeDiagnostic] {
         &self.missing
+    }
+
+    /// Include targets that could not be resolved (no file at the resolved
+    /// relative path). This is a convenience filter over [`Self::missing_includes`].
+    pub fn unresolved_includes(&self) -> impl Iterator<Item = &IncludeDiagnostic> {
+        self.missing
+            .iter()
+            .filter(|d| d.kind == IncludeDiagnosticKind::Missing)
+    }
+
+    /// Include targets that exist on disk but failed to read or parse
+    /// (binary `.xs` random-map data, permissions errors, parse failure).
+    /// The merged view was still built for the rest of the file; these
+    /// targets were just omitted from the closure.
+    pub fn unreadable_includes(&self) -> impl Iterator<Item = &IncludeDiagnostic> {
+        self.missing
+            .iter()
+            .filter(|d| d.kind == IncludeDiagnosticKind::Unreadable)
     }
 
     /// The analysed file's own symbol table.
@@ -381,7 +450,7 @@ fn walk_includes(
     cache_dir: &Path,
     visited: &mut HashSet<PathBuf>,
     view: &mut MergedView,
-) -> Result<(), MergeError> {
+) {
     let rel = relative_path_for(project, workspace, file);
     let tree = parser::parse(source);
     let directives = tree
@@ -407,46 +476,66 @@ fn walk_includes(
                 }
 
                 let rel = relative_path_for(project, workspace, &to_path);
-                let table = cache::load_or_parse_symbols(&to_path, &rel, cache_dir)
-                    .with_context(|| {
-                        format!("loading symbol table for {}", to_path.display())
-                    })
-                    .map_err(|e| MergeError::Io {
-                        path: to_path.clone(),
-                        source: e,
-                    })?;
-                let child_source = std::fs::read_to_string(&to_path)
-                    .with_context(|| format!("reading source for {}", to_path.display()))
-                    .map_err(|e| MergeError::Io {
-                        path: to_path.clone(),
-                        source: e,
-                    })?;
+                let table = match cache::load_or_parse_symbols(&to_path, &rel, cache_dir) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "merged_view",
+                            include = %to_path.display(),
+                            error = %e,
+                            "skipping bad include target (load_or_parse_symbols failed)"
+                        );
+                        view.missing.push(IncludeDiagnostic::unreadable(
+                            target,
+                            file.to_path_buf(),
+                            edge.root,
+                            range,
+                        ));
+                        continue;
+                    }
+                };
+                let child_source = match std::fs::read_to_string(&to_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "merged_view",
+                            include = %to_path.display(),
+                            error = %e,
+                            "skipping bad include target (could not read source)"
+                        );
+                        view.missing.push(IncludeDiagnostic::unreadable(
+                            target,
+                            file.to_path_buf(),
+                            edge.root,
+                            range,
+                        ));
+                        continue;
+                    }
+                };
 
                 add_included_symbols(&table, &to_path, file, line, depth + 1, view);
                 view.sources.insert(to_path.clone(), child_source.clone());
                 view.tables.insert(to_path.clone(), table);
 
-                    walk_includes(
-                        &to_path, &child_source, depth + 1, workspace, project, cache_dir, visited,
-                        view,
-                    )?;
+                walk_includes(
+                    &to_path, &child_source, depth + 1, workspace, project, cache_dir, visited,
+                    view,
+                );
             }
             Err(e) => {
                 let root = match &e {
                     crate::workspace::ResolveError::NotFound { root, .. } => *root,
                     crate::workspace::ResolveError::UnknownIncludeRoot => IncludeRoot::Ai,
                 };
-                view.missing.push(IncludeDiagnostic {
+                view.missing.push(IncludeDiagnostic::missing(
                     target,
-                    from: file.to_path_buf(),
+                    file.to_path_buf(),
                     root,
                     range,
-                });
+                ));
             }
         }
     }
-
-    Ok(())
 }
 
 fn add_included_symbols(
@@ -503,7 +592,7 @@ fn relative_path_for(project: &VirtualProject, workspace: &Workspace, abs_path: 
 mod tests {
     use super::*;
     use crate::symbols;
-    use crate::workspace::Workspace;
+    use crate::workspace::{VirtualProject as WorkspaceVirtualProject, Workspace};
     use tempfile::TempDir;
     use tower_lsp::lsp_types::Url;
 
@@ -524,7 +613,7 @@ mod tests {
         let tree = parser::parse(&source).unwrap();
         let own = symbols::build_symbol_table(&tree, &source);
         let cache_dir = TempDir::new().unwrap();
-        MergedView::build(file, &source, &own, &ws, &project, cache_dir.path()).unwrap()
+        MergedView::build(file, &source, &own, &ws, &project, cache_dir.path())
     }
 
     #[test]
@@ -714,5 +803,156 @@ mod tests {
         let key2 = MergedViewCacheKey::new("void main() {}", &view2);
 
         assert_ne!(key1, key2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Robustness: a single bad include target must not abort the merged-view
+    // build. These tests are the regression guard for the user's complaint:
+    //   "The LSP needs to be more robust, it can't give up on every single
+    //    bad file. If a file fails to parse, it should simply output an
+    //    error message, then temporarily exclude that file from compilation."
+    // -----------------------------------------------------------------------
+
+    /// Build a `MergedView` for a fake `game/random_maps/` includer that
+    /// includes a sibling `.xs` file. The directory choice matters: under
+    /// `game/random_maps/` the include-root is `RandomMap`, so includes
+    /// like `"binary_target.xs"` resolve to `random_maps/binary_target.xs`
+    /// in the same directory. The include target is written BEFORE the
+    /// build runs (see `include_target_bytes` parameter), so the build can
+    /// find it on disk.
+    fn build_random_map_view(
+        includer_content: &str,
+        include_target_filename: &str,
+        include_target_bytes: Option<&[u8]>,
+    ) -> MergedView {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let rm_dir = root.join("game").join("random_maps");
+        std::fs::create_dir_all(&rm_dir).unwrap();
+
+        let includer = rm_dir.join("test_map.xs");
+        std::fs::write(&includer, includer_content).unwrap();
+
+        if let Some(bytes) = include_target_bytes {
+            let target = rm_dir.join(include_target_filename);
+            std::fs::write(&target, bytes).unwrap();
+        }
+
+        let ws = Workspace::new(root.to_path_buf());
+        let project = WorkspaceVirtualProject::default();
+        let source = std::fs::read_to_string(&includer).unwrap();
+        let tree = parser::parse(&source).unwrap();
+        let own = crate::symbols::build_symbol_table(&tree, &source);
+        let cache_dir = TempDir::new().unwrap();
+        MergedView::build(&includer, &source, &own, &ws, &project, cache_dir.path())
+    }
+
+    /// A `.xs` include target whose contents are binary garbage (the AoM:R
+    /// `game/random_maps/*.xs` random-map case) MUST NOT abort the
+    /// merged-view build. The view must still contain the includer's own
+    /// symbols and the bad include must be reported as an
+    /// `Unreadable` diagnostic.
+    #[test]
+    fn build_succeeds_when_include_target_is_binary_xs() {
+        let view = build_random_map_view(
+            "void ownFn() {}\ninclude \"aso_grasslands.xs\";\n",
+            "aso_grasslands.xs",
+            Some(&[0xff, 0xfe, 0x00, 0xab, 0xcd, 0xef, 0x01]),
+        );
+
+        // The own-file symbol must still be present.
+        assert!(
+            view.find("ownFn").is_some(),
+            "own-file symbols must be present even when an include target is unreadable"
+        );
+
+        // The bad include must be recorded as an Unreadable diagnostic.
+        let unreadable_targets: Vec<&str> = view
+            .unreadable_includes()
+            .map(|d| d.target.as_str())
+            .collect();
+        assert!(
+            unreadable_targets.contains(&"aso_grasslands.xs"),
+            "bad include target should be reported as Unreadable, got {unreadable_targets:?}"
+        );
+
+        // The merged view's own symbol table must be intact.
+        assert!(view.own_table().find("ownFn").is_some());
+    }
+
+    /// A missing include target (the file does not exist on disk at all)
+    /// MUST NOT abort the merged-view build. It is reported as a `Missing`
+    /// diagnostic; the rest of the file's symbols are still in scope.
+    #[test]
+    fn build_succeeds_when_include_target_is_missing() {
+        let view = build_random_map_view(
+            "void ownFn() {}\ninclude \"never_exists.xs\";\n",
+            "never_exists.xs",
+            None, // do not write the target file at all
+        );
+
+        // No panic, no Result-returning signature: build() returned a MergedView.
+        // Own-file symbols must still be present.
+        assert!(
+            view.find("ownFn").is_some(),
+            "own-file symbols must be present when an include target is missing"
+        );
+
+        let missing_targets: Vec<&str> = view
+            .unresolved_includes()
+            .map(|d| d.target.as_str())
+            .collect();
+        assert!(
+            missing_targets.contains(&"never_exists.xs"),
+            "missing include target should be reported as Missing, got {missing_targets:?}"
+        );
+    }
+
+    /// `walk_includes` (the recursive helper) is exercised transitively
+    /// through `build`. A bad include target deep in a transitive include
+    /// chain must not abort the build either: the sibling good include
+    /// still contributes its symbols, and the bad one is recorded as
+    /// `Unreadable`.
+    #[test]
+    fn walk_includes_skips_unreadable_includes() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // All files under `game/ai/` so the include-root is `Ai` and
+        // resolves relative to that prefix.
+        let a = root.join("game").join("ai").join("a.xs");
+        let b = root.join("game").join("ai").join("b.xs");
+        let c = root.join("game").join("ai").join("c.xs");
+
+        write(&a, "include \"b.xs\";\nvoid aFn() {}\n").unwrap();
+        write(&b, "include \"c.xs\";\nvoid bFn() {}\n").unwrap();
+        // c.xs exists as a binary blob — the recursive walker should skip it.
+        std::fs::write(&c, [0xffu8, 0xfe, 0x00, 0xab, 0xcd]).unwrap();
+
+        let ws = Workspace::new(root.to_path_buf());
+        let project = WorkspaceVirtualProject::default();
+        let source = std::fs::read_to_string(&a).unwrap();
+        let tree = parser::parse(&source).unwrap();
+        let own = crate::symbols::build_symbol_table(&tree, &source);
+        let cache_dir = TempDir::new().unwrap();
+
+        let view = MergedView::build(&a, &source, &own, &ws, &project, cache_dir.path());
+
+        assert!(
+            view.find("aFn").is_some(),
+            "own-file symbol must be present"
+        );
+        assert!(
+            view.find("bFn").is_some(),
+            "transitively-included text file's symbol must be present even when a sibling include target is unreadable"
+        );
+
+        let unreadable: Vec<&str> = view
+            .unreadable_includes()
+            .map(|d| d.target.as_str())
+            .collect();
+        assert!(
+            unreadable.contains(&"c.xs"),
+            "transitive bad include target should be reported as Unreadable, got {unreadable:?}"
+        );
     }
 }

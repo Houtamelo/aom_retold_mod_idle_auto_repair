@@ -333,7 +333,7 @@ fn collect_overlay_files(
             }
             collect_overlay_files(overlay_root, &path, out);
         } else if path.is_file() {
-            if !is_xs_file(&path) {
+            if !is_readable_xs_file(&path) {
                 continue;
             }
             let Some(rel) = relativize(overlay_root, &path) else {
@@ -362,7 +362,7 @@ fn walk_game_files(
             if path.is_dir() {
                 walk(base, &path, out, overrides);
             } else if path.is_file() {
-                if !is_xs_file(&path) {
+                if !is_readable_xs_file(&path) {
                     continue;
                 }
                 if let Some(rel) = relativize(base, &path) {
@@ -379,19 +379,48 @@ fn walk_game_files(
     out
 }
 
-/// True if `path` is a file the LSP should treat as XS source. The shipped
-/// AoM:R game folder and user mods contain many non-XS files (binary
-/// `.bar` asset archives for art/UI/audio, `.dtt` data tables, `.xml`
-/// strings, `.png`/`.dds` textures, etc.). Including those in workspace
-/// walks caused the LSP to attempt to hash them as UTF-8 text and crash
-/// with a `stream did not contain valid UTF-8` error the moment any
-/// semantic check ran against a real mod file. Filter at every entry
+/// True if `path` is a file the LSP should treat as XS source.
+///
+/// The shipped AoM:R game folder and user mods contain many non-XS files
+/// (binary `.bar` asset archives for art/UI/audio, `.dtt` data tables,
+/// `.xml` strings, `.png`/`.dds` textures, etc.). Including those in
+/// workspace walks caused the LSP to attempt to hash them as UTF-8 text
+/// and crash with a `stream did not contain valid UTF-8` error the moment
+/// any semantic check ran against a real mod file. Filter at every entry
 /// point so the LSP never reads a non-`.xs` file as source.
 pub fn is_xs_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case("xs"))
         .unwrap_or(false)
+}
+
+/// True if `path` is an `.xs` file AND its first 64 KiB decode as valid
+/// UTF-8. AoM:R ships 20 files under `game/random_maps/` with a `.xs`
+/// extension that are actually binary serialised data (custom AoM:R
+/// format, not XS source); the engine parses them differently and the
+/// LSP must skip them too, not just non-`.xs` artefacts.
+///
+/// We only probe the head because:
+///   1. A valid UTF-8 BOM / leading comment is always present in real
+///      XS files, so 64 KiB is more than enough to discriminate.
+///   2. Random-map files start with binary bytes within the first
+///      hundred bytes, so a tiny probe catches them cheaply.
+///   3. Avoiding a full read keeps the workspace walk cheap across
+///      the game folder's hundreds of files.
+pub fn is_readable_xs_file(path: &Path) -> bool {
+    if !is_xs_file(path) {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    let mut buf = [0u8; 65536];
+    let Ok(n) = f.read(&mut buf) else {
+        return false;
+    };
+    std::str::from_utf8(&buf[..n]).is_ok()
 }
 
 /// Compute the POSIX-style relative path of `file` with respect to `base`,
@@ -812,5 +841,88 @@ mod tests {
         assert!(!is_xs_file(Path::new("/x/y/foo.bar")));
         assert!(!is_xs_file(Path::new("/x/y/foo")));
         assert!(!is_xs_file(Path::new("/x/y/foo.txt")));
+    }
+
+    /// Regression guard for `is_readable_xs_file`: a `.xs` file with valid
+    /// UTF-8 contents (the normal case for engine XS source) MUST be
+    /// accepted; a `.xs` file whose first 64 KiB are invalid UTF-8 (the
+    /// AoM:R random-map serialised binary case) MUST be rejected.
+    #[test]
+    fn is_readable_xs_file_rejects_binary_xs() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("binary.xs");
+        std::fs::write(&path, [0xffu8, 0xfe, 0x00, 0xab, 0xcd]).unwrap();
+        assert!(
+            !is_readable_xs_file(&path),
+            "binary .xs file must be rejected by is_readable_xs_file"
+        );
+    }
+
+    #[test]
+    fn is_readable_xs_file_accepts_text_xs() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("text.xs");
+        std::fs::write(&path, "// a normal XS file\nvoid helper() {}\n").unwrap();
+        assert!(
+            is_readable_xs_file(&path),
+            "text .xs file must be accepted by is_readable_xs_file"
+        );
+    }
+
+    /// A `.xs` file that cannot be opened at all (e.g. broken symlink, race
+    /// with deletion) must not crash the walker — it must be silently
+    /// rejected. The walker relies on this for resilience.
+    #[test]
+    fn is_readable_xs_file_rejects_nonexistent_path() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("does_not_exist.xs");
+        assert!(!is_readable_xs_file(&path));
+    }
+
+    /// End-to-end resilience guard for `walk_game_files`: a fake game
+    /// folder containing a mix of valid and binary `.xs` files MUST return
+    /// only the valid ones. This is the regression test for the user's
+    /// "LSP can't give up on every single bad file" complaint — without
+    /// the UTF-8 head probe, every binary `.xs` would have crashed the
+    /// semantic pipeline.
+    #[test]
+    fn walk_game_files_skips_binary_xs() {
+        let tmp = TempDir::new().unwrap();
+        let game_root = tmp.path().join("game");
+        std::fs::create_dir_all(game_root.join("ai")).unwrap();
+        std::fs::create_dir_all(game_root.join("random_maps")).unwrap();
+
+        // Valid text XS file in `ai/`.
+        let good = game_root.join("ai").join("human_assist.xs");
+        std::fs::write(&good, "void helper() {}\n").unwrap();
+
+        // Binary `.xs` random-map file (mimicking the AoM:R random_maps/ layout).
+        let bad = game_root.join("random_maps").join("aso_grasslands.xs");
+        std::fs::write(&bad, [0xffu8, 0xfe, 0x00, 0xab, 0xcd, 0xef, 0x01]).unwrap();
+
+        // Empty `.xs` file (0 bytes — `from_utf8(&[])` is Ok). Still accepted
+        // by `is_readable_xs_file` since the head probe reads 0 bytes which
+        // trivially decodes as UTF-8. The walker returns it; an empty file
+        // is not an LSP-breaking input.
+        let empty = game_root.join("ai").join("empty.xs");
+        std::fs::write(&empty, b"").unwrap();
+
+        let overrides = HashMap::new();
+        let files = walk_game_files(&game_root, &overrides);
+        let rels: std::collections::HashSet<String> =
+            files.iter().map(|(r, _)| r.clone()).collect();
+
+        assert!(
+            rels.contains("ai/human_assist.xs"),
+            "valid .xs file must be present, got {rels:?}"
+        );
+        assert!(
+            rels.contains("ai/empty.xs"),
+            "empty .xs file is accepted by the head probe, got {rels:?}"
+        );
+        assert!(
+            !rels.contains("random_maps/aso_grasslands.xs"),
+            "binary .xs file must be skipped, got {rels:?}"
+        );
     }
 }

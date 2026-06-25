@@ -547,7 +547,7 @@ void test() { takeInt(3.14); }"#;
         let own = table.clone();
         let cache_dir = TempDir::new().unwrap();
         let merged =
-            MergedView::build(&a, &source_a, &own, &ws, &project, cache_dir.path()).unwrap();
+            MergedView::build(&a, &source_a, &own, &ws, &project, cache_dir.path());
 
         let diags = check_calls_with_merged(&tree, &source_a, &engine(), &table, Some(&merged), None);
         let msgs = messages(&diags);
