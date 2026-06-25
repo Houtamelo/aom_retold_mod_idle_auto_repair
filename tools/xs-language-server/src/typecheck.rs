@@ -24,6 +24,7 @@
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
 use crate::engine_api::{EngineApi, Param};
+use crate::merged_view::MergedView;
 use crate::symbols::SymbolTable;
 
 /// Walk `tree` and return one `Diagnostic` per wrong-arg-count or
@@ -35,8 +36,21 @@ pub fn check_calls(
     table: &SymbolTable,
     project: Option<&crate::semantic::VirtualProject>,
 ) -> Vec<Diagnostic> {
+    check_calls_with_merged(tree, source, engine, table, None, project)
+}
+
+/// Like [`check_calls`], but resolves user-defined callees through the
+/// merged include-paste scope first, falling back to the full project.
+pub fn check_calls_with_merged(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    engine: &EngineApi,
+    table: &SymbolTable,
+    merged: Option<&MergedView>,
+    project: Option<&crate::semantic::VirtualProject>,
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    walk(tree.root_node(), source, engine, table, project, &mut out);
+    walk(tree.root_node(), source, engine, table, merged, project, &mut out);
     out
 }
 
@@ -45,15 +59,16 @@ fn walk(
     source: &str,
     engine: &EngineApi,
     table: &SymbolTable,
+    merged: Option<&MergedView>,
     project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
     if node.kind() == "call_expression" {
-        check_one_call(node, source, engine, table, project, out);
+        check_one_call(node, source, engine, table, merged, project, out);
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        walk(child, source, engine, table, project, out);
+        walk(child, source, engine, table, merged, project, out);
     }
 }
 
@@ -62,6 +77,7 @@ fn check_one_call(
     source: &str,
     engine: &EngineApi,
     table: &SymbolTable,
+    merged: Option<&MergedView>,
     project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -74,7 +90,7 @@ fn check_one_call(
     let resolved: Option<Callee<'_>> = if let Some(syscall) = engine.find_syscall(&callee) {
         Some(Callee::Engine(syscall))
     } else {
-        project.and_then(|p| resolve_workspace_function(p, &callee)).map(Callee::Workspace)
+        resolve_workspace_function(merged, project, &callee).map(Callee::Workspace)
     };
 
     let Some(target) = resolved else { return };
@@ -166,6 +182,17 @@ impl<'a> Callee<'a> {
 }
 
 fn resolve_workspace_function<'a>(
+    merged: Option<&'a MergedView>,
+    project: Option<&'a crate::semantic::VirtualProject>,
+    name: &str,
+) -> Option<&'a crate::symbols::Symbol> {
+    if let Some(ms) = merged.and_then(|mv| mv.find(name)) {
+        return Some(&ms.symbol);
+    }
+    project.and_then(|p| resolve_workspace_function_project(p, name))
+}
+
+fn resolve_workspace_function_project<'a>(
     project: &'a crate::semantic::VirtualProject,
     name: &str,
 ) -> Option<&'a crate::symbols::Symbol> {
@@ -278,7 +305,13 @@ fn find_named_child<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::path::PathBuf;
+
+    use tempfile::TempDir;
+
+    use crate::merged_view::MergedView;
+    use crate::workspace::{VirtualProject as WorkspaceVirtualProject, Workspace};
 
     fn engine() -> &'static EngineApi {
         use std::sync::OnceLock;
@@ -489,6 +522,38 @@ void test() { takeInt(3.14); }"#;
         assert!(
             msgs.iter().any(|m| m.contains("expected argument 1 of type `int`") && m.contains("got `float`")),
             "expected float->int loss error, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn flags_wrong_arg_type_for_included_workspace_function() {
+        // Scenario 11/12 cross-cutting: a call into an included file uses the
+        // included function's parameter types.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let a = root.join("game").join("ai").join("a.xs");
+        let b = root.join("game").join("ai").join("b.xs");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+        std::fs::write(&a, "include \"b.xs\";\nvoid test() { helper(\"oops\"); }\n").unwrap();
+        std::fs::write(&b, "void helper(int x) {}\n").unwrap();
+
+        let ws = Workspace::new(root.to_path_buf());
+        let project = WorkspaceVirtualProject::default();
+        let source_a = std::fs::read_to_string(&a).unwrap();
+        let tree = parse(&source_a);
+        let table = table_for(&source_a);
+        let own = table.clone();
+        let cache_dir = TempDir::new().unwrap();
+        let merged =
+            MergedView::build(&a, &source_a, &own, &ws, &project, cache_dir.path()).unwrap();
+
+        let diags = check_calls_with_merged(&tree, &source_a, &engine(), &table, Some(&merged), None);
+        let msgs = messages(&diags);
+        assert!(
+            msgs.iter().any(|m| m.contains("expected argument 1 of type `int`") && m.contains("got `string`")),
+            "expected type error from included function, got: {:?}",
             msgs
         );
     }
