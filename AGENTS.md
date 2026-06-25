@@ -90,11 +90,31 @@ The plugin is now a thin LSP client. Settings live under **Settings → Language
 - **Mod paths** are stored project-local. Add them manually or click **Auto-detect mods**.
 - **Auto-detect** recursively scans the project for directories named exactly `game` and stops recursion at each `game/` boundary. The parent of each found `game/` directory is added as a mod root.
 
+### Plugin version bump policy
+
+**Always bump `pluginVersion` in `tools/intellij-xs-plugin/gradle.properties` for any commit that affects the bundled plugin artifact.** The plugin artifact is affected by changes to **any** of:
+
+- `tools/intellij-xs-plugin/` — Kotlin sources, `plugin.xml`, `build.gradle.kts`, `gradle.properties`, `package.json`, `syntaxes/xs.tmLanguage.json`
+- `tools/xs-language-server/` — Rust sources, `tools/xs-language-server/tree-sitter-xs/` grammar, `Cargo.toml`, `Cargo.lock`
+- `tools/intellij-xs-plugin/src/main/resources/bin/` — bundled LSP binary staging area (gitignored; replaced at build by `copyLspServerToResources`)
+
+The `copyLspServerToResources` Gradle task always picks up whatever LSP release binary is on disk. Without a version bump, two `.zip` files can have the same `pluginVersion=0.1.2` but contain different LSP binaries — users have no way to tell which is which.
+
+**Bump strategy:**
+
+| Change kind                                   | Bump           | Example       |
+| -------------------------------------------- | -------------- | ------------- |
+| Bug fix (no new features, no API change)        | Patch           | 0.1.2 → 0.1.3 |
+| New LSP feature, new settings UI, new grammar scope, new test coverage | Minor | 0.1.x → 0.2.0 |
+| Breaking API change, Kotlin/Gradle/IntelliJ Platform major version bump | Major | 0.x.0 → 1.0.0 |
+
+The plugin's `build.gradle.kts:12` picks up the version via `providers.gradleProperty("pluginVersion").get()`, so changing `gradle.properties` is enough — no other file needs editing.
+
 ### For `tools/xs-language-server/`
 
 1. Edit Rust sources under `tools/xs-language-server/src/`
 2. `cargo build` to build
-3. `cargo test` for unit tests (75 tests)
+3. `cargo test` for unit tests (109 tests as of 2026-06-25)
 4. `cargo run --bin lsp_roundtrip_test` for the end-to-end LSP message sequence
 5. **Game folder integration test** (optional, requires the game installed):
    ```bash
@@ -102,8 +122,8 @@ The plugin is now a thin LSP client. Settings live under **Settings → Language
      cargo test --manifest-path tools/xs-language-server/Cargo.toml \
        --test game_folder_parse -- --nocapture
    ```
-   Walks `game/**/*.xs` (302 parseable files), asserts no unexpected parse errors, asserts every file resolves through the `Workspace`, and asserts the semantic pipeline produces a bounded number of unresolved-symbol diagnostics (the threshold accounts for the known include-paste approximation; see `docs/blockers/pending-task-include-paste.md`). The three tests skip cleanly if `AOMR_GAME_PATH` is not set, so plain `cargo test` on CI still passes.
-6. Integration test: open the IntelliJ plugin and verify diagnostics arrive for a mod `.xs` file
+   Walks `game/**/*.xs` (302 parseable files, 20 binary `.xs` skipped via UTF-8 head probe), asserts no unexpected parse errors, asserts every file resolves through the `Workspace`, and asserts the semantic pipeline produces 0 unresolved-symbol diagnostics (threshold is 0 after the include-paste fix; was 5,335 before). The three tests skip cleanly if `AOMR_GAME_PATH` is not set, so plain `cargo test` on CI still passes.
+6. Integration test: open the IntelliJ plugin and verify diagnostics arrive for a mod `.xs` file. The LSP writes its log to `<project>/.idea/xs-lsp.log` (stderr is redirected there — was previously merged into stdout and silently dropped).
 
 The server caches extracted engine API data under `~/.local/state/aomr_lsp/v2/` (or `~/.aomr_lsp/v2/` if `XDG_STATE_HOME` is unavailable). The cache key is the SHA-256 of `doxygen_retail.7z`; warm starts load the cached JSON directly instead of re-extracting the archive. The `v2/` schema was introduced when the legacy JSON backfill was removed in Phase 5; older `v1/` cache files are ignored.
 
