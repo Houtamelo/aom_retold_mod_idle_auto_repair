@@ -866,4 +866,157 @@ mod tests {
         let diags = check_mutable_redefinitions_for_merged_view(&merged);
         assert!(diags.iter().any(|d| d.message.contains("different signature")));
     }
+
+    // -----------------------------------------------------------------------
+    // Include-paste semantic fixtures (T11)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn direct_include_resolves_symbol() {
+        // Scenario 4: a file that includes include_helper.xs can call helper().
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                (
+                    "ai/include_forward_decl_ok.xs",
+                    include_str!("semantic_fixtures/include_forward_decl_ok.xs"),
+                ),
+                (
+                    "ai/include_helper.xs",
+                    include_str!("semantic_fixtures/include_helper.xs"),
+                ),
+            ],
+            "ai/include_forward_decl_ok.xs",
+        );
+        assert!(
+            merged.find("helper").is_some(),
+            "helper should be visible in the merged view"
+        );
+        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        assert!(diags.is_empty(), "direct include should resolve, got {diags:?}");
+    }
+
+    #[test]
+    fn transitive_include_resolves_symbol() {
+        // Scenario 5: a includes forward_decl_ok (which includes helper);
+        // helper is visible transitively.
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                (
+                    "ai/transitive.xs",
+                    "include \"include_forward_decl_ok.xs\";\nvoid caller() { helper(); }\n",
+                ),
+                (
+                    "ai/include_forward_decl_ok.xs",
+                    include_str!("semantic_fixtures/include_forward_decl_ok.xs"),
+                ),
+                (
+                    "ai/include_helper.xs",
+                    include_str!("semantic_fixtures/include_helper.xs"),
+                ),
+            ],
+            "ai/transitive.xs",
+        );
+        let ms = merged
+            .find("helper")
+            .expect("helper should be visible transitively");
+        assert!(
+            matches!(
+                ms.provenance,
+                VisibilityProvenance::TransitiveInclude { depth: 2, .. }
+            ),
+            "helper should be a depth-2 transitive include, got {:?}",
+            ms.provenance
+        );
+        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        assert!(
+            diags.is_empty(),
+            "transitive include should resolve, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn cycle_includes_do_not_loop() {
+        // Scenario 6: a <-> b include cycle terminates cleanly.
+        let (_tmp, _prj, merged, _current) = merged_fixture(
+            &[
+                (
+                    "ai/include_cycle_a.xs",
+                    include_str!("semantic_fixtures/include_cycle_a.xs"),
+                ),
+                (
+                    "ai/include_cycle_b.xs",
+                    include_str!("semantic_fixtures/include_cycle_b.xs"),
+                ),
+            ],
+            "ai/include_cycle_a.xs",
+        );
+        assert!(merged.graph().is_cyclic(), "cycle should be detected");
+        assert!(merged.find("aFn").is_some(), "own symbol should be present");
+        assert!(merged.find("bFn").is_some(), "included symbol should be present");
+        // Symbols from the cycle should appear exactly once due to the visited set.
+        let a_count = merged
+            .symbols()
+            .iter()
+            .filter(|ms| ms.symbol.name == "aFn")
+            .count();
+        let b_count = merged
+            .symbols()
+            .iter()
+            .filter(|ms| ms.symbol.name == "bFn")
+            .count();
+        assert_eq!(a_count, 1);
+        assert_eq!(b_count, 1);
+    }
+
+    #[test]
+    fn missing_include_target_produces_diagnostic() {
+        // Scenario 7: include_missing.xs includes nonexistent.xs.
+        let (_tmp, _prj, merged, _current) = merged_fixture(
+            &[
+                (
+                    "ai/include_missing.xs",
+                    include_str!("semantic_fixtures/include_missing.xs"),
+                ),
+                (
+                    "ai/include_helper.xs",
+                    include_str!("semantic_fixtures/include_helper.xs"),
+                ),
+            ],
+            "ai/include_missing.xs",
+        );
+        let missing_targets: Vec<_> = merged
+            .missing_includes()
+            .iter()
+            .map(|d| d.target.clone())
+            .collect();
+        assert!(
+            missing_targets.contains(&"nonexistent.xs".to_string()),
+            "missing target diagnostic should mention nonexistent.xs, got {missing_targets:?}"
+        );
+        // The other include should still resolve.
+        assert!(merged.find("helper").is_some());
+    }
+
+    #[test]
+    fn static_symbol_in_included_file_is_hidden() {
+        // Scenario 9 variant: static gHidden from the included file must not
+        // be visible in the includer's merged scope.
+        let (_tmp, _prj, merged, _current) = merged_fixture(
+            &[
+                (
+                    "ai/include_static_hidden.xs",
+                    include_str!("semantic_fixtures/include_static_hidden.xs"),
+                ),
+                (
+                    "ai/include_static_helper.xs",
+                    include_str!("semantic_fixtures/include_static_helper.xs"),
+                ),
+            ],
+            "ai/include_static_hidden.xs",
+        );
+        assert!(
+            merged.find("gHidden").is_none(),
+            "static variable from included file should be hidden"
+        );
+    }
 }
