@@ -5,13 +5,11 @@
 //! cursor over `[A-Za-z0-9_]` characters and treat that as the prefix.
 //! Phase 3 adds workspace symbols to the item list and scopes them by file.
 
-use std::path::{Path, PathBuf};
-
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionParams};
 
 use crate::engine_api::EngineApi;
-use crate::semantic::VirtualProject;
-use crate::symbols::{Symbol, SymbolKind, Visibility};
+use crate::merged_view::MergedView;
+use crate::symbols::{Symbol, SymbolKind};
 
 /// Return the identifier prefix immediately before the cursor, or `""`.
 pub fn prefix_at_cursor(text: &str, line: u32, character: u32) -> String {
@@ -74,10 +72,13 @@ fn aiplan_item(c: &crate::engine_api::AiplanConstant) -> CompletionItem {
 }
 
 /// Compute the completion list for the cursor position.
+///
+/// `merged` is the textual-paste scope for the file being edited. It already
+/// contains the current file's symbols and the visibility-filtered symbols
+/// from every resolved include, so no project-wide fallback is needed.
 pub fn complete(
     api: &EngineApi,
-    project: Option<&VirtualProject>,
-    current_file: Option<&Path>,
+    merged: Option<&MergedView>,
     text: &str,
     params: &CompletionParams,
 ) -> Vec<CompletionItem> {
@@ -89,63 +90,23 @@ pub fn complete(
         .collect();
     items.extend(api.matching_aiplans(&prefix).map(aiplan_item));
 
-    if let Some(p) = project {
-        add_project_symbols(p, current_file, &prefix, &mut items);
+    if let Some(mv) = merged {
+        items.extend(complete_merged(mv, &prefix));
     }
 
     items
 }
 
-fn add_project_symbols(
-    project: &VirtualProject,
-    current_file: Option<&Path>,
-    prefix: &str,
-    items: &mut Vec<CompletionItem>,
-) {
-    // Files included by the current file expose all their symbols; other
-    // files only expose `extern` symbols.
-    let included = included_files(text_of_current(project, current_file));
-
-    for (path, file) in &project.files {
-        let is_current = current_file.map(|c| c == path).unwrap_or(false);
-        let is_included = included.iter().any(|target| path.ends_with(target));
-        for sym in &file.table.symbols {
-            if is_current || is_included || sym.visibility == Visibility::Extern {
-                if !prefix.is_empty() && !sym.name.starts_with(prefix) {
-                    continue;
-                }
-                items.push(symbol_to_completion_item(sym));
-            }
-        }
-    }
-}
-
-fn text_of_current<'a>(
-    project: &'a VirtualProject,
-    current_file: Option<&Path>,
-) -> Option<&'a String> {
-    let cf = current_file?;
-    project.files.get(cf).map(|f| &f.source)
-}
-
-/// Very lightweight include extraction: scan `source` for
-/// `include "path/to/file.xs";` and return the set of relative targets.
-fn included_files(source: Option<&String>) -> std::collections::HashSet<PathBuf> {
-    use std::collections::HashSet;
-    let mut out = HashSet::new();
-    let Some(source) = source else { return out };
-    for line in source.lines() {
-        let line = line.trim();
-        if !line.starts_with("include") {
-            continue;
-        }
-        // Extract the quoted substring.
-        let Some(start) = line.find('"') else { continue };
-        let Some(end) = line[start + 1..].find('"') else { continue };
-        let target = &line[start + 1..start + 1 + end];
-        out.insert(Path::new(target).to_path_buf());
-    }
-    out
+/// Build completion items from the merged include-paste scope.
+///
+/// `MergedView` already filters visibility (`static`/file-local variables
+/// from includes are hidden; `extern` variables and public functions are
+/// kept), so we only need to match the prefix.
+fn complete_merged(merged: &MergedView, prefix: &str) -> Vec<CompletionItem> {
+    merged
+        .matching(prefix)
+        .map(|ms| symbol_to_completion_item(&ms.symbol))
+        .collect()
 }
 
 fn symbol_to_completion_item(sym: &Symbol) -> CompletionItem {
@@ -166,8 +127,14 @@ fn symbol_to_completion_item(sym: &Symbol) -> CompletionItem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::path::PathBuf;
+
+    use tempfile::TempDir;
+
+    use crate::merged_view::MergedView;
+    use crate::parser;
+    use crate::symbols;
+    use crate::workspace::{VirtualProject, Workspace};
 
     fn api() -> EngineApi {
         EngineApi::default()
@@ -188,75 +155,94 @@ mod tests {
         }
     }
 
-    fn project(files: &[(&str, &str)]) -> VirtualProject {
-        let map: HashMap<PathBuf, String> = files
-            .iter()
-            .map(|(p, s)| (PathBuf::from(p), s.to_string()))
-            .collect();
-        VirtualProject::from_files(map)
-    }
-
     fn labels(items: &[CompletionItem]) -> Vec<&str> {
         items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    /// Build a `MergedView` for a fixture file under a temporary `game/` root.
+    fn build_merged_view(current_rel: &str, current_src: &str, extra: &[(&str, &str)]) -> MergedView {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let current = root.join("game").join(current_rel);
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, current_src).unwrap();
+        for (rel, src) in extra {
+            let path = root.join("game").join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, src).unwrap();
+        }
+
+        let ws = Workspace::new(root.to_path_buf());
+        let project = VirtualProject::default();
+        let source = std::fs::read_to_string(&current).unwrap();
+        let tree = parser::parse(&source).unwrap();
+        let own = symbols::build_symbol_table(&tree, &source);
+        let cache_dir = TempDir::new().unwrap();
+        MergedView::build(&current, &source, &own, &ws, &project, cache_dir.path()).unwrap()
     }
 
     #[test]
     fn current_file_symbols_are_included() {
         let src = "int gLocal = 1;\n";
-        let mut files = HashMap::new();
-        let current = PathBuf::from("current.xs");
-        files.insert(current.clone(), src.to_string());
-        let prj = VirtualProject::from_files(files);
-        let items = complete(&api(), Some(&prj), Some(&current), src, &params_at(0, 0));
+        let merged = build_merged_view("ai/current.xs", src, &[]);
+        let items = complete(&api(), Some(&merged), src, &params_at(1, 0));
         assert!(labels(&items).contains(&"gLocal"));
     }
 
     #[test]
-    fn extern_symbols_from_other_files_are_included() {
-        let prj = project(&[
-            ("current.xs", "void foo() {}\n"),
-            ("other.xs", "extern int gExported = 1;\nint gHidden = 2;\n"),
-        ]);
-        let current = PathBuf::from("current.xs");
-        let items = complete(&api(), Some(&prj), Some(&current), "", &params_at(0, 0));
+    fn included_file_symbols_are_offered() {
+        // Scenario 13: a.xs includes b.xs and b.xs defines a function.
+        let merged = build_merged_view(
+            "ai/a.xs",
+            "include \"b.xs\";\n",
+            &[("ai/b.xs", "void included() {}\n")],
+        );
+        let items = complete(&api(), Some(&merged), "", &params_at(1, 0));
         let labels = labels(&items);
-        assert!(labels.contains(&"gExported"), "extern symbol missing");
         assert!(
-            !labels.contains(&"gHidden"),
-            "file-local symbol from other file should be hidden"
+            labels.contains(&"included"),
+            "included function missing: {:?}",
+            labels
         );
     }
 
     #[test]
-    fn other_file_public_function_is_hidden() {
-        // Only `extern` symbols are exported across files; public functions
-        // from other files stay hidden.
-        let prj = project(&[
-            ("current.xs", "void foo() {}\n"),
-            ("other.xs", "void helper() {}\n"),
-        ]);
-        let current = PathBuf::from("current.xs");
-        let items = complete(&api(), Some(&prj), Some(&current), "", &params_at(0, 0));
+    fn included_visibility_filters_static_and_keeps_extern() {
+        let merged = build_merged_view(
+            "ai/a.xs",
+            "include \"b.xs\";\n",
+            &[(
+                "ai/b.xs",
+                "static int gHidden = 0;\nextern int gShared = 1;\n",
+            )],
+        );
+        let items = complete(&api(), Some(&merged), "", &params_at(1, 0));
         let labels = labels(&items);
-        assert!(!labels.contains(&"helper"), "other-file public function should be hidden");
-        assert!(labels.contains(&"foo"));
+        assert!(labels.contains(&"gShared"), "extern variable should be visible");
+        assert!(
+            !labels.contains(&"gHidden"),
+            "static variable from include should be hidden"
+        );
     }
 
     #[test]
-    fn prefix_filters_workspace_symbols() {
-        let prj = project(&[("current.xs", "int alpha = 1;\nint beta = 2;\n")]);
-        let current = PathBuf::from("current.xs");
-        let items = complete(&api(), Some(&prj), Some(&current), "", &params_at(0, 0));
-        // Filter down to prefix "al".
-        let filtered: Vec<_> = items.into_iter().filter(|i| i.label.starts_with("al")).collect();
-        let labels = labels(&filtered);
+    fn prefix_filters_included_symbols() {
+        let merged = build_merged_view(
+            "ai/a.xs",
+            "include \"b.xs\";\n",
+            &[("ai/b.xs", "void alpha() {}\nvoid beta() {}\n")],
+        );
+        // Cursor after the include line with prefix "al".
+        let text = "include \"b.xs\";\nal";
+        let items = complete(&api(), Some(&merged), text, &params_at(1, 2));
+        let labels = labels(&items);
         assert!(labels.contains(&"alpha"));
         assert!(!labels.contains(&"beta"));
     }
 
     #[test]
-    fn no_project_means_engine_api_only() {
-        let items = complete(&api(), None, None, "", &params_at(0, 0));
+    fn no_merged_view_means_engine_api_only() {
+        let items = complete(&api(), None, "", &params_at(0, 0));
         // Empty prefix with an empty engine API returns nothing.
         assert!(items.is_empty());
     }

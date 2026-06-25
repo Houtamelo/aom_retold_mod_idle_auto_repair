@@ -8,7 +8,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info, warn};
 
-use crate::{completion, diagnostics, engine_api, parser, references, semantic, symbols, word, workspace};
+use crate::{completion, diagnostics, engine_api, merged_view, parser, references, semantic, symbols, word, workspace};
 
 /// Holds the parsed-but-not-yet-processed text of every document the client
 /// has opened. Populated by `did_open` / `did_change`, cleared by `did_close`.
@@ -88,6 +88,45 @@ impl XsLanguageServer {
             };
             if !owned {
                 warn_unowned_file(&self.client, &uri).await;
+            }
+        }
+    }
+
+    /// Build a merged include-paste view for `uri` from its current buffer.
+    ///
+    /// The view is built on demand; T9 adds a content-keyed cache for this.
+    async fn build_merged_view_for_uri(
+        &self,
+        uri: &Url,
+        text: &str,
+    ) -> Option<merged_view::MergedView> {
+        let current_file = uri.to_file_path().ok()?;
+        let (ws_clone, project) = {
+            let ws = self.workspace.lock().await;
+            let entry = ws.lookup_mod(uri);
+            let project = match entry {
+                Some(e) => ws.build_virtual_project(e),
+                None => workspace::VirtualProject::default(),
+            };
+            (ws.clone(), project)
+        };
+        let own_table = {
+            let tables = self.symbol_tables.lock().await;
+            tables.get(uri).cloned().unwrap_or_default()
+        };
+        let cache_dir = crate::cache::state_cache_dir();
+        match merged_view::MergedView::build(
+            &current_file,
+            text,
+            &own_table,
+            &ws_clone,
+            &project,
+            &cache_dir,
+        ) {
+            Ok(mv) => Some(mv),
+            Err(e) => {
+                warn!("failed to build merged view for {}: {}", uri, e);
+                None
             }
         }
     }
@@ -378,16 +417,10 @@ impl LanguageServer for XsLanguageServer {
             let docs = self.documents.lock().await;
             docs.get(uri).unwrap_or("").to_string()
         };
-        let current_file = uri.to_file_path().ok();
-        let project = if current_file.is_some() {
-            self.build_semantic_project(uri).await
-        } else {
-            None
-        };
+        let merged = self.build_merged_view_for_uri(uri, &text).await;
         let items = completion::complete(
             &self.engine,
-            project.as_ref(),
-            current_file.as_deref(),
+            merged.as_ref(),
             &text,
             &params,
         );
