@@ -379,118 +379,181 @@ fn every_game_folder_file_resolves_in_workspace() {
 // `unresolved == 0`.
 // ---------------------------------------------------------------------------
 
-/// Maximum acceptable unresolved-symbol count. Measured baseline is ~5335 on
-/// the current AoM:R release; 10% headroom gives 5870. TIGHTEN this when
-/// the include-paste approximation is replaced with true textual paste
-/// (see `docs/blockers/pending-task-include-paste.md`).
-const UNRESOLVED_SYMBOL_THRESHOLD: usize = 5870;
+/// Maximum acceptable unresolved-symbol count. After the true include-paste
+/// implementation (PR 3) scoped the integration test to top-level files and
+/// excluded `random_maps/`, the measured count is 0. This strict threshold
+/// catches any regression in cross-include symbol resolution.
+const UNRESOLVED_SYMBOL_THRESHOLD: usize = 0;
+
+/// Top-10 `bo_*` AI build-order callees used as regression guards. PR 1 made
+/// these parse as `Function` symbols; PR 3/4 verify that they resolve through
+/// the include-paste scope with zero unresolved-symbol diagnostics.
+const TOP_BO_CALLEES: &[&str] = &[
+    "boBuild",
+    "boVillager",
+    "boUnit",
+    "boConditionalWait",
+    "boAdvance",
+    "boIncreaseTimeout",
+    "boTransaction",
+    "boEnd",
+    "boExecute",
+    "boTech",
+];
+
+/// Result of a full top-level-file semantic scan, cached so multiple tests
+/// can share the expensive analysis.
+#[derive(Debug, Clone)]
+struct UnresolvedReport {
+    total_unresolved: usize,
+    /// Counts only for the top `bo_*` callees.
+    callee_counts: HashMap<String, usize>,
+    examples: Vec<String>,
+}
+
+/// Run the semantic checker over every top-level game-folder file and return
+/// a summary of unresolved-symbol diagnostics. The result is cached in a
+/// process-wide `OnceLock` so the threshold test and the per-callee guard
+/// test share the same scan.
+fn analyze_top_level_unresolved() -> Option<UnresolvedReport> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Option<UnresolvedReport>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let game_dir = resolve_game_dir()?;
+            let GameFiles { text: files, binary_skipped } = collect_xs_files(&game_dir);
+            assert!(!files.is_empty(), "no parseable .xs files found under {game_dir:?}");
+
+            // Analyze only top-level files: files that are included by another file
+            // are pasted into their includer's scope, so checking them in isolation
+            // would produce spurious unresolved-symbol diagnostics.
+            //
+            // Random-map scripts are also excluded: they rely heavily on RM-specific
+            // engine functions that are absent from the Doxygen archive, so the
+            // workspace-only semantic checker cannot meaningfully judge them.
+            let included = collect_included_files(&game_dir, &files);
+            let top_level_files: Vec<PathBuf> = files
+                .iter()
+                .filter(|p| {
+                    let Some(rel) = relativize_to_game(&game_dir, p) else {
+                        return false;
+                    };
+                    !included.contains(*p) && !rel.starts_with("random_maps/")
+                })
+                .cloned()
+                .collect();
+
+            // The semantic checker only resolves workspace-defined symbols. Calls to
+            // engine syscalls (`kb*`, `ai*`, `tr*`, `xs*`, `rm*`) come back as
+            // `Error 0310: invalid symbol lookup '...'` because the engine API is
+            // not part of the virtual project. We load the engine API once and build
+            // a skip-list of known engine names so we can isolate genuinely
+            // unresolved workspace symbols.
+            let engine_api = load_engine_api(&game_dir);
+
+            // Build the semantic project from all game-folder files in one go. This
+            // re-parses every file (the parser is cheap enough) and produces a
+            // virtual project that cross-file semantic checks can iterate.
+            let mut sources: HashMap<PathBuf, String> = HashMap::new();
+            for path in &files {
+                let source = std::fs::read_to_string(path)
+                    .unwrap_or_else(|e| panic!("failed to read {path:?}: {e}"));
+                sources.insert(path.clone(), source);
+            }
+            let project = SemProject::from_files(sources);
+            let checker = SemanticChecker::new(project);
+
+            let mut callee_counts: HashMap<String, usize> = TOP_BO_CALLEES
+                .iter()
+                .map(|c| (c.to_string(), 0))
+                .collect();
+            let mut unresolved_symbol: usize = 0;
+            let mut unresolved_examples: Vec<String> = Vec::new();
+
+            for path in &top_level_files {
+                let diags = checker.check_all(path);
+                for d in diags {
+                    if d.message.contains("Error 0310") || d.message.contains("invalid symbol lookup")
+                    {
+                        if let Some(callee) = extract_callee_from_diagnostic(&d.message) {
+                            if engine_api.contains(&callee) {
+                                continue;
+                            }
+                            if let Some(count) = callee_counts.get_mut(&callee) {
+                                *count += 1;
+                            }
+                        }
+                        unresolved_symbol += 1;
+                        if unresolved_examples.len() < 5 {
+                            unresolved_examples.push(format!("{path:?}: {}", d.message));
+                        }
+                    }
+                }
+            }
+
+            println!(
+                "Semantic check emitted diagnostics across {} top-level files ({} binary .xs skipped); \
+                 {} flagged as unresolved_symbol (threshold: {})",
+                top_level_files.len(),
+                binary_skipped,
+                unresolved_symbol,
+                UNRESOLVED_SYMBOL_THRESHOLD,
+            );
+            if !unresolved_examples.is_empty() {
+                for ex in &unresolved_examples {
+                    println!("  unresolved example: {ex}");
+                }
+            }
+
+            Some(UnresolvedReport {
+                total_unresolved: unresolved_symbol,
+                callee_counts,
+                examples: unresolved_examples,
+            })
+        })
+        .clone()
+}
 
 #[test]
 fn semantic_pipeline_unresolved_count_within_threshold() {
-    let Some(game_dir) = resolve_game_dir() else {
+    let Some(report) = analyze_top_level_unresolved() else {
         eprintln!("AOMR_GAME_PATH not set, skipping semantic pipeline test");
         return;
     };
-    let GameFiles { text: files, binary_skipped } = collect_xs_files(&game_dir);
-    assert!(!files.is_empty(), "no parseable .xs files found under {game_dir:?}");
 
-    // Analyze only top-level files: files that are included by another file
-    // are pasted into their includer's scope, so checking them in isolation
-    // would produce spurious unresolved-symbol diagnostics.
-    //
-    // Random-map scripts are also excluded: they rely heavily on RM-specific
-    // engine functions that are absent from the Doxygen archive, so the
-    // workspace-only semantic checker cannot meaningfully judge them.
-    let included = collect_included_files(&game_dir, &files);
-    let top_level_files: Vec<PathBuf> = files
-        .iter()
-        .filter(|p| {
-            let Some(rel) = relativize_to_game(&game_dir, p) else {
-                return false;
-            };
-            !included.contains(*p) && !rel.starts_with("random_maps/")
-        })
-        .cloned()
-        .collect();
+    assert!(
+        report.total_unresolved <= UNRESOLVED_SYMBOL_THRESHOLD,
+        "found {} unresolved-symbol diagnostics \
+         (threshold {}). First examples: {:?}",
+        report.total_unresolved,
+        UNRESOLVED_SYMBOL_THRESHOLD,
+        report.examples,
+    );
+}
 
-    // The semantic checker only resolves workspace-defined symbols. Calls to
-    // engine syscalls (`kb*`, `ai*`, `tr*`, `xs*`, `rm*`) come back as
-    // `Error 0310: invalid symbol lookup '...'` because the engine API is
-    // not part of the virtual project. We load the engine API once and build
-    // a skip-list of known engine names so we can isolate genuinely
-    // unresolved workspace symbols.
-    let engine_api = load_engine_api(&game_dir);
+#[test]
+fn top_bo_callees_have_zero_unresolved_calls() {
+    let Some(report) = analyze_top_level_unresolved() else {
+        eprintln!("AOMR_GAME_PATH not set, skipping top-bo-callee guard test");
+        return;
+    };
 
-    // Build the semantic project from all game-folder files in one go. This
-    // re-parses every file (the parser is cheap enough) and produces a
-    // virtual project that cross-file semantic checks can iterate.
-    let mut sources: HashMap<PathBuf, String> = HashMap::new();
-    for path in &files {
-        let source = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("failed to read {path:?}: {e}"));
-        sources.insert(path.clone(), source);
-    }
-    let project = SemProject::from_files(sources);
-    let checker = SemanticChecker::new(project);
-
-    let mut by_code: HashMap<String, usize> = HashMap::new();
-    let mut unresolved_symbol: usize = 0;
-    let mut unresolved_examples: Vec<String> = Vec::new();
-    let mut total_diagnostics: usize = 0;
-    let mut engine_call_diagnostics: usize = 0;
-
-    for path in &top_level_files {
-        let diags = checker.check_all(path);
-        total_diagnostics += diags.len();
-        for d in diags {
-            let code = match &d.code {
-                Some(tower_lsp::lsp_types::NumberOrString::String(s)) => s.clone(),
-                Some(tower_lsp::lsp_types::NumberOrString::Number(n)) => n.to_string(),
-                None => "<none>".to_string(),
-            };
-            *by_code.entry(code.clone()).or_insert(0) += 1;
-            if d.message.contains("Error 0310") || d.message.contains("invalid symbol lookup") {
-                if let Some(callee) = extract_callee_from_diagnostic(&d.message) {
-                    if engine_api.contains(&callee) {
-                        engine_call_diagnostics += 1;
-                        continue;
-                    }
-                }
-                unresolved_symbol += 1;
-                if unresolved_examples.len() < 5 {
-                    unresolved_examples.push(format!("{path:?}: {}", d.message));
-                }
-            }
+    let mut all_zero = true;
+    for callee in TOP_BO_CALLEES {
+        let count = report.callee_counts.get(*callee).copied().unwrap_or(0);
+        if count == 0 {
+            println!("PASS: {} has zero unresolved-symbol diagnostics", callee);
+        } else {
+            println!(
+                "FAIL: {} has {} unresolved-symbol diagnostic(s)",
+                callee, count
+            );
+            all_zero = false;
         }
     }
-
-    println!(
-        "Semantic check emitted {} diagnostics across {} top-level files ({} binary .xs skipped); \
-         {} flagged as unresolved_symbol, {} attributed to engine API calls \
-         (threshold: {})",
-        total_diagnostics,
-        top_level_files.len(),
-        binary_skipped,
-        unresolved_symbol,
-        engine_call_diagnostics,
-        UNRESOLVED_SYMBOL_THRESHOLD,
-    );
-    for (code, n) in &by_code {
-        println!("  code {code}: {n}");
-    }
-    for ex in &unresolved_examples {
-        println!("  unresolved example: {ex}");
-    }
-
-    // Regression guard: most "unresolved" diagnostics are false positives
-    // caused by the include-paste approximation (see the test-level comment
-    // above for the breakdown). The threshold is set at 10% above the
-    // current baseline. Tighten it as include-paste coverage improves.
     assert!(
-        unresolved_symbol <= UNRESOLVED_SYMBOL_THRESHOLD,
-        "found {unresolved_symbol} unresolved-symbol diagnostics \
-         (threshold {}). First examples: {unresolved_examples:?}",
-        UNRESOLVED_SYMBOL_THRESHOLD,
+        all_zero,
+        "one or more top bo_* callees have unresolved-symbol diagnostics"
     );
 }
 
