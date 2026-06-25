@@ -1160,12 +1160,389 @@ fn run_semantic_fixture(
     pass
 }
 
+/// Phase 4: cross-include LSP features.
+///
+/// Each scenario creates a temporary mod with an includer (`main.xs`) and an
+/// included file (`util.xs`) under `mod/game/ai/include_test/`. The server is
+/// started with a synthetic game folder and the mod as a workspace folder.
+fn run_include_tests() -> bool {
+    let mut all_pass = true;
+    all_pass &= run_completion_across_include();
+    all_pass &= run_hover_across_include();
+    all_pass &= run_definition_across_include();
+    all_pass &= run_cycle_does_not_hang();
+    all_pass
+}
+
+fn setup_include_mod(
+    name: &str,
+    main_content: &str,
+    util_content: &str,
+) -> (std::path::PathBuf, std::path::PathBuf, Url, Url) {
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir();
+    let game_root = tmp.join(format!("aomr_inc_game_{}_{}", name, pid));
+    let mod_root = tmp.join(format!("aomr_inc_mod_{}_{}", name, pid));
+    let _ = std::fs::remove_dir_all(&game_root);
+    let _ = std::fs::remove_dir_all(&mod_root);
+
+    // Copy the committed doxygen archive into the synthetic game folder.
+    let doxy_src = resolve_test_game_path().join("doxygen_retail.7z");
+    std::fs::create_dir_all(&game_root).expect("create game root");
+    std::fs::copy(&doxy_src, game_root.join("doxygen_retail.7z")).expect("copy doxygen archive");
+
+    // Fixture files directly under game/ai/ so include targets resolve
+    // relative to the AI include root.
+    let test_dir = mod_root.join("game").join("ai");
+    let main_path = test_dir.join("main.xs");
+    let util_path = test_dir.join("util.xs");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    std::fs::write(&main_path, main_content).unwrap();
+    std::fs::write(&util_path, util_content).unwrap();
+
+    let game_root = std::fs::canonicalize(&game_root).unwrap();
+    let mod_root = std::fs::canonicalize(&mod_root).unwrap();
+    let main_uri = Url::from_file_path(&main_path).unwrap();
+    let util_uri = Url::from_file_path(&util_path).unwrap();
+    (game_root, mod_root, main_uri, util_uri)
+}
+
+fn cleanup_include_mod(game_root: &std::path::Path, mod_root: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(game_root);
+    let _ = std::fs::remove_dir_all(mod_root);
+}
+
+fn run_include_request_scenario(
+    name: &str,
+    main_content: &str,
+    util_content: &str,
+    request_id: i64,
+    request: &dyn Fn(&Url) -> serde_json::Value,
+    check: &dyn Fn(&serde_json::Value, &Url) -> bool,
+) -> bool {
+    let (game_root, mod_root, main_uri, util_uri) =
+        setup_include_mod(name, main_content, util_content);
+
+    let server_path = locate_server_binary();
+    let mod_uri = Url::from_file_path(&mod_root).unwrap();
+
+    let mut child = Command::new(&server_path)
+        .arg("--game-path")
+        .arg(&game_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn xs-language-server for include tests");
+
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut stdout = child.stdout.take().expect("child stdout");
+
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1000,
+        "method": "initialize",
+        "params": {
+            "processId": null,
+            "capabilities": {},
+            "trace": "off",
+            "rootUri": null,
+            "workspaceFolders": [{ "uri": mod_uri, "name": name }]
+        }
+    })
+    .to_string();
+
+    let initialized = json!({"jsonrpc":"2.0","method":"initialized","params":{}}).to_string();
+
+    let did_open = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": main_uri,
+                "languageId": "xs",
+                "version": 1,
+                "text": main_content
+            }
+        }
+    })
+    .to_string();
+
+    let request = request(&main_uri);
+    let request = serde_json::to_string(&request).unwrap();
+    let shutdown = json!({"jsonrpc":"2.0","id":1001,"method":"shutdown"}).to_string();
+    let exit = json!({"jsonrpc":"2.0","method":"exit"}).to_string();
+
+    for msg in &[init, initialized, did_open, request, shutdown, exit] {
+        stdin.write_all(frame(msg).as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    drop(stdin);
+
+    let status = child.wait().expect("wait on include-test child");
+    let mut stderr_text = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut stderr_text)
+        .unwrap();
+
+    let mut all_bytes = Vec::new();
+    stdout.read_to_end(&mut all_bytes).unwrap();
+
+    let mut response = None;
+    let mut main_diagnostics: Vec<String> = Vec::new();
+    let mut cursor = std::io::Cursor::new(&all_bytes);
+    loop {
+        match read_framed_message(&mut cursor) {
+            Ok(msg) => {
+                if msg.get("id").and_then(|v| v.as_i64()) == Some(request_id) {
+                    response = Some(msg);
+                } else if msg.get("method").and_then(|m| m.as_str())
+                    == Some("textDocument/publishDiagnostics")
+                {
+                    if let Some(params) = msg.get("params") {
+                        if params.get("uri").and_then(|u| u.as_str())
+                            == Some(main_uri.as_str())
+                        {
+                            if let Some(arr) = params.get("diagnostics").and_then(|d| d.as_array())
+                            {
+                                for d in arr {
+                                    if let Some(m) = d.get("message").and_then(|m| m.as_str()) {
+                                        main_diagnostics.push(m.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    cleanup_include_mod(&game_root, &mod_root);
+
+    let has_panic = stderr_text.lines().any(|l| l.contains("panic") || l.contains("FATAL"));
+    let check_ok = response
+        .as_ref()
+        .map(|resp| check(resp, &util_uri))
+        .unwrap_or(false);
+    let pass = !has_panic && status.success() && check_ok;
+
+    if pass {
+        println!("PASS (include {}): response matched expected content", name);
+    } else {
+        println!("FAIL (include {}): response did not match expected content", name);
+        if let Some(resp) = response {
+            println!("  response: {}", resp);
+        } else {
+            println!("  response: <none>");
+        }
+        if !main_diagnostics.is_empty() {
+            println!("  diagnostics for main.xs:");
+            for d in &main_diagnostics {
+                println!("    {d}");
+            }
+        }
+        if has_panic || !stderr_text.is_empty() {
+            println!("--- stderr for include {} ---", name);
+            for line in stderr_text.lines() {
+                println!("  {line}");
+            }
+            println!("--- end stderr ---");
+        }
+    }
+    pass
+}
+
+fn run_completion_across_include() -> bool {
+    let main = "include \"util.xs\";\n\nvoid caller()\n{\n    included_fn();\n}\n";
+    let util = "void included_fn() {\n    aiEcho(\"included\");\n}\n";
+    run_include_request_scenario(
+        "completion_across_include",
+        main,
+        util,
+        1100,
+        &|main_uri| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1100,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": { "line": 4, "character": 8 }
+                }
+            })
+        },
+        &|resp, _util_uri| {
+            // The response may be CompletionItem[] or CompletionList.
+            let raw = resp.to_string();
+            raw.contains("\"included_fn\"") || raw.contains("\"label\":\"included_fn\"")
+        },
+    )
+}
+
+fn run_hover_across_include() -> bool {
+    let main = "include \"util.xs\";\n\nvoid caller()\n{\n    included_fn();\n}\n";
+    let util = "void included_fn() {\n    aiEcho(\"included\");\n}\n";
+    run_include_request_scenario(
+        "hover_across_include",
+        main,
+        util,
+        1101,
+        &|main_uri| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1101,
+                "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": { "line": 4, "character": 6 }
+                }
+            })
+        },
+        &|resp, util_uri| {
+            let raw = resp.to_string();
+            // The hover markdown shows the signature and a path/URI pointing
+            // to the defining util.xs file.
+            raw.contains("included_fn")
+                && raw.contains("void included_fn()")
+                && raw.contains(util_uri.path())
+        },
+    )
+}
+
+fn run_definition_across_include() -> bool {
+    let main = "include \"util.xs\";\n\nvoid caller()\n{\n    included_fn();\n}\n";
+    let util = "void included_fn() {\n    aiEcho(\"included\");\n}\n";
+    run_include_request_scenario(
+        "definition_across_include",
+        main,
+        util,
+        1102,
+        &|main_uri| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1102,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": { "line": 4, "character": 6 }
+                }
+            })
+        },
+        &|resp, util_uri| {
+            let raw = resp.to_string();
+            raw.contains(&util_uri.to_string()) && raw.contains("\"line\":0")
+        },
+    )
+}
+
+fn run_cycle_does_not_hang() -> bool {
+    let main = "include \"util.xs\";\nvoid aFn() {}\n";
+    let util = "include \"main.xs\";\nvoid bFn() {}\n";
+    let (game_root, mod_root, main_uri, _util_uri) =
+        setup_include_mod("cycle_does_not_hang", main, util);
+
+    let server_path = locate_server_binary();
+    let mod_uri = Url::from_file_path(&mod_root).unwrap();
+
+    let mut child = Command::new(&server_path)
+        .arg("--game-path")
+        .arg(&game_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn xs-language-server for cycle test");
+
+    let mut stdin = child.stdin.take().expect("child stdin");
+    // Don't take stdout; we won't read it, but the child must still exit.
+    let _stdout = child.stdout.take().expect("child stdout");
+
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1200,
+        "method": "initialize",
+        "params": {
+            "processId": null,
+            "capabilities": {},
+            "trace": "off",
+            "rootUri": null,
+            "workspaceFolders": [{ "uri": mod_uri, "name": "cycle" }]
+        }
+    })
+    .to_string();
+
+    let initialized = json!({"jsonrpc":"2.0","method":"initialized","params":{}}).to_string();
+
+    let did_open = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": main_uri,
+                "languageId": "xs",
+                "version": 1,
+                "text": main
+            }
+        }
+    })
+    .to_string();
+
+    let shutdown = json!({"jsonrpc":"2.0","id":1201,"method":"shutdown"}).to_string();
+    let exit = json!({"jsonrpc":"2.0","method":"exit"}).to_string();
+
+    for msg in &[init, initialized, did_open, shutdown, exit] {
+        stdin.write_all(frame(msg).as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    drop(stdin);
+
+    // The merge must terminate in bounded time even on a cycle.
+    let timeout = std::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    let mut status = None;
+    while start.elapsed() < timeout {
+        match child.try_wait() {
+            Ok(Some(s)) => {
+                status = Some(s);
+                break;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => break,
+        }
+    }
+
+    cleanup_include_mod(&game_root, &mod_root);
+
+    if status.is_none() {
+        let _ = child.kill();
+        println!("FAIL (cycle_does_not_hang): server did not exit within 5 seconds");
+        return false;
+    }
+
+    let status = status.unwrap();
+    if status.success() {
+        println!("PASS (cycle_does_not_hang): server exited cleanly despite include cycle");
+        true
+    } else {
+        println!("FAIL (cycle_does_not_hang): server exited with {}", status);
+        false
+    }
+}
+
 fn main() {
     let baseline_ok = run_baseline();
     let workspace_ok = run_workspace_tests();
     let semantic_ok = run_semantic_tests();
+    let include_ok = run_include_tests();
 
-    if baseline_ok && workspace_ok && semantic_ok {
+    if baseline_ok && workspace_ok && semantic_ok && include_ok {
         std::process::exit(0);
     } else {
         std::process::exit(1);
