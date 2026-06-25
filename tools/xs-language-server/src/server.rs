@@ -90,7 +90,12 @@ impl XsLanguageServer {
                 ws.lookup_mod(&uri).is_some()
             };
             if !owned {
-                warn_unowned_file(&self.client, &uri).await;
+                let registered: Vec<String> = {
+                    let ws = self.workspace.lock().await;
+                    ws.mods().iter().map(|m| m.mod_uri.to_string()).collect()
+                };
+                let file_path = uri.to_file_path().ok();
+                warn_unowned_file(&self.client, &uri, &registered, file_path.as_deref()).await;
             }
         }
     }
@@ -350,9 +355,27 @@ impl LanguageServer for XsLanguageServer {
         };
 
         if owning_mod.is_none() {
-            warn_unowned_file(&self.client, &uri).await;
+            // Log enough context to diagnose why lookup failed: which mods
+            // are registered, what the file path resolved to, and what
+            // prefix match would have succeeded.
+            let ws = self.workspace.lock().await;
+            let registered: Vec<String> = ws.mods().iter()
+                .map(|m| m.mod_uri.to_string())
+                .collect();
+            let file_path = uri.to_file_path().ok();
+            warn_unowned_file(
+                &self.client,
+                &uri,
+                registered.as_slice(),
+                file_path.as_deref(),
+            )
+            .await;
         } else {
-            debug!("did_open: {} owned by {:?}", uri, owning_mod.as_ref().map(|m| &m.mod_uri));
+            info!(
+                "did_open: {} owned by mod_uri={}",
+                uri,
+                owning_mod.as_ref().map(|m| m.mod_uri.as_str()).unwrap_or("?")
+            );
         }
 
         self.clear_merged_view_cache(&uri).await;
@@ -394,22 +417,31 @@ impl LanguageServer for XsLanguageServer {
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
-        let added = params.event.added.len();
-        let removed = params.event.removed.len();
+        let added_count = params.event.added.len();
+        let removed_count = params.event.removed.len();
         info!(
             "did_change_workspace_folders: +{} -{}",
-            added, removed
+            added_count, removed_count
         );
 
         {
             let mut ws = self.workspace.lock().await;
-            for folder in params.event.added {
-                if let Err(e) = ws.register_mod(folder.uri) {
-                    warn!("failed to add workspace folder: {}", e);
+            for folder in &params.event.added {
+                info!("  + registering mod folder: uri={} name={}", folder.uri, folder.name);
+                if let Err(e) = ws.register_mod(folder.uri.clone()) {
+                    warn!("failed to add workspace folder {}: {}", folder.uri, e);
                 }
             }
-            for folder in params.event.removed {
+            for folder in &params.event.removed {
+                info!("  - unregistering mod folder: uri={}", folder.uri);
                 ws.unregister_mod(&folder.uri);
+            }
+            let summary: Vec<String> = ws.mods().iter()
+                .map(|m| format!("{} (overlay={})", m.mod_uri, m.overlay_path.display()))
+                .collect();
+            info!("registered mods after update ({} total):", summary.len());
+            for line in summary {
+                info!("    {}", line);
             }
         }
 
@@ -955,11 +987,35 @@ impl XsLanguageServer {
 }
 
 /// Notify the client that a file is not covered by any registered mod.
-async fn warn_unowned_file(client: &Client, uri: &Url) {
+/// Logs every registered mod and the resolved file path so a user hitting
+/// this warning can grep the log to see exactly which prefixes were checked
+/// and which prefix would have matched.
+async fn warn_unowned_file(
+    client: &Client,
+    uri: &Url,
+    registered_mods: &[String],
+    file_path: Option<&std::path::Path>,
+) {
     warn!(
         "file not part of any registered mod; engine API only: {}",
         uri
     );
+    warn!("  resolved file path: {:?}", file_path);
+    if registered_mods.is_empty() {
+        warn!("  no mods registered with the LSP at all");
+        warn!("  (the IntelliJ plugin must call workspace/didChangeWorkspaceFolders");
+        warn!("   with the project's mod paths; check the XsStartupActivity run)");
+    } else {
+        warn!("  registered mod URIs ({}):", registered_mods.len());
+        for m in registered_mods {
+            warn!("    - {}", m);
+        }
+        if let Some(path) = file_path {
+            warn!("  hint: a mod at <mod_uri> owns a file when file_path.starts_with(<mod_uri>);");
+            warn!("        check for case sensitivity, trailing slash, or symlink mismatches");
+            warn!("        between the registered prefix and the actual file path.");
+        }
+    }
     client
         .show_message(
             MessageType::WARNING,

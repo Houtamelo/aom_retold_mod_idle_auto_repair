@@ -19,6 +19,8 @@ import org.eclipse.lsp4j.launch.LSPLauncher
 import org.eclipse.lsp4j.services.LanguageServer
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
 import java.util.concurrent.TimeUnit
 
 /**
@@ -37,6 +39,16 @@ import java.util.concurrent.TimeUnit
  *     (convenience for development).
  *  5. `xs-language-server` on the `PATH`.
  *
+ * The LSP writes its log output to stderr (via `tracing_subscriber::fmt()
+ * .with_writer(std::io::stderr)`). We redirect that stream to a file at
+ * `<project>/.idea/xs-lsp.log` so the user can inspect what the server is
+ * actually doing (which workspace folders it received, which mod owns a
+ * file, why a "file not part of any registered mod" warning fired). The
+ * previous implementation merged stderr into stdout (`redirectErrorStream
+ * (true)`), which silently dropped every log line because lsp4j's
+ * MessageReader only accepts `Content-Length:` headers and JSON bodies on
+ * that stream.
+ *
  * To rebuild the bundled binary:
  *   cd tools/xs-language-server && cargo build --release
  *   cd tools/intellij-xs-plugin && ./gradlew copyLspServerToResources
@@ -54,10 +66,21 @@ class XsLspConnection(
     fun start(): Boolean {
         if (server != null) return true
         val binaryPath = resolveBinaryPath()
+        val logFile = resolveLspLogFile()
         log.info("Starting XS LSP server: $binaryPath --game-path $gamePath")
+        log.info("XS LSP log file: $logFile")
         try {
             val pb = ProcessBuilder(binaryPath, "--game-path", gamePath)
-            pb.redirectErrorStream(true)
+            // Pipe the LSP's stderr to a file so users can inspect what the
+            // server is doing. DO NOT merge into stdout: that stream carries
+            // JSON-RPC and lsp4j's MessageReader discards anything that
+            // isn't `Content-Length:` headers + JSON bodies.
+            Files.createDirectories(logFile.parent)
+            pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()))
+            // Pass RUST_LOG through to the LSP so users can opt into
+            // debug-level logging by setting the env var before launching
+            // the IDE. Defaults stay at the LSP's own default (info).
+            System.getenv("RUST_LOG")?.let { pb.environment()["RUST_LOG"] = it }
             val proc = pb.start()
             process = proc
 
@@ -87,6 +110,19 @@ class XsLspConnection(
             stop()
             return false
         }
+    }
+
+    /**
+     * Path of the file the LSP writes its stderr to. One file per project,
+     * appended across sessions, in the project's `.idea/` directory (which
+     * is in `.gitignore` for this repo, so logs never accidentally get
+     * committed). Surfaced in [start]'s log line so users know where to
+     * look.
+     */
+    private fun resolveLspLogFile(): Path {
+        val basePath = project.basePath
+            ?: return Paths.get(System.getProperty("java.io.tmpdir"), "xs-lsp.log")
+        return Paths.get(basePath, ".idea", "xs-lsp.log")
     }
 
     @Synchronized
