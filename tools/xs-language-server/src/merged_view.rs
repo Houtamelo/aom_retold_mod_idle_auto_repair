@@ -341,6 +341,11 @@ impl MergedView {
         std::iter::once(self.current_file.as_path()).chain(self.tables.keys().map(|p| p.as_path()))
     }
 
+    /// Per-file symbol tables for every file in the include closure.
+    pub fn tables(&self) -> &std::collections::HashMap<PathBuf, SymbolTable> {
+        &self.tables
+    }
+
     /// The absolute path of the file being analysed.
     pub fn current_file(&self) -> &Path {
         &self.current_file

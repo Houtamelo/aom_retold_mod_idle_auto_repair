@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -486,12 +486,18 @@ impl LanguageServer for XsLanguageServer {
         };
 
         // Engine API first (richer info: signature + help text + return type).
-        // Workspace symbol table as fallback (signature only, but anchored
-        // to a real source location).
+        // Merged include-paste scope second, with the current file's symbol
+        // table as a final fallback.
         let markdown = if let Some(s) = self.engine.find_syscall(&ident) {
             format_hover_syscall(s)
         } else if let Some(c) = self.engine.find_aiplan(&ident) {
             format_hover_aiplan(c)
+        } else if let Some(ms) = self
+            .get_or_build_merged_view(uri, &text)
+            .await
+            .and_then(|mv| mv.find(&ident).cloned())
+        {
+            format_hover_merged_symbol(&ms)
         } else {
             let tables = self.symbol_tables.lock().await;
             match tables.get(uri).and_then(|t| t.find(&ident)) {
@@ -529,42 +535,52 @@ impl LanguageServer for XsLanguageServer {
             return Ok(None);
         };
 
-        // Workspace symbol table first — has a real file:line location.
-        // Engine API as fallback — returns a virtual xs-stub:// URI.
-        let location = {
+        // Merged include-paste scope first so included symbols jump to their
+        // defining file. Fall back to the current file's symbol table, then
+        // to a virtual URI for engine symbols.
+        let location = if let Some(ms) = self
+            .get_or_build_merged_view(uri, &text)
+            .await
+            .and_then(|mv| mv.find(&ident).cloned())
+        {
+            let def_path = ms
+                .provenance
+                .origin()
+                .map(PathBuf::from)
+                .or_else(|| uri.to_file_path().ok())
+                .ok_or_else(tower_lsp::jsonrpc::Error::internal_error)?;
+            let def_uri = Url::from_file_path(&def_path)
+                .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
+            Location {
+                uri: def_uri,
+                range: ms.symbol.selection_range,
+            }
+        } else {
             let tables = self.symbol_tables.lock().await;
-            tables
-                .get(uri)
-                .and_then(|t| t.find(&ident))
-                .map(|sym| Location {
+            match tables.get(uri).and_then(|t| t.find(&ident)) {
+                Some(sym) => Location {
                     uri: uri.clone(),
                     range: sym.selection_range,
-                })
+                },
+                None => {
+                    if self.engine.find_syscall(&ident).is_none()
+                        && self.engine.find_aiplan(&ident).is_none()
+                    {
+                        debug!("definition: identifier `{ident}` not in engine API or workspace");
+                        return Ok(None);
+                    }
+                    // Virtual URI — these stubs don't have a real source position.
+                    let stub_uri = format!("xs-stub://engine/{ident}");
+                    Location {
+                        uri: Url::parse(&stub_uri)
+                            .map_err(|_e| tower_lsp::jsonrpc::Error::internal_error())?,
+                        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                    }
+                }
+            }
         };
 
-        let location = match location {
-            Some(loc) => {
-                debug!("definition: `{ident}` -> workspace at {:?}", loc.range.start);
-                loc
-            }
-            None => {
-                if self.engine.find_syscall(&ident).is_none()
-                    && self.engine.find_aiplan(&ident).is_none()
-                {
-                    debug!("definition: identifier `{ident}` not in engine API or workspace");
-                    return Ok(None);
-                }
-                // Virtual URI — these stubs don't have a real source position.
-                let stub_uri = format!("xs-stub://engine/{ident}");
-                let loc = Location {
-                    uri: Url::parse(&stub_uri)
-                        .map_err(|_e| tower_lsp::jsonrpc::Error::internal_error())?,
-                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-                };
-                debug!("definition: `{ident}` -> {stub_uri}");
-                loc
-            }
-        };
+        debug!("definition: `{ident}` -> {:?}", location.range.start);
         Ok(Some(GotoDefinitionResponse::Scalar(location)))
     }
 
@@ -659,26 +675,89 @@ impl LanguageServer for XsLanguageServer {
             return Ok(Some(vec![]));
         }
 
-        let Some(tree) = parser::parse(&text) else {
-            debug!("references: parse failed for {}", uri);
-            return Ok(None);
-        };
-        let ranges = {
-            let tables = self.symbol_tables.lock().await;
-            let table = tables.get(uri);
-            let raw = references::find_identifier_uses(&tree, &text, &ident);
-            match table {
-                Some(t) => references::filter_declaration(raw, t, &ident, params.context.include_declaration),
-                None => raw,
+        let current_file = uri.to_file_path().ok();
+        let merged = self.get_or_build_merged_view(uri, &text).await;
+
+        let mut locs = Vec::new();
+        let mut seen: HashSet<(String, u32, u32, u32, u32)> = HashSet::new();
+
+        if let Some(mv) = merged {
+            // Walk every file in the include-paste scope.
+            for path in mv.files() {
+                let source = mv.source(path).unwrap_or("");
+                let Some(tree) = parser::parse(source) else { continue };
+                let table = if current_file.as_deref() == Some(path) {
+                    Some(mv.own_table())
+                } else {
+                    mv.tables().get(path)
+                };
+                let raw = references::find_identifier_uses(&tree, source, &ident);
+                let ranges = match table {
+                    Some(t) => references::filter_declaration(
+                        raw,
+                        t,
+                        &ident,
+                        params.context.include_declaration,
+                    ),
+                    None => raw,
+                };
+                let Ok(file_uri) = Url::from_file_path(path) else { continue };
+                for range in ranges {
+                    if seen.insert((
+                        file_uri.to_string(),
+                        range.start.line,
+                        range.start.character,
+                        range.end.line,
+                        range.end.character,
+                    )) {
+                        locs.push(Location {
+                            uri: file_uri.clone(),
+                            range,
+                        });
+                    }
+                }
             }
-        };
+        } else {
+            // Fallback to the current file only when no merged view is available.
+            let Some(tree) = parser::parse(&text) else {
+                debug!("references: parse failed for {}", uri);
+                return Ok(None);
+            };
+            let ranges = {
+                let tables = self.symbol_tables.lock().await;
+                let table = tables.get(uri);
+                let raw = references::find_identifier_uses(&tree, &text, &ident);
+                match table {
+                    Some(t) => references::filter_declaration(
+                        raw,
+                        t,
+                        &ident,
+                        params.context.include_declaration,
+                    ),
+                    None => raw,
+                }
+            };
+            for range in ranges {
+                if seen.insert((
+                    uri.to_string(),
+                    range.start.line,
+                    range.start.character,
+                    range.end.line,
+                    range.end.character,
+                )) {
+                    locs.push(Location {
+                        uri: uri.clone(),
+                        range,
+                    });
+                }
+            }
+        }
 
         debug!(
-            "references: `{ident}` -> {} range(s) in {}",
-            ranges.len(),
-            uri
+            "references: `{ident}` -> {} location(s) across merged scope",
+            locs.len()
         );
-        Ok(Some(references::to_locations(uri, ranges)))
+        Ok(Some(locs))
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -925,6 +1004,23 @@ fn format_hover_symbol(s: &symbols::Symbol) -> String {
         for p in &s.params {
             md.push_str(&format!("- `{} {}`\n", p.ty, p.name));
         }
+    }
+    md
+}
+
+/// Format a merged-scope symbol for hover, including the file it was
+/// pasted from.
+fn format_hover_merged_symbol(ms: &merged_view::MergedSymbol) -> String {
+    let kind_label = ms.symbol.kind.label();
+    let mut md = format!("*{}* — `{}`\n", kind_label, ms.symbol.detail);
+    if !ms.symbol.params.is_empty() {
+        md.push_str("\n**Parameters:**\n");
+        for p in &ms.symbol.params {
+            md.push_str(&format!("- `{} {}`\n", p.ty, p.name));
+        }
+    }
+    if let Some(origin) = ms.provenance.origin() {
+        md.push_str(&format!("\n*Defined in: `{}`*\n", origin.display()));
     }
     md
 }
