@@ -254,6 +254,14 @@ impl MergedView {
                     visited.insert(to_path.clone());
                     view.graph.edges.push(edge.clone());
 
+                    // Defensive: even though resolve_file now rejects non-.xs
+                    // targets, a future regression shouldn't cascade into a
+                    // UTF-8 decode failure here. Skip the merge for anything
+                    // that isn't an XS source file.
+                    if !crate::workspace::is_xs_file(&to_path) {
+                        continue;
+                    }
+
                     let rel = relative_path_for(project, workspace, &to_path);
                     let table = cache::load_or_parse_symbols(&to_path, &rel, cache_dir)
                         .with_context(|| {
@@ -393,6 +401,10 @@ fn walk_includes(
 
                 visited.insert(to_path.clone());
                 view.graph.edges.push(edge.clone());
+
+                if !crate::workspace::is_xs_file(&to_path) {
+                    continue;
+                }
 
                 let rel = relative_path_for(project, workspace, &to_path);
                 let table = cache::load_or_parse_symbols(&to_path, &rel, cache_dir)

@@ -106,15 +106,22 @@ pub struct ParseCacheEntry {
 }
 
 /// Compute the cache key (`mtime-<sha256>`) and content hash for `path`.
+///
+/// Hashes the raw file bytes — not UTF-8-decoded text — so binary files
+/// (AoM:R's `.bar` asset archives, the engine's `.dtt` data tables, etc.)
+/// don't trigger a UTF-8 decode error when the cache key is computed for
+/// them. SHA-256 of bytes is well-defined for both text and binary input,
+/// and the hash only feeds an equality comparison in [load_or_parse_symbols],
+/// so it never needs to round-trip through the filesystem as text.
 pub fn parse_file_key(path: &Path) -> Result<(String, String, u128)> {
     let meta = fs::metadata(path)
         .with_context(|| format!("reading metadata for parse cache key: {path:?}"))?;
     let mtime = meta
         .modified()
         .with_context(|| format!("reading mtime for parse cache key: {path:?}"))?;
-    let content = fs::read_to_string(path)
+    let bytes = fs::read(path)
         .with_context(|| format!("reading file for parse cache key: {path:?}"))?;
-    let hash = sha256_bytes(content.as_bytes());
+    let hash = sha256_bytes(&bytes);
     let millis = mtime.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
     let key = format!("{millis}-{hash}");
     Ok((key, hash, millis))
@@ -132,6 +139,14 @@ pub fn load_or_parse_symbols(
     relative_path: &str,
     cache_dir: &Path,
 ) -> Result<symbols::SymbolTable> {
+    // Defensive: even though the workspace walkers filter by extension,
+    // guard the cache layer too. If a non-`.xs` path ever reaches here,
+    // bail out cleanly rather than attempting to UTF-8-decode binary data
+    // (.bar archives, .dtt tables, .png textures, etc.) and crashing
+    // every semantic check that touches this file's include graph.
+    if !crate::workspace::is_xs_file(path) {
+        return Ok(symbols::SymbolTable::default());
+    }
     let (key, content_hash, mtime_millis) = parse_file_key(path)?;
     let cache_path = parse_cache_path(cache_dir, &key);
 

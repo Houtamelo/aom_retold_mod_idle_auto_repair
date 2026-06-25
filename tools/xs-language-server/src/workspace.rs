@@ -210,17 +210,25 @@ impl Workspace {
 
     /// Resolve a relative path under `game/` inside a virtual project.
     ///
-    /// Mod overlays take precedence over the vanilla game folder.
+    /// Mod overlays take precedence over the vanilla game folder. Resolves
+    /// only paths whose file extension is `.xs` — the LSP should never treat
+    /// binary `.bar` archives (AoM:R art/UI/audio assets) or `.dtt` data
+    /// tables as XS source even if they live at a path the include walker
+    /// tried to reach.
     pub fn resolve_file(&self, project: &VirtualProject, rel: &str) -> Option<PathBuf> {
-        if let Some(path) = project.file_overrides.get(rel) {
-            return Some(path.clone());
-        }
-        let game_file = self.game_path.join("game").join(rel);
-        if game_file.exists() {
-            Some(game_file)
+        let path = if let Some(p) = project.file_overrides.get(rel) {
+            p.clone()
         } else {
-            None
+            let candidate = self.game_path.join("game").join(rel);
+            if !candidate.exists() {
+                return None;
+            }
+            candidate
+        };
+        if !is_xs_file(&path) {
+            return None;
         }
+        Some(path)
     }
 
     /// Resolve `include "target"` from `from_rel` inside `project`.
@@ -325,6 +333,9 @@ fn collect_overlay_files(
             }
             collect_overlay_files(overlay_root, &path, out);
         } else if path.is_file() {
+            if !is_xs_file(&path) {
+                continue;
+            }
             let Some(rel) = relativize(overlay_root, &path) else {
                 continue;
             };
@@ -351,6 +362,9 @@ fn walk_game_files(
             if path.is_dir() {
                 walk(base, &path, out, overrides);
             } else if path.is_file() {
+                if !is_xs_file(&path) {
+                    continue;
+                }
                 if let Some(rel) = relativize(base, &path) {
                     if !overrides.contains_key(&rel) {
                         out.push((rel, path));
@@ -363,6 +377,21 @@ fn walk_game_files(
     let mut out = Vec::new();
     walk(game_root, game_root, &mut out, overrides);
     out
+}
+
+/// True if `path` is a file the LSP should treat as XS source. The shipped
+/// AoM:R game folder and user mods contain many non-XS files (binary
+/// `.bar` asset archives for art/UI/audio, `.dtt` data tables, `.xml`
+/// strings, `.png`/`.dds` textures, etc.). Including those in workspace
+/// walks caused the LSP to attempt to hash them as UTF-8 text and crash
+/// with a `stream did not contain valid UTF-8` error the moment any
+/// semantic check ran against a real mod file. Filter at every entry
+/// point so the LSP never reads a non-`.xs` file as source.
+pub fn is_xs_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("xs"))
+        .unwrap_or(false)
 }
 
 /// Compute the POSIX-style relative path of `file` with respect to `base`,
@@ -683,5 +712,105 @@ mod tests {
         assert_eq!(resolved, overlay);
         assert_eq!(edge.to, overlay);
         assert_eq!(edge.root, IncludeRoot::Ai);
+    }
+
+    /// Regression test for the user's bug:
+    ///   failed to build semantic project for .../human_assist.xs:
+    ///     reading file for parse cache key: ".../game/art/ArtAtlantean.bar"
+    ///
+    /// The shipped AoM:R game folder contains binary `.bar` archives
+    /// (`game/art/ArtAtlantean.bar`, `game/ui/UI.bar`, etc.). The previous
+    /// `walk_game_files` and `collect_overlay_files` returned EVERY file
+    /// in `game/` regardless of extension; `semantic::load_from_workspace`
+    /// then walked them all and tried to compute a cache key by reading
+    /// each as UTF-8 text. The first `.bar` it hit crashed the semantic
+    /// pipeline. The fix filters by `.xs` extension at every entry point.
+    #[test]
+    fn visible_files_excludes_non_xs_artifacts() {
+        let tmp = TempDir::new().unwrap();
+        let game_root = tmp.path().join("game");
+        std::fs::create_dir_all(game_root.join("art")).unwrap();
+        std::fs::create_dir_all(game_root.join("ui")).unwrap();
+        std::fs::create_dir_all(game_root.join("ai")).unwrap();
+        std::fs::create_dir_all(game_root.join("data")).unwrap();
+
+        // Real XS file we want to see.
+        touch(&game_root.join("ai/human_assist.xs")).unwrap();
+
+        // Binary artefacts that ship with AoM:R — these were the crash trigger.
+        std::fs::write(game_root.join("art/ArtAtlantean.bar"), b"\x00\x01\x02BINARY").unwrap();
+        std::fs::write(game_root.join("ui/UI.bar"), b"\x00\x01\x02BINARY").unwrap();
+
+        // Other non-XS files that aren't `.bar` but also shouldn't be parsed.
+        std::fs::write(game_root.join("art/strings.xml"), b"<xml/>").unwrap();
+        std::fs::write(game_root.join("data/table.dtt"), b"\x00\x01\x02").unwrap();
+        std::fs::write(game_root.join("image.png"), b"\x89PNG").unwrap();
+
+        let ws = Workspace::new(tmp.path().to_path_buf());
+        let project = VirtualProject::default();
+        let files = project.visible_files(&ws);
+
+        let rels: Vec<&str> = files.iter().map(|(r, _)| r.as_str()).collect();
+        assert_eq!(
+            rels,
+            vec!["ai/human_assist.xs"],
+            "visible_files must only return .xs files; got {:?}",
+            rels
+        );
+    }
+
+    #[test]
+    fn collect_overlay_files_excludes_non_xs_artifacts() {
+        let tmp = TempDir::new().unwrap();
+        let overlay_root = tmp.path().join("mod").join("game");
+        std::fs::create_dir_all(overlay_root.join("ai")).unwrap();
+
+        // Real overlay file.
+        touch(&overlay_root.join("ai/auto_repair.xs")).unwrap();
+        // A mod could in theory drop a binary asset into the overlay; the
+        // walker must NOT pick it up as XS source.
+        std::fs::write(overlay_root.join("ai/custom.bar"), b"\x00\x01\x02").unwrap();
+        std::fs::write(overlay_root.join("icon.png"), b"\x89PNG").unwrap();
+
+        let mut out = std::collections::HashMap::new();
+        collect_overlay_files(&overlay_root, &overlay_root, &mut out);
+        let rels: std::collections::HashSet<&str> =
+            out.keys().map(String::as_str).collect();
+        assert!(rels.contains("ai/auto_repair.xs"));
+        assert!(!rels.contains("ai/custom.bar"), "binary .bar must not be collected");
+        assert!(!rels.contains("icon.png"), "non-XS files must not be collected");
+    }
+
+    #[test]
+    fn resolve_file_rejects_binary_artifacts() {
+        let tmp = TempDir::new().unwrap();
+        let game_root = tmp.path().join("game");
+        std::fs::create_dir_all(game_root.join("art")).unwrap();
+
+        // A .bar file that exists on disk at the path the include walker
+        // might resolve. resolve_file must refuse to return it even though
+        // it exists, because it's not XS source.
+        std::fs::write(game_root.join("art/ArtAtlantean.bar"), b"\x00\x01\x02").unwrap();
+
+        let ws = Workspace::new(tmp.path().to_path_buf());
+        let project = VirtualProject::default();
+        let resolved = ws.resolve_file(&project, "art/ArtAtlantean.bar");
+        assert!(
+            resolved.is_none(),
+            "resolve_file must return None for .bar even when the file exists; got {:?}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn is_xs_file_recognises_case_insensitive_extension() {
+        // On Windows, AoM:R uses lowercase `.xs`; on macOS the user might
+        // double-click a file with `.XS`. Either should be accepted.
+        assert!(is_xs_file(Path::new("/x/y/foo.xs")));
+        assert!(is_xs_file(Path::new("/x/y/foo.XS")));
+        assert!(is_xs_file(Path::new("/x/y/Foo.Xs")));
+        assert!(!is_xs_file(Path::new("/x/y/foo.bar")));
+        assert!(!is_xs_file(Path::new("/x/y/foo")));
+        assert!(!is_xs_file(Path::new("/x/y/foo.txt")));
     }
 }
