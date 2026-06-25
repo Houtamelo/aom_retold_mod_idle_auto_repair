@@ -765,6 +765,7 @@ impl XsLanguageServer {
         } else {
             None
         };
+        let merged = self.build_merged_view_for_uri(uri, text).await;
 
         let diagnostics = match parser::parse(text) {
             Some(tree) => {
@@ -783,6 +784,7 @@ impl XsLanguageServer {
                         &table,
                         project.as_ref(),
                         current_file.as_deref(),
+                        merged.as_ref(),
                     ),
                     None => diagnostics::collect_diagnostics(&tree, text),
                 }

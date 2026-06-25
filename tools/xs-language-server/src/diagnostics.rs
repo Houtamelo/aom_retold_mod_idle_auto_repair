@@ -11,6 +11,7 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use tree_sitter::{Node, Tree};
 
 use crate::engine_api::EngineApi;
+use crate::merged_view::{IncludeDiagnostic, MergedView};
 use crate::semantic::VirtualProject;
 use crate::symbols::SymbolTable;
 use crate::{semantic, typecheck};
@@ -34,7 +35,8 @@ fn walk(node: Node, out: &mut Vec<Diagnostic>) {
 /// Full diagnostic pass for a file: parse errors + type-check + semantic.
 ///
 /// `project` and `current_file` are `None` for unowned files; in that case
-/// only engine-API-based checks run.
+/// only engine-API-based checks run. When `merged` is provided, the
+/// include-paste scope drives cross-file resolution.
 pub fn collect_all(
     tree: &Tree,
     source: &str,
@@ -42,13 +44,53 @@ pub fn collect_all(
     table: &SymbolTable,
     project: Option<&VirtualProject>,
     current_file: Option<&Path>,
+    merged: Option<&MergedView>,
 ) -> Vec<Diagnostic> {
     let mut diags = collect_diagnostics(tree, source);
-    diags.extend(typecheck::check_calls(tree, source, engine, table, project));
-    if let (Some(p), Some(cf)) = (project, current_file) {
-        diags.extend(semantic::check_all(p, cf));
+    diags.extend(typecheck::check_calls_with_merged(
+        tree, source, engine, table, merged, project,
+    ));
+
+    if let Some(p) = project {
+        // `extern` collisions are checked across the whole virtual project.
+        diags.extend(semantic::check_extern_collisions(p));
+
+        if let Some(cf) = current_file {
+            if let Some(mv) = merged {
+                diags.extend(semantic::check_forward_declarations_for_merged_view(
+                    p, cf, mv,
+                ));
+                diags.extend(semantic::check_mutable_redefinitions_for_merged_view(mv));
+            } else {
+                diags.extend(semantic::check_forward_declarations(p, cf));
+                diags.extend(semantic::check_mutable_redefinitions(p));
+            }
+        }
     }
+
+    if let Some(mv) = merged {
+        for inc in mv.missing_includes() {
+            diags.push(include_diagnostic_to_lsp(inc));
+        }
+    }
+
     diags
+}
+
+fn include_diagnostic_to_lsp(inc: &IncludeDiagnostic) -> Diagnostic {
+    Diagnostic {
+        range: inc.range,
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: Some(tower_lsp::lsp_types::NumberOrString::String(
+            "E0310".to_string(),
+        )),
+        code_description: None,
+        source: Some("xs-language-server".to_string()),
+        message: format!("include not found: {}", inc.target),
+        related_information: None,
+        tags: None,
+        data: None,
+    }
 }
 
 fn to_diagnostic(node: Node) -> Diagnostic {
