@@ -44,6 +44,8 @@ pub struct XsLanguageServer {
     pub documents: Arc<Mutex<DocumentStore>>,
     /// Per-file symbol tables, rebuilt on every `did_open` / `did_change`.
     pub symbol_tables: Arc<Mutex<HashMap<Url, symbols::SymbolTable>>>,
+    /// Per-file merged include-paste views, keyed by content-hash.
+    pub merged_views: Arc<Mutex<HashMap<Url, (merged_view::MergedViewCacheKey, merged_view::MergedView)>>>,
     pub engine: engine_api::SharedEngineApi,
     pub game_path: PathBuf,
     /// Registered workspace folders, each representing one mod.
@@ -65,6 +67,7 @@ impl XsLanguageServer {
             client,
             documents: Arc::new(Mutex::new(DocumentStore::default())),
             symbol_tables: Arc::new(Mutex::new(HashMap::new())),
+            merged_views: Arc::new(Mutex::new(HashMap::new())),
             engine,
             game_path,
             workspace: Arc::new(Mutex::new(workspace)),
@@ -92,14 +95,16 @@ impl XsLanguageServer {
         }
     }
 
-    /// Build a merged include-paste view for `uri` from its current buffer.
-    ///
-    /// The view is built on demand; T9 adds a content-keyed cache for this.
-    async fn build_merged_view_for_uri(
+    /// Return a cached merged view for `uri` when the content hash matches,
+    /// otherwise build a new one from the current buffer and cache it.
+    async fn get_or_build_merged_view(
         &self,
         uri: &Url,
         text: &str,
     ) -> Option<merged_view::MergedView> {
+        if let Some(cached) = self.cached_merged_view(uri, text).await {
+            return Some(cached);
+        }
         let current_file = uri.to_file_path().ok()?;
         let (ws_clone, project) = {
             let ws = self.workspace.lock().await;
@@ -115,20 +120,65 @@ impl XsLanguageServer {
             tables.get(uri).cloned().unwrap_or_default()
         };
         let cache_dir = crate::cache::state_cache_dir();
-        match merged_view::MergedView::build(
+        let view = merged_view::MergedView::build(
             &current_file,
             text,
             &own_table,
             &ws_clone,
             &project,
             &cache_dir,
-        ) {
-            Ok(mv) => Some(mv),
-            Err(e) => {
-                warn!("failed to build merged view for {}: {}", uri, e);
-                None
+        )
+        .ok()?;
+        let key = merged_view::MergedViewCacheKey::new(text, &view);
+        {
+            let mut views = self.merged_views.lock().await;
+            views.insert(uri.clone(), (key, view.clone()));
+        }
+        Some(view)
+    }
+
+    /// Look up a cached merged view for `uri` that matches `text`.
+    ///
+    /// Returns `None` when there is no cache entry or the content hash differs,
+    /// forcing a rebuild on the next call to [`Self::get_or_build_merged_view`].
+    async fn cached_merged_view(&self, uri: &Url, text: &str) -> Option<merged_view::MergedView> {
+        let views = self.merged_views.lock().await;
+        let (key, view) = views.get(uri)?;
+        let expected = merged_view::MergedViewCacheKey::new(text, view);
+        if key == &expected {
+            Some(view.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Remove a single cached merged view. Called on `textDocument/didOpen`
+    /// (to clear stale state) and `textDocument/didClose`.
+    async fn clear_merged_view_cache(&self, uri: &Url) {
+        let mut views = self.merged_views.lock().await;
+        views.remove(uri);
+    }
+
+    /// Drop every cached merged view whose include closure contains any of
+    /// `changed_paths`. Returns the affected open-file URIs so callers can
+    /// re-diagnose them.
+    async fn invalidate_merged_views_for(&self, changed_paths: &[PathBuf]) -> Vec<Url> {
+        if changed_paths.is_empty() {
+            return Vec::new();
+        }
+        let mut views = self.merged_views.lock().await;
+        let mut affected = Vec::new();
+        for uri in views.keys().cloned().collect::<Vec<_>>() {
+            let impacted = views
+                .get(&uri)
+                .map(|(_, mv)| changed_paths.iter().any(|p| mv.files().any(|f| f == p)))
+                .unwrap_or(false);
+            if impacted {
+                views.remove(&uri);
+                affected.push(uri);
             }
         }
+        affected
     }
 }
 
@@ -305,6 +355,7 @@ impl LanguageServer for XsLanguageServer {
             debug!("did_open: {} owned by {:?}", uri, owning_mod.as_ref().map(|m| &m.mod_uri));
         }
 
+        self.clear_merged_view_cache(&uri).await;
         self.rebuild_symbol_table(&uri, &text).await;
         self.publish_diagnostics(&uri, &text, version).await;
     }
@@ -339,6 +390,7 @@ impl LanguageServer for XsLanguageServer {
         docs.close(&uri);
         let mut tables = self.symbol_tables.lock().await;
         tables.remove(&uri);
+        self.clear_merged_view_cache(&uri).await;
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
@@ -366,9 +418,11 @@ impl LanguageServer for XsLanguageServer {
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         info!("did_change_watched_files: {} change(s)", params.changes.len());
+        let mut changed_paths = Vec::new();
         for change in &params.changes {
             debug!("watched file change: {:?} {:?}", change.typ, change.uri);
             if let Ok(path) = change.uri.to_file_path() {
+                changed_paths.push(path.clone());
                 let rel = {
                     let ws = self.workspace.lock().await;
                     path.strip_prefix(ws.game_path().join("game"))
@@ -384,20 +438,10 @@ impl LanguageServer for XsLanguageServer {
             }
         }
 
-        // Re-diagnose open mod files whose dependencies may have changed.
-        // In Phase 3 this will be narrowed to true include-graph dependents.
-        let uris = {
-            let docs = self.documents.lock().await;
-            docs.uris()
-        };
-        for uri in uris {
-            let is_owned = {
-                let ws = self.workspace.lock().await;
-                ws.lookup_mod(&uri).is_some()
-            };
-            if !is_owned {
-                continue;
-            }
+        // Drop any cached merged view whose include closure contains a
+        // changed file, then re-diagnose those open files.
+        let affected = self.invalidate_merged_views_for(&changed_paths).await;
+        for uri in affected {
             let (text, version) = {
                 let docs = self.documents.lock().await;
                 docs.get(&uri)
@@ -417,7 +461,7 @@ impl LanguageServer for XsLanguageServer {
             let docs = self.documents.lock().await;
             docs.get(uri).unwrap_or("").to_string()
         };
-        let merged = self.build_merged_view_for_uri(uri, &text).await;
+        let merged = self.get_or_build_merged_view(uri, &text).await;
         let items = completion::complete(
             &self.engine,
             merged.as_ref(),
@@ -765,7 +809,7 @@ impl XsLanguageServer {
         } else {
             None
         };
-        let merged = self.build_merged_view_for_uri(uri, text).await;
+        let merged = self.get_or_build_merged_view(uri, text).await;
 
         let diagnostics = match parser::parse(text) {
             Some(tree) => {

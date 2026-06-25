@@ -133,6 +133,37 @@ pub struct MergedView {
     tables: std::collections::HashMap<PathBuf, SymbolTable>,
 }
 
+/// Cache key for an already-built `MergedView`.
+///
+/// The merged scope depends only on the current file text and the text of
+/// every resolved include, so we hash those contents and sort by path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MergedViewCacheKey {
+    pub current_hash: String,
+    pub includes: Vec<(PathBuf, String)>,
+}
+
+impl MergedViewCacheKey {
+    pub fn new(current_source: &str, view: &MergedView) -> Self {
+        let current_hash = crate::cache::sha256_bytes(current_source.as_bytes());
+        let mut includes: Vec<_> = view
+            .files()
+            .filter(|p| *p != view.current_file())
+            .map(|p| {
+                (
+                    p.to_path_buf(),
+                    crate::cache::sha256_bytes(view.source(p).unwrap_or("").as_bytes()),
+                )
+            })
+            .collect();
+        includes.sort_by(|a, b| a.0.cmp(&b.0));
+        Self {
+            current_hash,
+            includes,
+        }
+    }
+}
+
 /// Error returned when `MergedView::build` cannot complete due to an I/O
 /// failure or an include cycle. Missing include targets are **not** errors;
 /// they are surfaced as `IncludeDiagnostic`s.
@@ -632,5 +663,39 @@ mod tests {
 
         let view = build_view(&a, root, None);
         assert!(view.find("helper").is_some());
+    }
+
+    #[test]
+    fn cache_key_matches_for_identical_closure() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let a = root.join("game").join("ai").join("a.xs");
+        let b = root.join("game").join("ai").join("b.xs");
+        write(&a, "include \"b.xs\";\n").unwrap();
+        write(&b, "void helper() {}\n").unwrap();
+
+        let view = build_view(&a, root, None);
+        let key1 = MergedViewCacheKey::new("void main() {}", &view);
+        let key2 = MergedViewCacheKey::new("void main() {}", &view);
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn cache_key_differs_when_include_changes() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let a = root.join("game").join("ai").join("a.xs");
+        let b = root.join("game").join("ai").join("b.xs");
+        write(&a, "include \"b.xs\";\n").unwrap();
+        write(&b, "void helper() {}\n").unwrap();
+
+        let view1 = build_view(&a, root, None);
+        let key1 = MergedViewCacheKey::new("void main() {}", &view1);
+
+        std::fs::write(&b, "void changed() {}").unwrap();
+        let view2 = build_view(&a, root, None);
+        let key2 = MergedViewCacheKey::new("void main() {}", &view2);
+
+        assert_ne!(key1, key2);
     }
 }
