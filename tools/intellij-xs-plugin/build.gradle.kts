@@ -11,11 +11,15 @@ plugins {
 group = "com.aomr"
 version = providers.gradleProperty("pluginVersion").get()
 
-// Sandbox-only workaround: a previous build under a different uid (100999)
-// left files under `build/` that this user cannot modify. Redirect the
-// build directory to a tmp location so the build can proceed. Safe to
-// delete in any environment that has a clean `build/` directory.
-project.buildDir = file("/tmp/opencode/intellij-xs-plugin-build")
+// `buildDir` is normally `tools/intellij-xs-plugin/build/`, but a previous
+// build under a different uid (100999) left files there that this user
+// cannot modify. Redirect to the repo-root `dist/.build/` — a sibling of
+// `dist/` that holds intermediate build artifacts. The whole `dist/` tree
+// is gitignored, so artifacts inside `dist/.build/` are never committed.
+// `copyDistributionToDist` (defined further down) moves the final .zip from
+// `dist/.build/distributions/` up to `dist/` so it sits alongside the
+// published artifacts (see docs/smoke-test-setup.md for the convention).
+project.buildDir = file("../../dist/.build")
 
 repositories {
     mavenCentral()
@@ -90,7 +94,7 @@ tasks {
             if (missing.isNotEmpty()) {
                 throw GradleException(
                     "Missing required bundled resources: ${missing.joinToString()}. " +
-                        "Run `./gradlew copyLspServerToResources` (or let `buildPlugin` do it) " +
+                        "Run `./gradlew stageLspServer` (or let `buildPlugin` do it) " +
                         "and retry. See docs/smoke-test-setup.md."
                 )
             }
@@ -124,14 +128,15 @@ tasks {
         }
     }
 
-    val copyLspServerToResources by registering(Copy::class) {
+    val stageLspServer by registering(Copy::class) {
         group = "build"
-        description = "Copy the LSP release binary into the plugin's resources/bin/."
+        description = "Stage the LSP release binary into src/main/resources/bin/."
         from(rootDir.parentFile.resolve("xs-language-server/target/release/xs-language-server"))
         into(layout.projectDirectory.dir("src/main/resources/bin"))
         dependsOn(buildLspServer)
-        // The destination is .gitignored (see repo root .gitignore); we always
-        // overwrite on each build so the bundled binary matches the source.
+        // The destination is .gitignored (see repo root .gitignore); we
+        // always overwrite on each build so the bundled binary matches the
+        // source.
         outputs.upToDateWhen { false }
     }
 
@@ -139,12 +144,30 @@ tasks {
     // resources/bin/xs-language-server file is in place when the JAR is
     // packaged. Otherwise gradle reports an implicit-dependency error.
     processResources {
-        dependsOn(copyLspServerToResources)
+        dependsOn(stageLspServer)
     }
 
     buildPlugin {
         dependsOn(validateBundledResources)
-        dependsOn(copyLspServerToResources)
+        dependsOn(stageLspServer)
+    }
+
+    // Move the final .zip from buildDir/distributions/ up to the repo-root
+    // dist/ folder so it sits alongside the documented smoke-test artifacts
+    // (see docs/smoke-test-setup.md). Runs after `buildPlugin` regardless of
+    // success because we want the .zip on disk even if downstream tasks fail.
+    // The plugin project lives at tools/intellij-xs-plugin/, so the repo
+    // root is `rootDir.parentFile.parentFile` — `../../dist` from here.
+    val copyDistributionToDist by registering(Copy::class) {
+        group = "build"
+        description = "Copy the plugin .zip from build/distributions/ to the repo-root dist/ folder."
+        from(layout.buildDirectory.dir("distributions"))
+        into(rootDir.parentFile.parentFile.resolve("dist"))
+        include("*.zip")
+    }
+
+    buildPlugin {
+        finalizedBy(copyDistributionToDist)
     }
 
     test {
