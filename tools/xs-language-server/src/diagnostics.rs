@@ -46,37 +46,68 @@ pub fn collect_all(
     project: Option<&VirtualProject>,
     current_file: Option<&Path>,
     merged: Option<&MergedView>,
-) -> Vec<Diagnostic> {
-    let mut diags = collect_diagnostics(tree, source);
-    diags.extend(typecheck::check_calls_with_merged(
-        tree, source, engine, table, merged, project,
-    ));
+) -> DiagnosticsByUri {
+    let mut diags: DiagnosticsByUri = HashMap::new();
+    let current_uri = current_file.and_then(|p| Url::from_file_path(p).ok());
+
+    if let Some(uri) = &current_uri {
+        let parse_diags = collect_diagnostics(tree, source);
+        if !parse_diags.is_empty() {
+            diags.entry(uri.clone()).or_default().extend(parse_diags);
+        }
+
+        let typecheck_diags =
+            typecheck::check_calls_with_merged(tree, source, engine, table, merged, project);
+        if !typecheck_diags.is_empty() {
+            diags.entry(uri.clone()).or_default().extend(typecheck_diags);
+        }
+    }
 
     if let Some(p) = project {
-        // `extern` collisions are checked across the whole virtual project.
-        diags.extend(semantic::check_extern_collisions(p));
+        if let Some(cf) = current_file {
+            let extern_diags = semantic::check_extern_collisions(p, cf, merged);
+            merge_diagnostic_maps(&mut diags, extern_diags);
 
-            if let Some(cf) = current_file {
-                if let Some(mv) = merged {
-                    diags.extend(semantic::check_forward_declarations_for_merged_view(
-                        p, engine, cf, mv,
-                    ));
-                    diags.extend(semantic::check_mutable_redefinitions_for_merged_view(mv));
+            if let Some(uri) = &current_uri {
+                let fwd = if let Some(mv) = merged {
+                    semantic::check_forward_declarations_for_merged_view(p, engine, cf, mv)
                 } else {
-                    diags.extend(semantic::check_forward_declarations(p, engine, cf));
-                    diags.extend(semantic::check_mutable_redefinitions(p));
+                    semantic::check_forward_declarations(p, engine, cf)
+                };
+                if !fwd.is_empty() {
+                    diags.entry(uri.clone()).or_default().extend(fwd);
+                }
+
+                let mut_diags = if let Some(mv) = merged {
+                    semantic::check_mutable_redefinitions_for_merged_view(mv)
+                } else {
+                    semantic::check_mutable_redefinitions(p)
+                };
+                if !mut_diags.is_empty() {
+                    diags.entry(uri.clone()).or_default().extend(mut_diags);
                 }
             }
-
+        }
     }
 
     if let Some(mv) = merged {
-        for inc in mv.missing_includes() {
-            diags.push(include_diagnostic_to_lsp(inc));
+        if let Some(uri) = &current_uri {
+            for inc in mv.missing_includes() {
+                diags
+                    .entry(uri.clone())
+                    .or_default()
+                    .push(include_diagnostic_to_lsp(inc));
+            }
         }
     }
 
     diags
+}
+
+fn merge_diagnostic_maps(base: &mut DiagnosticsByUri, other: DiagnosticsByUri) {
+    for (uri, ds) in other {
+        base.entry(uri).or_default().extend(ds);
+    }
 }
 
 fn include_diagnostic_to_lsp(inc: &IncludeDiagnostic) -> Diagnostic {
@@ -162,4 +193,65 @@ pub fn is_unresolved_symbol(d: &Diagnostic) -> bool {
 /// True if `d` is a wrong-argument-count diagnostic.
 pub fn is_argument_mismatch(d: &Diagnostic) -> bool {
     categorize(d) == DiagnosticCategory::WrongArgCount
+}
+
+#[cfg(test)]
+mod tests {
+    use tower_lsp::lsp_types::{Diagnostic, Range};
+
+    use super::{categorize, DiagnosticCategory};
+
+    fn diag(message: &str) -> Diagnostic {
+        Diagnostic {
+            range: Range::default(),
+            severity: None,
+            code: None,
+            code_description: None,
+            source: None,
+            message: message.to_string(),
+            related_information: None,
+            tags: None,
+            data: None,
+        }
+    }
+
+    #[test]
+    fn test_diagnostic_category_assigns_extern_collision() {
+        assert_eq!(
+            categorize(&diag("duplicate extern: 'gFoo' is declared extern in a.xs and b.xs")),
+            DiagnosticCategory::ExternCollision
+        );
+        assert_eq!(
+            categorize(&diag("extern collision: 'gFoo' is declared extern in a.xs, also defined in b.xs")),
+            DiagnosticCategory::ExternCollision
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_category_assigns_unresolved_symbol() {
+        assert_eq!(
+            categorize(&diag("Error 0310: invalid symbol lookup 'foo' at line 1")),
+            DiagnosticCategory::UnresolvedSymbol
+        );
+        assert_eq!(
+            categorize(&diag("unresolved symbol 'bar' at line 2")),
+            DiagnosticCategory::UnresolvedSymbol
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_category_assigns_wrong_arg_count() {
+        assert_eq!(
+            categorize(&diag("expected 4 argument(s) to `aiPlanCreate`, got 2")),
+            DiagnosticCategory::WrongArgCount
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_category_assigns_other() {
+        assert_eq!(
+            categorize(&diag("mutable function 'foo' redefined with different signature")),
+            DiagnosticCategory::Other
+        );
+    }
 }

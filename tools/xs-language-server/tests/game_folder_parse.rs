@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use tower_lsp::lsp_types::Url;
 use xs_language_server::diagnostics::{collect_all, DiagnosticCategory};
 use xs_language_server::engine_api::EngineApi;
 use xs_language_server::merged_view::MergedView;
@@ -471,6 +472,13 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
             let ws_project = VirtualProject::default();
             let cache_dir = xs_language_server::cache::state_cache_dir();
 
+            let mut source_by_uri: HashMap<Url, String> = HashMap::new();
+            for (path, file) in &project.files {
+                if let Ok(uri) = Url::from_file_path(path) {
+                    source_by_uri.insert(uri, file.source.clone());
+                }
+            }
+
             let mut duplicate_extern = 0usize;
             let mut wrong_uri = 0usize;
             let mut unresolved_symbol = 0usize;
@@ -497,7 +505,7 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
                 let table = symbols::build_symbol_table(&tree, &source);
                 let merged =
                     MergedView::build(path, &source, &table, &workspace, &ws_project, &cache_dir);
-                let diags = collect_all(
+                let diags_by_uri = collect_all(
                     &tree,
                     &source,
                     &engine_api,
@@ -507,48 +515,60 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
                     Some(&merged),
                 );
 
-                let line_count = source.lines().count() as u32;
+                for (uri, file_diags) in diags_by_uri {
+                    let source_for_uri = source_by_uri
+                        .get(&uri)
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let line_count = source_for_uri.lines().count() as u32;
+                    let path_for_uri = uri
+                        .to_file_path()
+                        .unwrap_or_else(|_| path.clone());
 
-                for d in diags {
-                    let cat = xs_language_server::diagnostics::categorize(&d);
-                    match cat {
-                        DiagnosticCategory::ExternCollision => {
-                            duplicate_extern += 1;
-                            record_example(cat, path, &d.message);
-                        }
-                        DiagnosticCategory::WrongArgCount => {
-                            wrong_arg_count += 1;
-                            record_example(cat, path, &d.message);
-                        }
-                        DiagnosticCategory::UnresolvedSymbol => {
-                            unresolved_symbol += 1;
-                            if let Some(callee) = extract_callee_from_diagnostic(&d.message) {
-                                if rule_names.contains(&callee) {
-                                    rule_call_unresolved += 1;
-                                }
-                                if let Some(count) = callee_counts.get_mut(&callee) {
-                                    *count += 1;
-                                }
+                    for d in file_diags {
+                        let cat = xs_language_server::diagnostics::categorize(&d);
+                        match cat {
+                            DiagnosticCategory::ExternCollision => {
+                                duplicate_extern += 1;
+                                record_example(cat, &path_for_uri, &d.message);
                             }
-                            record_example(cat, path, &d.message);
+                            DiagnosticCategory::WrongArgCount => {
+                                wrong_arg_count += 1;
+                                record_example(cat, &path_for_uri, &d.message);
+                            }
+                            DiagnosticCategory::UnresolvedSymbol => {
+                                unresolved_symbol += 1;
+                                if let Some(callee) = extract_callee_from_diagnostic(&d.message) {
+                                    if rule_names.contains(&callee) {
+                                        rule_call_unresolved += 1;
+                                    }
+                                    if let Some(count) = callee_counts.get_mut(&callee) {
+                                        *count += 1;
+                                    }
+                                }
+                                record_example(cat, &path_for_uri, &d.message);
+                            }
+                            _ => {}
                         }
-                        _ => {}
-                    }
 
-                    if d.range.start.line > d.range.end.line
-                        || d.range.start.line >= line_count
-                        || d.range.end.line > line_count
-                    {
-                        wrong_uri += 1;
-                        record_example(
-                            DiagnosticCategory::WrongRangeUri,
-                            path,
-                            &format!("{} (range {:?} outside {} lines)", d.message, d.range, line_count),
-                        );
-                    }
+                        if d.range.start.line > d.range.end.line
+                            || d.range.start.line >= line_count
+                            || d.range.end.line > line_count
+                        {
+                            wrong_uri += 1;
+                            record_example(
+                                DiagnosticCategory::WrongRangeUri,
+                                &path_for_uri,
+                                &format!(
+                                    "{} (range {:?} outside {} lines)",
+                                    d.message, d.range, line_count
+                                ),
+                            );
+                        }
 
-                    if !matches!(cat, DiagnosticCategory::Other) {
-                        total += 1;
+                        if !matches!(cat, DiagnosticCategory::Other) {
+                            total += 1;
+                        }
                     }
                 }
             }

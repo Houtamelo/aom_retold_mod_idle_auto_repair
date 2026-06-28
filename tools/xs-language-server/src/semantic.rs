@@ -14,8 +14,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use anyhow::Context;
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
+use crate::diagnostics::DiagnosticsByUri;
 use crate::engine_api::{EngineApi, EngineSignature};
 use crate::merged_view::{MergedView, VisibilityProvenance};
 use crate::parser;
@@ -194,33 +196,72 @@ impl SemanticChecker {
         Self { project }
     }
 
-    /// Run all semantic checks using an empty engine API. Tests that only
-    /// exercise workspace symbols can use this convenience wrapper.
+    /// Run all semantic checks using an empty engine API and flatten the
+    /// per-URI diagnostics into a single `Vec`. Legacy tests that attach
+    /// diagnostics to the current file can use this convenience wrapper.
     pub fn check_all(&self, current_file: &Path) -> Vec<Diagnostic> {
-        check_all(&self.project, &EngineApi::default(), current_file)
+        let by_uri = check_all(&self.project, &EngineApi::default(), current_file);
+        by_uri.into_values().flatten().collect()
     }
 }
 
-/// Run all semantic checks and return the combined diagnostics.
+/// Run all semantic checks and return diagnostics grouped by URI.
 pub fn check_all(
     project: &VirtualProject,
     engine: &EngineApi,
     current_file: &Path,
-) -> Vec<Diagnostic> {
+) -> DiagnosticsByUri {
     let merged = build_merged_view_from_project(project, current_file);
-    let mut out = Vec::new();
-    out.extend(check_extern_collisions(project));
+    let mut out: DiagnosticsByUri = HashMap::new();
+
+    let current_uri = Url::from_file_path(current_file).ok();
+
+    let extern_diags = check_extern_collisions(project, current_file, merged.as_ref());
+    merge_diagnostic_maps(&mut out, extern_diags);
+
     if let Some(mv) = merged.as_ref() {
-        out.extend(check_forward_declarations_for_merged_view(
-            project, engine, current_file, mv,
-        ));
-        out.extend(check_mutable_redefinitions_for_merged_view(mv));
+        merge_diagnostics_under_uri(
+            &mut out,
+            current_uri.clone(),
+            check_forward_declarations_for_merged_view(project, engine, current_file, mv),
+        );
+        merge_diagnostics_under_uri(
+            &mut out,
+            current_uri,
+            check_mutable_redefinitions_for_merged_view(mv),
+        );
     } else {
         // Fallback for tests/fixtures that don't sit under a `game/` root.
-        out.extend(check_forward_declarations(project, engine, current_file));
-        out.extend(check_mutable_redefinitions(project));
+        merge_diagnostics_under_uri(
+            &mut out,
+            current_uri.clone(),
+            check_forward_declarations(project, engine, current_file),
+        );
+        merge_diagnostics_under_uri(
+            &mut out,
+            current_uri,
+            check_mutable_redefinitions(project),
+        );
     }
+
     out
+}
+
+fn merge_diagnostic_maps(base: &mut DiagnosticsByUri, other: DiagnosticsByUri) {
+    for (uri, ds) in other {
+        base.entry(uri).or_default().extend(ds);
+    }
+}
+
+fn merge_diagnostics_under_uri(
+    base: &mut DiagnosticsByUri,
+    uri: Option<Url>,
+    diags: Vec<Diagnostic>,
+) {
+    let Some(uri) = uri else { return; };
+    if !diags.is_empty() {
+        base.entry(uri).or_default().extend(diags);
+    }
 }
 
 // --- merged-view helpers ---------------------------------------------------
@@ -269,85 +310,175 @@ fn effective_line(ms: &crate::merged_view::MergedSymbol) -> u32 {
     }
 }
 
-/// Detect `extern` collisions: if any file declares `X` as `extern`, no other
-/// file in the same project may declare or define `X` in any form.
-pub fn check_extern_collisions(project: &VirtualProject) -> Vec<Diagnostic> {
-    let mut by_name: HashMap<String, Vec<(PathBuf, &Symbol)>> = HashMap::new();
-    for (path, file) in &project.files {
+/// Detect `extern` collisions scoped to the current logical link unit.
+///
+/// Only files in `merged` (current file + transitive includes) are considered.
+/// Two `extern` declarations on the same include chain are allowed; everything
+/// else collides. Each diagnostic is emitted under the declaring file's URI.
+pub fn check_extern_collisions(
+    project: &VirtualProject,
+    current_file: &Path,
+    merged: Option<&MergedView>,
+) -> DiagnosticsByUri {
+    let mut diags: DiagnosticsByUri = HashMap::new();
+
+    let paths_in_scope: Vec<&Path> = {
+        let raw: Vec<&Path> = if let Some(m) = merged {
+            m.files().collect()
+        } else {
+            project.files.keys().map(|p| p.as_path()).collect()
+        };
+        // `MergedView::files()` returns the current file once as its own table
+        // and once from the `tables` map, so deduplicate before scanning.
+        let mut seen = HashSet::new();
+        raw.into_iter()
+            .filter(|p| seen.insert(p.as_os_str()))
+            .collect()
+    };
+
+    let mut by_name: HashMap<String, Vec<(&Path, &Symbol)>> = HashMap::new();
+    for path in paths_in_scope {
+        let Some(file) = project.files.get(path) else {
+            continue;
+        };
         for sym in &file.table.symbols {
             by_name
                 .entry(sym.name.clone())
                 .or_default()
-                .push((path.clone(), sym));
+                .push((path, sym));
         }
     }
 
-    let mut diags = Vec::new();
+    let edges = merged.map(|m| m.graph().edges()).unwrap_or_default();
+
     for (name, occurrences) in &by_name {
-        // Files that have at least one `extern` occurrence of this name.
-        let extern_files: HashSet<&Path> = occurrences
+        let extern_occurrences: Vec<(&Path, &Symbol)> = occurrences
             .iter()
             .filter(|(_, s)| s.visibility == Visibility::Extern)
-            .map(|(p, _)| p.as_path())
+            .copied()
             .collect();
 
-        if extern_files.is_empty() {
+        if extern_occurrences.is_empty() {
             continue;
         }
 
-        // Every occurrence in a different file from the extern declaration is
-        // a collision. Duplicate `extern` declarations in different files also
-        // collide.
-        for (path, sym) in occurrences {
-            if !extern_files.contains(path.as_path()) {
-                let extern_file = extern_files.iter().next().unwrap();
-                diags.push(Diagnostic {
-                    range: sym.selection_range,
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: Some(tower_lsp::lsp_types::NumberOrString::String(
-                        "E0310".to_string(),
-                    )),
-                    code_description: None,
-                    source: Some("xs-language-server".to_string()),
-                    message: format!(
-                        "extern collision: '{}' is declared extern in {}, also defined in {}",
-                        name,
-                        extern_file.display(),
-                        path.display()
-                    ),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
-            } else if extern_files.len() > 1 {
-                // More than one file has `extern X`.
-                let other_file = extern_files
-                    .iter()
-                    .find(|&&p| p != path.as_path())
-                    .unwrap();
-                diags.push(Diagnostic {
-                    range: sym.selection_range,
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: Some(tower_lsp::lsp_types::NumberOrString::String(
-                        "E0310".to_string(),
-                    )),
-                    code_description: None,
-                    source: Some("xs-language-server".to_string()),
-                    message: format!(
-                        "duplicate extern: '{}' is declared extern in {} and {}",
-                        name,
-                        other_file.display(),
-                        path.display()
-                    ),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
+        // An `extern` declaration colliding with a non-`extern` definition.
+        for (path, sym) in occurrences.iter().filter(|(_, s)| s.visibility != Visibility::Extern) {
+            for (ext_path, ext_sym) in &extern_occurrences {
+                emit_extern_collision(&mut diags, name, *path, *sym, *ext_path);
+                // Also flag the extern declaration site? The engine error is
+                // on the redefinition, but surface the extern site too for
+                // clarity.
+                emit_extern_collision(&mut diags, name, *ext_path, *ext_sym, *path);
+            }
+        }
+
+        // Duplicate `extern` declarations.
+        for i in 0..extern_occurrences.len() {
+            for j in (i + 1)..extern_occurrences.len() {
+                let (p1, s1) = extern_occurrences[i];
+                let (p2, s2) = extern_occurrences[j];
+
+                let collision = if p1 == p2 {
+                    // Same file: multiple `extern` declarations are never legal.
+                    true
+                } else {
+                    !same_include_chain(p1, p2, edges)
+                };
+
+                if !collision {
+                    continue;
+                }
+
+                emit_extern_collision(&mut diags, name, p1, s1, p2);
+                emit_extern_collision(&mut diags, name, p2, s2, p1);
             }
         }
     }
 
+    // Only publish diagnostics that belong to the current link unit. The
+    // caller (the LSP server) will publish diagnostics per URI, so keeping
+    // only relevant URIs avoids leaking stale diagnostics for unrelated files.
+    if let Some(m) = merged {
+        let current_uri = match Url::from_file_path(current_file) {
+            Ok(uri) => uri,
+            Err(_) => return diags,
+        };
+        let mut filtered: DiagnosticsByUri = HashMap::new();
+        for (uri, ds) in diags {
+            if uri == current_uri || m.files().any(|p| Url::from_file_path(p).ok() == Some(uri.clone())) {
+                filtered.insert(uri, ds);
+            }
+        }
+        return filtered;
+    }
+
     diags
+}
+
+fn emit_extern_collision(
+    diags: &mut DiagnosticsByUri,
+    name: &str,
+    decl_path: &Path,
+    decl_sym: &Symbol,
+    other_path: &Path,
+) {
+    let Some(uri) = Url::from_file_path(decl_path).ok() else {
+        return;
+    };
+
+    let message = if decl_sym.visibility == Visibility::Extern {
+        format!(
+            "duplicate extern: '{}' is declared extern in {} and {}",
+            name,
+            other_path.display(),
+            decl_path.display()
+        )
+    } else {
+        format!(
+            "extern collision: '{}' is declared extern in {}, also defined in {}",
+            name,
+            other_path.display(),
+            decl_path.display()
+        )
+    };
+
+    diags.entry(uri).or_default().push(Diagnostic {
+        range: decl_sym.selection_range,
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: Some(tower_lsp::lsp_types::NumberOrString::String(
+            "E0310".to_string(),
+        )),
+        code_description: None,
+        source: Some("xs-language-server".to_string()),
+        message,
+        related_information: None,
+        tags: None,
+        data: None,
+    });
+}
+
+fn same_include_chain(a: &Path, b: &Path, edges: &[crate::workspace::IncludeEdge]) -> bool {
+    reaches(a, b, edges) || reaches(b, a, edges)
+}
+
+fn reaches(from: &Path, to: &Path, edges: &[crate::workspace::IncludeEdge]) -> bool {
+    let mut visited = HashSet::new();
+    let mut stack = vec![from];
+    while let Some(cur) = stack.pop() {
+        if cur == to {
+            return true;
+        }
+        if !visited.insert(cur) {
+            continue;
+        }
+        for e in edges {
+            if e.from == cur {
+                stack.push(e.to.as_path());
+            }
+        }
+    }
+    false
 }
 
 /// Validate that every function call in `current_file` is preceded by a
@@ -772,6 +903,7 @@ mod tests {
     use std::sync::OnceLock;
 
     use tempfile::TempDir;
+    use tower_lsp::lsp_types::Url;
 
     use crate::engine_api::EngineApi;
     use crate::merged_view::MergedView;
@@ -865,36 +997,175 @@ mod tests {
         (tmp, prj, merged, current)
     }
 
+    fn total_count(diags: &DiagnosticsByUri) -> usize {
+        diags.values().map(|v| v.len()).sum()
+    }
+
     #[test]
     fn extern_collision_between_files() {
-        let prj = project(&[
-            ("a.xs", "extern int gFoo = 5;\n"),
-            ("b.xs", "int gFoo = 5;\n"),
-        ]);
-        let diags = check_extern_collisions(&prj);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("extern collision"));
-        assert!(diags[0].message.contains("gFoo"));
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "extern int gFoo = 5;\ninclude \"b.xs\";\n"),
+                ("ai/b.xs", "int gFoo = 5;\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
+        assert!(
+            total_count(&diags) >= 1,
+            "expected at least one extern collision diagnostic"
+        );
+        assert!(diags
+            .values()
+            .flatten()
+            .any(|d| d.message.contains("extern collision") && d.message.contains("gFoo")));
     }
 
     #[test]
     fn duplicate_extern_between_files_is_collision() {
-        let prj = project(&[
-            ("a.xs", "extern int gFoo = 5;\n"),
-            ("b.xs", "extern int gFoo = 5;\n"),
-        ]);
-        let diags = check_extern_collisions(&prj);
-        assert_eq!(diags.len(), 2, "both extern declarations should be flagged");
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "include \"b.xs\";\ninclude \"c.xs\";\n"),
+                ("ai/b.xs", "extern int gFoo = 5;\n"),
+                ("ai/c.xs", "extern int gFoo = 5;\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
+        assert_eq!(
+            total_count(&diags),
+            2,
+            "both extern declarations should be flagged"
+        );
     }
 
     #[test]
     fn file_local_same_name_is_ok() {
-        let prj = project(&[
-            ("a.xs", "int localOnly = 1;\n"),
-            ("b.xs", "int localOnly = 2;\n"),
-        ]);
-        let diags = check_extern_collisions(&prj);
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "int localOnly = 1;\n"),
+                ("ai/b.xs", "int localOnly = 2;\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn test_extern_collision_across_unrelated_files() {
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "void main() {}\n"),
+                ("ai/b.xs", "extern int gFoo = -1;\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
+        assert!(diags.is_empty(), "unrelated files should not collide, got {diags:?}");
+    }
+
+    #[test]
+    fn test_extern_collision_within_include_paste() {
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "extern int gFoo = -1;\ninclude \"b.xs\";\n"),
+                ("ai/b.xs", "extern int gFoo = -1;\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
+        assert!(diags.is_empty(), "same-chain extern duplicates should be allowed, got {diags:?}");
+    }
+
+    #[test]
+    fn test_extern_collision_sibling_includes() {
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "include \"b.xs\";\ninclude \"c.xs\";\n"),
+                ("ai/b.xs", "extern int gBar = -1;\n"),
+                ("ai/c.xs", "extern int gBar = -1;\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
+        assert!(
+            total_count(&diags) >= 1,
+            "sibling includes with duplicate extern should produce a diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_extern_collision_extern_vs_definition() {
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "extern int gBaz = -1;\ninclude \"b.xs\";\n"),
+                ("ai/b.xs", "int gBaz = -1;\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
+        assert!(
+            total_count(&diags) >= 1,
+            "extern colliding with non-extern definition should produce a diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_range_points_at_declaration() {
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "include \"b.xs\";\ninclude \"c.xs\";\n"),
+                ("ai/b.xs", "extern int gFoo = -1;\n"),
+                ("ai/c.xs", "extern int gFoo = -1;\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
+        let included_uri = Url::from_file_path(current.parent().unwrap().join("b.xs")).unwrap();
+        assert!(
+            diags.contains_key(&included_uri),
+            "expected diagnostic on included declaration {included_uri}; got {diags:?}"
+        );
+        let included_diags = diags.get(&included_uri).unwrap();
+        assert_eq!(included_diags[0].range.start.line, 0);
+    }
+
+    #[test]
+    fn test_diagnostic_range_uri_is_correct() {
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                (
+                    "ai/a.xs",
+                    "extern int gLocal = -1;\n// filler\nextern int gLocal = -1;\n",
+                ),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
+        let uri = Url::from_file_path(&current).unwrap();
+        assert!(diags.contains_key(&uri));
+        assert!(diags[&uri].iter().any(|d| d.range.start.line == 2));
+    }
+
+    #[test]
+    fn test_diagnostic_message_names_both_files() {
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "include \"b.xs\";\ninclude \"c.xs\";\n"),
+                ("ai/b.xs", "extern int gBar = -1;\n"),
+                ("ai/c.xs", "extern int gBar = -1;\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
+        assert!(
+            diags.values().flatten().any(|d| {
+                let m = &d.message;
+                m.contains("b.xs") && m.contains("c.xs")
+            }),
+            "message should name both files, got {diags:?}"
+        );
     }
 
     #[test]

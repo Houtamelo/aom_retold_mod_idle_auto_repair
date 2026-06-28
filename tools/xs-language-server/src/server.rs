@@ -910,8 +910,8 @@ impl XsLanguageServer {
     }
 
     /// Parse `text` as XS and publish parse, type-check, and semantic
-    /// diagnostics. An empty `Vec` (clean parse) is also published so clients
-    /// clear stale diagnostics for this URI.
+    /// diagnostics per URI. An empty entry for a URI (clean file) is also
+    /// published so clients clear stale diagnostics for that file.
     async fn publish_diagnostics(&self, uri: &Url, text: &str, version: i32) {
         let current_file = uri.to_file_path().ok();
         let project = if current_file.is_some() {
@@ -921,7 +921,7 @@ impl XsLanguageServer {
         };
         let merged = self.get_or_build_merged_view(uri, text).await;
 
-        let diagnostics = match parser::parse(text) {
+        let diagnostics_by_uri = match parser::parse(text) {
             Some(tree) => {
                 // Hold the symbol-tables lock briefly to look up the
                 // per-file table; releasing before the heavier checks keeps
@@ -940,29 +940,36 @@ impl XsLanguageServer {
                         current_file.as_deref(),
                         merged.as_ref(),
                     ),
-                    None => diagnostics::collect_diagnostics(&tree, text),
+                    None => {
+                        let mut map = std::collections::HashMap::new();
+                        map.insert(uri.clone(), diagnostics::collect_diagnostics(&tree, text));
+                        map
+                    }
                 }
             }
-            None => vec![Diagnostic {
-                range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: None,
-                code_description: None,
-                source: Some("xs-language-server".to_string()),
-                message: "internal error: failed to install XS language".to_string(),
-                related_information: None,
-                tags: None,
-                data: None,
-            }],
+            None => {
+                let mut map = std::collections::HashMap::new();
+                map.insert(uri.clone(), vec![Diagnostic {
+                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("xs-language-server".to_string()),
+                    message: "internal error: failed to install XS language".to_string(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                }]);
+                map
+            }
         };
-        debug!(
-            "publish_diagnostics: {} ({} issue(s))",
-            uri,
-            diagnostics.len()
-        );
-        self.client
-            .publish_diagnostics(uri.clone(), diagnostics, Some(version))
-            .await;
+        let total: usize = diagnostics_by_uri.values().map(|v| v.len()).sum();
+        debug!("publish_diagnostics: {} ({} issue(s) across {} URI(s))", uri, total, diagnostics_by_uri.len());
+        for (diag_uri, diags) in diagnostics_by_uri {
+            self.client
+                .publish_diagnostics(diag_uri, diags, Some(version))
+                .await;
+        }
     }
 
     /// Build a semantic virtual project for the mod that owns `uri`.
