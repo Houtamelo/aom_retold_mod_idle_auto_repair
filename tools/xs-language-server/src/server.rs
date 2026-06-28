@@ -692,20 +692,78 @@ impl LanguageServer for XsLanguageServer {
             return Ok(None);
         };
 
-        // Engine API has no source location — return an empty list rather
-        // than a malformed Location.
-        if self.engine.find_syscall(&ident).is_some()
-            || self.engine.find_aiplan(&ident).is_some()
-        {
-            debug!("references: `{ident}` is engine API; returning []");
-            return Ok(Some(vec![]));
-        }
-
         let current_file = uri.to_file_path().ok();
         let merged = self.get_or_build_merged_view(uri, &text).await;
 
         let mut locs = Vec::new();
         let mut seen: HashSet<(String, u32, u32, u32, u32)> = HashSet::new();
+
+        let is_engine_api = self.engine.find_syscall(&ident).is_some()
+            || self.engine.find_aiplan(&ident).is_some();
+        let has_workspace_def = is_engine_api
+            && (merged.as_ref().and_then(|mv| mv.find(&ident)).is_some()
+                || self
+                    .symbol_tables
+                    .lock()
+                    .await
+                    .get(uri)
+                    .and_then(|t| t.find(&ident))
+                    .is_some());
+
+        if is_engine_api && !has_workspace_def {
+            // Engine symbols have no declaration. Scan every visible file in
+            // the workspace for use sites, with bounded time budgets.
+            let (project, ws_locked) = {
+                let ws = self.workspace.lock().await;
+                let entry = ws.lookup_mod(uri);
+                let project = entry.map(|e| ws.build_virtual_project(e)).unwrap_or_default();
+                (project, ws.clone())
+            };
+            let files = project.visible_files(&ws_locked);
+            const PER_FILE_BUDGET_MS: u64 = 50;
+            const TOTAL_BUDGET_MS: u64 = 500;
+            let total_start = std::time::Instant::now();
+            for (_rel, path) in files {
+                if total_start.elapsed() >= std::time::Duration::from_millis(TOTAL_BUDGET_MS) {
+                    warn!(
+                        "references: total workspace scan budget of {} ms exceeded for `{ident}`; truncating",
+                        TOTAL_BUDGET_MS
+                    );
+                    break;
+                }
+                let file_start = std::time::Instant::now();
+                let Ok(file_text) = tokio::fs::read_to_string(&path).await else { continue };
+                let Some(tree) = parser::parse(&file_text) else { continue };
+                let raw = references::find_identifier_uses(&tree, &file_text, &ident);
+                let Ok(file_uri) = Url::from_file_path(&path) else { continue };
+                for range in raw {
+                    if seen.insert((
+                        file_uri.to_string(),
+                        range.start.line,
+                        range.start.character,
+                        range.end.line,
+                        range.end.character,
+                    )) {
+                        locs.push(Location {
+                            uri: file_uri.clone(),
+                            range,
+                        });
+                    }
+                }
+                if file_start.elapsed() >= std::time::Duration::from_millis(PER_FILE_BUDGET_MS) {
+                    warn!(
+                        "references: per-file scan budget of {} ms exceeded for {}",
+                        PER_FILE_BUDGET_MS,
+                        path.display()
+                    );
+                }
+            }
+            debug!(
+                "references: `{ident}` -> {} engine-API location(s) across workspace",
+                locs.len()
+            );
+            return Ok(Some(locs));
+        }
 
         if let Some(mv) = merged {
             // Walk every file in the include-paste scope.
