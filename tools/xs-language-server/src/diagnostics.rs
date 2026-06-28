@@ -107,6 +107,12 @@ pub fn collect_all(
         }
     }
 
+    // Always emit an entry for the current file so clients receive an empty
+    // publishDiagnostics notification when the last issue is resolved.
+    if let Some(uri) = &current_uri {
+        diags.entry(uri.clone()).or_default();
+    }
+
     diags
 }
 
