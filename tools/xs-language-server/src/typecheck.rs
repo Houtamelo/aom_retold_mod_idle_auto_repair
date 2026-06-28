@@ -94,14 +94,23 @@ fn check_one_call(
     };
 
     let Some(target) = resolved else { return };
+
+    // Rules are handled by semantic resolution; type-checking a rule call
+    // would require a zero-parameter signature that the engine supplies
+    // internally, so we skip them here.
+    if matches!(target, Callee::Workspace(sym) if sym.kind == crate::symbols::SymbolKind::Rule) {
+        return;
+    }
+
+    let callee_source = target.source();
     let name = target.name();
     let params = target.params();
+    let required_count = required_param_count(&params, callee_source);
 
     let arg_list = find_named_child(call_node, "argument_list");
     let arg_count = arg_list.map(count_args).unwrap_or(0);
-    let expected_count = params.len();
 
-    if arg_count != expected_count {
+    if arg_count > params.len() {
         out.push(Diagnostic {
             range: node_range(call_node),
             severity: Some(DiagnosticSeverity::ERROR),
@@ -109,15 +118,27 @@ fn check_one_call(
             code_description: None,
             source: Some("xs-language-server".to_string()),
             message: format!(
-                "expected {expected_count} argument(s) to `{name}`, got {arg_count}"
+                "expected {} argument(s) to `{name}`, got {arg_count}",
+                params.len()
             ),
             related_information: None,
             tags: None,
             data: None,
         });
-        // Fall through to per-arg type checks too — we'd rather surface
-        // every problem with a call in one pass than force the user to
-        // fix the count first, re-save, and discover new type errors.
+    } else if arg_count < required_count {
+        out.push(Diagnostic {
+            range: node_range(call_node),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("xs-language-server".to_string()),
+            message: format!(
+                "expected {required_count} required argument(s) to `{name}`, got {arg_count}"
+            ),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
     }
 
     let Some(args) = arg_list else { return };
@@ -151,6 +172,22 @@ fn check_one_call(
     }
 }
 
+/// Where a resolved callee's signature comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CalleeSource {
+    Workspace,
+    EngineApi,
+}
+
+fn required_param_count(params: &[Param], source: CalleeSource) -> usize {
+    match source {
+        // The engine runtime supplies defaults for all non-`ref` parameters,
+        // even when the Doxygen extraction did not capture them.
+        CalleeSource::EngineApi => 0,
+        CalleeSource::Workspace => params.iter().filter(|p| p.default.is_none()).count(),
+    }
+}
+
 /// A resolved callee, either an engine syscall or a workspace function.
 enum Callee<'a> {
     Engine(&'a crate::engine_api::Syscall),
@@ -162,6 +199,13 @@ impl<'a> Callee<'a> {
         match self {
             Callee::Engine(s) => &s.name,
             Callee::Workspace(sym) => &sym.name,
+        }
+    }
+
+    fn source(&self) -> CalleeSource {
+        match self {
+            Callee::Engine(_) => CalleeSource::EngineApi,
+            Callee::Workspace(_) => CalleeSource::Workspace,
         }
     }
 
@@ -370,17 +414,90 @@ mod tests {
     }
 
     #[test]
-    fn flags_wrong_arg_count_too_few() {
+    fn flags_wrong_arg_count_too_few_for_workspace_function() {
+        let src = r#"void myFn(int a, int b) {}
+void test() { myFn(1); }"#;
+        let tree = parse(src);
+        let table = table_for(src);
+        let mut files = std::collections::HashMap::new();
+        files.insert(PathBuf::from("test.xs"), src.to_string());
+        let project = crate::semantic::VirtualProject::from_files(files);
+
+        let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
+        let msgs = messages(&diags);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("expected 2 required argument") && m.contains("got 1")),
+            "missing count diagnostic, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn allows_omitting_default_workspace_arguments() {
+        let src = r#"void myFn(int a, int b = 0) {}
+void test() { myFn(1); }"#;
+        let tree = parse(src);
+        let table = table_for(src);
+        let mut files = std::collections::HashMap::new();
+        files.insert(PathBuf::from("test.xs"), src.to_string());
+        let project = crate::semantic::VirtualProject::from_files(files);
+
+        let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
+        assert!(
+            diags.is_empty(),
+            "omitted default workspace argument should be allowed, got: {:?}",
+            messages(&diags)
+        );
+    }
+
+    #[test]
+    fn test_callee_source_engine_api_allows_fewer_args() {
+        // aiEchoCategory is a 2-parameter engine function. The runtime supplies
+        // defaults for engine API calls, so fewer actual arguments are fine.
         let src = r#"void test() { aiEchoCategory(0); }"#;
+        let tree = parse(src);
+        let table = table_for(src);
+        let diags = check_calls(&tree, src, &engine(), &table, None);
+        assert!(
+            diags.is_empty(),
+            "engine API call with fewer args should not be flagged, got: {:?}",
+            messages(&diags)
+        );
+    }
+
+    #[test]
+    fn test_callee_source_engine_api_rejects_too_many_args() {
+        let src = r#"void test() { aiEcho("a", "b", "c", "d", "e", "f"); }"#;
         let tree = parse(src);
         let table = table_for(src);
         let diags = check_calls(&tree, src, &engine(), &table, None);
         let msgs = messages(&diags);
         assert!(
             msgs.iter()
-                .any(|m| m.contains("expected 2 argument") && m.contains("got 1")),
-            "missing count diagnostic, got: {:?}",
+                .any(|m| m.contains("expected 1 argument") && m.contains("got 6")),
+            "engine API call with too many args should be flagged, got: {:?}",
             msgs
+        );
+    }
+
+    #[test]
+    fn test_callee_source_workspace_requires_defaults_specified() {
+        // Workspace callees do not receive runtime defaults; required params
+        // must be present.
+        let src = r#"void myFn(int a, int b) {}
+void test() { myFn(1, 2); }"#;
+        let tree = parse(src);
+        let table = table_for(src);
+        let mut files = std::collections::HashMap::new();
+        files.insert(PathBuf::from("test.xs"), src.to_string());
+        let project = crate::semantic::VirtualProject::from_files(files);
+
+        let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
+        assert!(
+            diags.is_empty(),
+            "workspace call supplying all required args should be clean, got: {:?}",
+            messages(&diags)
         );
     }
 
