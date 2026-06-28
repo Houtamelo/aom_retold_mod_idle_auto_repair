@@ -411,14 +411,15 @@ fn run_baseline() -> bool {
         all_pass = false;
     }
 
-    // Definition: the response should be a `GotoDefinitionResponse::Scalar`
-    // whose `Location.uri` is "xs-stub://engine/aiEcho".
-    let def_raw = definition_resp.to_string();
-    let has_stub_uri = def_raw.contains("xs-stub://engine/aiEcho");
-    if has_stub_uri {
-        println!("PASS: definition returned xs-stub://engine/aiEcho");
+    // Definition on an engine-API symbol (`aiEcho`): should return null
+    // because engine symbols have no source location.
+    let def_result = definition_resp.get("result");
+    let is_null = def_result.map_or(false, |v| v.is_null());
+    let no_stub_uri = !definition_resp.to_string().contains("xs-stub://");
+    if is_null && no_stub_uri {
+        println!("PASS: definition returned null for engine-API symbol (aiEcho)");
     } else {
-        println!("FAIL: definition did not return xs-stub://engine/aiEcho");
+        println!("FAIL: definition did not return null for engine-API symbol aiEcho (is_null={is_null}, no_stub={no_stub_uri})");
         println!("  definition response: {}", definition_resp);
         all_pass = false;
     }
