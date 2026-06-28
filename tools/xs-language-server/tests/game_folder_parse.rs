@@ -484,6 +484,7 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
             let mut unresolved_symbol = 0usize;
             let mut wrong_arg_count = 0usize;
             let mut rule_call_unresolved = 0usize;
+            let mut definition_error = 0usize;
             let mut total = 0usize;
             let mut callee_counts: HashMap<String, usize> = TOP_BO_CALLEES
                 .iter()
@@ -548,6 +549,10 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
                                 }
                                 record_example(cat, &path_for_uri, &d.message);
                             }
+                            DiagnosticCategory::DefinitionError => {
+                                definition_error += 1;
+                                record_example(cat, &path_for_uri, &d.message);
+                            }
                             _ => {}
                         }
 
@@ -576,7 +581,7 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
             println!(
                 "Diagnostic pipeline across {} top-level files ({} binary .xs skipped): \
                  duplicate_extern={}, wrong_uri={}, unresolved_symbol={}, \
-                 wrong_arg_count={}, rule_call_unresolved={}, total={}",
+                 wrong_arg_count={}, rule_call_unresolved={}, definition_error={}, total={}",
                 top_level_files.len(),
                 binary_skipped,
                 duplicate_extern,
@@ -584,6 +589,7 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
                 unresolved_symbol,
                 wrong_arg_count,
                 rule_call_unresolved,
+                definition_error,
                 total,
             );
             if !examples.is_empty() {
