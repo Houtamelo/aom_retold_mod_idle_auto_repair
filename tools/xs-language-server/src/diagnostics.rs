@@ -56,17 +56,18 @@ pub fn collect_all(
         // `extern` collisions are checked across the whole virtual project.
         diags.extend(semantic::check_extern_collisions(p));
 
-        if let Some(cf) = current_file {
-            if let Some(mv) = merged {
-                diags.extend(semantic::check_forward_declarations_for_merged_view(
-                    p, cf, mv,
-                ));
-                diags.extend(semantic::check_mutable_redefinitions_for_merged_view(mv));
-            } else {
-                diags.extend(semantic::check_forward_declarations(p, cf));
-                diags.extend(semantic::check_mutable_redefinitions(p));
+            if let Some(cf) = current_file {
+                if let Some(mv) = merged {
+                    diags.extend(semantic::check_forward_declarations_for_merged_view(
+                        p, engine, cf, mv,
+                    ));
+                    diags.extend(semantic::check_mutable_redefinitions_for_merged_view(mv));
+                } else {
+                    diags.extend(semantic::check_forward_declarations(p, engine, cf));
+                    diags.extend(semantic::check_mutable_redefinitions(p));
+                }
             }
-        }
+
     }
 
     if let Some(mv) = merged {

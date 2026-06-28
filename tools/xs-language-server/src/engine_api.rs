@@ -162,11 +162,20 @@ impl EngineApi {
         self.syscalls.iter().find(|s| s.name == name)
     }
 
+    /// Semantic-level exact-match lookup for a callable engine symbol.
+    pub fn lookup(&self, name: &str) -> Option<&EngineSignature> {
+        self.find_syscall(name)
+    }
+
     /// Exact-match lookup by name.
     pub fn find_aiplan(&self, name: &str) -> Option<&AiplanConstant> {
         self.aiplans.iter().find(|c| c.name == name)
     }
 }
+
+/// Alias used by semantic resolution so callers can talk about an engine
+/// signature without coupling to the internal `Syscall` name.
+pub type EngineSignature = Syscall;
 
 /// Wrap in `Arc` so the server can hand the same data to multiple async
 /// handler calls without copying.
@@ -175,9 +184,36 @@ pub type SharedEngineApi = Arc<EngineApi>;
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::OnceLock;
 
     use super::*;
     use tempfile::TempDir;
+
+    fn test_api() -> &'static EngineApi {
+        static API: OnceLock<EngineApi> = OnceLock::new();
+        API.get_or_init(|| {
+            let archive = Path::new("../../docs/doxygen_retail.7z");
+            let cache_dir = TempDir::new().unwrap();
+            EngineApi::load_from_archive(archive, cache_dir.path())
+                .expect("load engine API for tests")
+        })
+    }
+
+    #[test]
+    fn test_engine_api_lookup_known_function() {
+        assert!(
+            test_api().lookup("kbUnitGetPosition").is_some(),
+            "kbUnitGetPosition should be present in the engine API"
+        );
+    }
+
+    #[test]
+    fn test_engine_api_lookup_unknown_function() {
+        assert!(
+            test_api().lookup("foobarBaz").is_none(),
+            "foobarBaz should not be present in the engine API"
+        );
+    }
 
     #[test]
     fn load_from_archive_cold_start_hits_target_counts() {

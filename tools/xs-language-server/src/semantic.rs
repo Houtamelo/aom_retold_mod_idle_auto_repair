@@ -14,9 +14,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
+use crate::engine_api::{EngineApi, EngineSignature};
 use crate::merged_view::{MergedView, VisibilityProvenance};
 use crate::parser;
 use crate::symbols::{Symbol, SymbolKind, SymbolTable, Visibility};
@@ -112,6 +112,78 @@ impl VirtualProject {
     }
 }
 
+/// Builtin XS type constructors / language keywords that the semantic layer
+/// treats as resolvable callables even though they are not workspace symbols
+/// and are not listed in the engine-API Doxygen extraction.
+const BUILTIN_CALLEES: &[&str] = &[
+    "vector",
+    "xsVectorSet",
+    "xsVectorGetX",
+    "xsVectorGetY",
+    "xsVectorGetZ",
+];
+
+/// Result of resolving a callee name in the current scope.
+pub enum Resolution<'a> {
+    /// A workspace-defined function or rule.
+    Workspace(&'a Symbol),
+    /// An engine-API syscall or builtin callable.
+    Engine(&'a EngineSignature),
+    /// Not resolved anywhere.
+    Unresolved,
+}
+
+impl std::fmt::Debug for Resolution<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Resolution::Workspace(s) => write!(f, "Workspace({})", s.name),
+            Resolution::Engine(s) => write!(f, "Engine({})", s.name),
+            Resolution::Unresolved => write!(f, "Unresolved"),
+        }
+    }
+}
+
+fn is_callable_symbol(s: &Symbol) -> bool {
+    s.kind == SymbolKind::Function
+}
+
+/// Resolve a callee name against the workspace, the engine API, and builtin
+/// constructs. Workspace definitions take precedence over engine symbols.
+pub fn resolve_callee<'a>(
+    project: &'a VirtualProject,
+    engine: &'a EngineApi,
+    merged: Option<&'a MergedView>,
+    name: &str,
+    call_line: u32,
+) -> Resolution<'a> {
+    if let Some(m) = merged {
+        if let Some(ms) = m.find(name) {
+            if is_callable_symbol(&ms.symbol)
+                && (ms.symbol.is_mutable
+                    || ms.provenance.include_line() < call_line
+                    || (matches!(ms.provenance, VisibilityProvenance::OwnFile)
+                        && ms.symbol.selection_range.start.line < call_line))
+            {
+                return Resolution::Workspace(&ms.symbol);
+            }
+        }
+    }
+
+    if let Some(file) = project.files.values().find(|f| f.table.find(name).is_some()) {
+        if let Some(sym) = file.table.find(name) {
+            if is_callable_symbol(sym) {
+                return Resolution::Workspace(sym);
+            }
+        }
+    }
+
+    if let Some(syscall) = engine.lookup(name) {
+        return Resolution::Engine(syscall);
+    }
+
+    Resolution::Unresolved
+}
+
 /// Convenience wrapper around a semantic project.
 pub struct SemanticChecker {
     pub project: VirtualProject,
@@ -122,24 +194,30 @@ impl SemanticChecker {
         Self { project }
     }
 
+    /// Run all semantic checks using an empty engine API. Tests that only
+    /// exercise workspace symbols can use this convenience wrapper.
     pub fn check_all(&self, current_file: &Path) -> Vec<Diagnostic> {
-        check_all(&self.project, current_file)
+        check_all(&self.project, &EngineApi::default(), current_file)
     }
 }
 
 /// Run all semantic checks and return the combined diagnostics.
-pub fn check_all(project: &VirtualProject, current_file: &Path) -> Vec<Diagnostic> {
+pub fn check_all(
+    project: &VirtualProject,
+    engine: &EngineApi,
+    current_file: &Path,
+) -> Vec<Diagnostic> {
     let merged = build_merged_view_from_project(project, current_file);
     let mut out = Vec::new();
     out.extend(check_extern_collisions(project));
     if let Some(mv) = merged.as_ref() {
         out.extend(check_forward_declarations_for_merged_view(
-            project, current_file, mv,
+            project, engine, current_file, mv,
         ));
         out.extend(check_mutable_redefinitions_for_merged_view(mv));
     } else {
         // Fallback for tests/fixtures that don't sit under a `game/` root.
-        out.extend(check_forward_declarations(project, current_file));
+        out.extend(check_forward_declarations(project, engine, current_file));
         out.extend(check_mutable_redefinitions(project));
     }
     out
@@ -274,7 +352,11 @@ pub fn check_extern_collisions(project: &VirtualProject) -> Vec<Diagnostic> {
 
 /// Validate that every function call in `current_file` is preceded by a
 /// definition, forward declaration, or `mutable` declaration.
-pub fn check_forward_declarations(project: &VirtualProject, current_file: &Path) -> Vec<Diagnostic> {
+pub fn check_forward_declarations(
+    project: &VirtualProject,
+    engine: &EngineApi,
+    current_file: &Path,
+) -> Vec<Diagnostic> {
     let Some(file) = project.files.get(current_file) else {
         return Vec::new();
     };
@@ -306,6 +388,11 @@ pub fn check_forward_declarations(project: &VirtualProject, current_file: &Path)
         }
 
         if forward_callable(project, current_file, &callee, callee_range.start.line) {
+            continue;
+        }
+
+        // Engine-API syscalls and builtin XS constructs are always callable.
+        if engine.lookup(&callee).is_some() || BUILTIN_CALLEES.contains(&callee.as_str()) {
             continue;
         }
 
@@ -405,6 +492,7 @@ pub fn check_mutable_redefinitions(project: &VirtualProject) -> Vec<Diagnostic> 
 /// directive whose line precedes the call.
 pub fn check_forward_declarations_for_merged_view(
     project: &VirtualProject,
+    engine: &EngineApi,
     current_file: &Path,
     merged: &MergedView,
 ) -> Vec<Diagnostic> {
@@ -438,6 +526,11 @@ pub fn check_forward_declarations_for_merged_view(
         }
 
         if forward_callable_merged(merged, &callee, callee_range.start.line) {
+            continue;
+        }
+
+        // Engine-API syscalls and builtin XS constructs are always callable.
+        if engine.lookup(&callee).is_some() || BUILTIN_CALLEES.contains(&callee.as_str()) {
             continue;
         }
 
@@ -675,10 +768,12 @@ fn find_named_child<'a>(
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
 
     use tempfile::TempDir;
 
+    use crate::engine_api::EngineApi;
     use crate::merged_view::MergedView;
     use crate::workspace::{VirtualProject as WorkspaceVirtualProject, Workspace};
 
@@ -692,6 +787,52 @@ mod tests {
             .map(|(path, src)| (p(path), src.to_string()))
             .collect();
         VirtualProject::from_files(map)
+    }
+
+    fn engine_api() -> &'static EngineApi {
+        use crate::cache;
+        static ENGINE: OnceLock<EngineApi> = OnceLock::new();
+        ENGINE.get_or_init(|| {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let workspace_root = manifest_dir
+                .parent()
+                .and_then(|p| p.parent())
+                .expect("manifest inside workspace");
+            let archive = workspace_root.join("docs/doxygen_retail.7z");
+            let cache_dir = cache::state_cache_dir();
+            EngineApi::load_from_archive(&archive, &cache_dir)
+                .expect("load engine API from Doxygen archive")
+        })
+    }
+
+    #[test]
+    fn test_resolve_callee_finds_engine_api() {
+        let prj = project(&[("a.xs", "void foo() {}\n")]);
+        let res = resolve_callee(&prj, engine_api(), None, "kbUnitGetPosition", 10);
+        assert!(
+            matches!(res, Resolution::Engine(_)),
+            "expected engine API resolution, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_callee_prefers_workspace_over_engine_api() {
+        let prj = project(&[("a.xs", "void kbUnitGetPosition() {}\n")]);
+        let res = resolve_callee(&prj, engine_api(), None, "kbUnitGetPosition", 10);
+        assert!(
+            matches!(res, Resolution::Workspace(_)),
+            "expected workspace shadow of engine API, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_callee_returns_none_for_truly_unknown() {
+        let prj = project(&[("a.xs", "void foo() {}\n")]);
+        let res = resolve_callee(&prj, engine_api(), None, "foobarBaz", 10);
+        assert!(
+            matches!(res, Resolution::Unresolved),
+            "expected unresolved for unknown callee, got {res:?}"
+        );
     }
 
     /// Write fixtures under a temporary `game/` root, build a semantic
@@ -759,14 +900,14 @@ mod tests {
     #[test]
     fn forward_declaration_allows_call() {
         let prj = project(&[("a.xs", "void bar();\nvoid foo() { bar(); }\nvoid bar() {}\n")]);
-        let diags = check_forward_declarations(&prj, &p("a.xs"));
+        let diags = check_forward_declarations(&prj, &EngineApi::default(), &p("a.xs"));
         assert!(diags.is_empty(), "expected no forward-decl errors, got {diags:?}");
     }
 
     #[test]
     fn missing_forward_declaration_is_error() {
         let prj = project(&[("a.xs", "void foo() { bar(); }\nvoid bar() {}\n")]);
-        let diags = check_forward_declarations(&prj, &p("a.xs"));
+        let diags = check_forward_declarations(&prj, &EngineApi::default(), &p("a.xs"));
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("before declaration"));
         assert!(diags[0].message.contains("bar"));
@@ -775,7 +916,7 @@ mod tests {
     #[test]
     fn mutable_function_is_forward_callable() {
         let prj = project(&[("a.xs", "mutable void foo() {}\nvoid bar() { foo(); }\nvoid foo() {}\n")]);
-        let diags = check_forward_declarations(&prj, &p("a.xs"));
+        let diags = check_forward_declarations(&prj, &EngineApi::default(), &p("a.xs"));
         assert!(diags.is_empty(), "mutable should be forward-callable, got {diags:?}");
     }
 
@@ -801,14 +942,14 @@ mod tests {
             ("a.xs", "void foo() { bar(); }\n"),
             ("b.xs", "void bar() {}\n"),
         ]);
-        let diags = check_forward_declarations(&prj, &p("a.xs"));
+        let diags = check_forward_declarations(&prj, &EngineApi::default(), &p("a.xs"));
         assert!(diags.is_empty(), "cross-file function should be visible, got {diags:?}");
     }
 
     #[test]
     fn unresolved_symbol_emits_error_0310() {
         let prj = project(&[("a.xs", "void foo() { doesNotExist(); }\n")]);
-        let diags = check_forward_declarations(&prj, &p("a.xs"));
+        let diags = check_forward_declarations(&prj, &EngineApi::default(), &p("a.xs"));
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("Error 0310"));
         assert!(diags[0].message.contains("doesNotExist"));
@@ -825,7 +966,7 @@ mod tests {
             ],
             "ai/a.xs",
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("before declaration"));
         assert!(diags[0].message.contains("bar"));
@@ -841,7 +982,7 @@ mod tests {
             ],
             "ai/a.xs",
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
         assert!(diags.is_empty(), "expected clean diagnostics, got {diags:?}");
     }
 
@@ -855,7 +996,7 @@ mod tests {
             ],
             "ai/a.xs",
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("Error 0310"));
         assert!(diags[0].message.contains("hidden"));
@@ -874,7 +1015,7 @@ mod tests {
             ],
             "ai/a.xs",
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
         assert!(
             diags.is_empty(),
             "mutable included function should resolve, got {diags:?}"
@@ -923,7 +1064,7 @@ mod tests {
             merged.find("helper").is_some(),
             "helper should be visible in the merged view"
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
         assert!(diags.is_empty(), "direct include should resolve, got {diags:?}");
     }
 
@@ -959,7 +1100,7 @@ mod tests {
             "helper should be a depth-2 transitive include, got {:?}",
             ms.provenance
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &current, &merged);
+        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
         assert!(
             diags.is_empty(),
             "transitive include should resolve, got {diags:?}"
