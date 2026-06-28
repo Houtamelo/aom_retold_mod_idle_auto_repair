@@ -363,7 +363,7 @@ fn run_baseline() -> bool {
     let has_clean_diag = raw.contains("\"file:///tmp/test.xs\"")
         && raw.contains("textDocument/publishDiagnostics");
     let has_bad_diag = raw.contains("\"file:///tmp/bad.xs\"")
-        && raw.contains("Parse error");
+        && (raw.contains("Parse error") || raw.contains("Missing") || raw.contains("Unexpected"));
 
     if has_clean_diag {
         println!("PASS: clean-file diagnostics published (expected empty)");

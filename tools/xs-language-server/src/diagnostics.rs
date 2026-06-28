@@ -186,12 +186,32 @@ fn missing_token_message(node: Node) -> String {
     format!("Missing '{}'", token)
 }
 
+/// Classify a tree-sitter node `kind` as something safe to put in a
+/// user-facing message. Returns `Some(<friendly name>)` if the kind is a
+/// concrete token (e.g. `identifier`, `string_literal`, punctuation), or
+/// `None` if the kind leaks parser internals (tree-sitter's `"ERROR"` /
+/// `"MISSING"` markers) or grammar non-terminals (snake_case symbols like
+/// `primitive_type`, `expression`, `_statement`).
+fn friendly_kind(kind: &str) -> Option<&str> {
+    if kind.is_empty() {
+        return None;
+    }
+    // Tree-sitter's internal error / missing markers MUST NOT be echoed.
+    if kind == "ERROR" || kind == "MISSING" {
+        return None;
+    }
+    // Grammar non-terminals are snake_case. We only want concrete tokens
+    // (identifiers, string/number literals, punctuation).
+    if kind.contains('_') {
+        return None;
+    }
+    Some(kind)
+}
+
 /// Try to describe an ERROR node as `Unexpected <kind> '<text>'`.
 ///
-/// Looks at the error node's first named child. If that child is an
-/// identifier, the message names it directly. Otherwise we describe the
-/// unexpected token by its grammar kind. Falls back to line/column when the
-/// node contains no usable children.
+/// Looks at the error node's first named child. If the child's `kind` is a
+/// concrete token (per [`friendly_kind`]), the message names it directly.
 /// Otherwise we describe the unexpected token generically as `token '<text>'`.
 /// Falls back to line/column when the node contains no usable children.
 fn unexpected_token_message(node: Node, source: &str) -> String {
@@ -204,10 +224,13 @@ fn unexpected_token_message(node: Node, source: &str) -> String {
         .unwrap_or(node);
     let kind = target.kind();
     let text = node_text(target, source);
-    if kind.is_empty() || text.is_empty() {
+    if text.is_empty() {
         return format!("Parse error near line {}, column {}", pos.row + 1, pos.column + 1);
     }
-    format!("Unexpected {} '{}'", kind, text)
+    match friendly_kind(kind) {
+        Some(k) => format!("Unexpected {} '{}'", k, text),
+        None => format!("Unexpected token '{}'", text),
+    }
 }
 
 /// Diagnostics grouped by the URI to which they belong.
