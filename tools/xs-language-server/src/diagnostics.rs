@@ -159,6 +159,7 @@ pub enum DiagnosticCategory {
     ExternCollision,
     UnresolvedSymbol,
     WrongArgCount,
+    WrongArgType,
     WrongRangeUri,
     Other,
 }
@@ -168,6 +169,13 @@ pub fn categorize(d: &Diagnostic) -> DiagnosticCategory {
     let msg = d.message.to_ascii_lowercase();
     if msg.contains("duplicate extern") || msg.contains("extern collision") {
         DiagnosticCategory::ExternCollision
+    } else if msg.contains("expected")
+        && msg.contains("argument")
+        && msg.contains("of type")
+    {
+        // Type mismatch diagnostics mention the expected type (e.g.
+        // "expected argument 1 of type `int`, got `float`").
+        DiagnosticCategory::WrongArgType
     } else if msg.contains("expected") && msg.contains("argument") {
         DiagnosticCategory::WrongArgCount
     } else if msg.contains("error 0310")
@@ -244,6 +252,16 @@ mod tests {
         assert_eq!(
             categorize(&diag("expected 4 argument(s) to `aiPlanCreate`, got 2")),
             DiagnosticCategory::WrongArgCount
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_category_assigns_wrong_arg_type() {
+        assert_eq!(
+            categorize(&diag(
+                "expected argument 1 of type `int` for `aiPlanCreate`, got `float`"
+            )),
+            DiagnosticCategory::WrongArgType
         );
     }
 

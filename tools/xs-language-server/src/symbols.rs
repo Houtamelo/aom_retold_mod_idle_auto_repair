@@ -16,6 +16,8 @@
 //! appear in real code, and those files are already failing to parse
 //! anyway). When preproc support is added, add a `Macro` variant here.
 
+use std::collections::HashSet;
+
 use tower_lsp::lsp_types::{Position, Range};
 
 /// What kind of XS construct a symbol represents.
@@ -164,6 +166,76 @@ pub fn build_symbol_table(tree: &tree_sitter::Tree, source: &str) -> SymbolTable
         }
     }
     table
+}
+
+/// Functions that register a rule by name at runtime.
+const RULE_REGISTRATION_FUNCTIONS: &[&str] = &[
+    "xsEnableRule",
+    "xsDisableRule",
+    "xsSetRuleMinInterval",
+    "xsSetRuleMaxInterval",
+    "xsRuleIgnoreIntervalOnce",
+    "trDelayedRuleActivation",
+    "trRuleAdd",
+    "trRuleAddActive",
+];
+
+/// Extract the names of rules that are registered through runtime helpers.
+///
+/// Rules in XS are first-class callbacks registered with helpers like
+/// `xsEnableRule("myRule")` or `trRuleAdd("myRule")`. They may not have a
+/// matching `rule myRule {}` definition in the same translation unit, so
+/// capturing the registration call lets semantic analysis resolve calls to
+/// those rules.
+pub fn extract_rule_registrations(tree: &tree_sitter::Tree, source: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    collect_rule_registrations(tree.root_node(), source, &mut out);
+    out
+}
+
+fn collect_rule_registrations(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    out: &mut HashSet<String>,
+) {
+    if node.kind() == "call_expression" {
+        try_register_rule(node, source, out);
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_rule_registrations(child, source, out);
+    }
+}
+
+fn try_register_rule(call: tree_sitter::Node<'_>, source: &str, out: &mut HashSet<String>) {
+    let Some(callee_node) = find_named_child(call, "identifier") else {
+        return;
+    };
+    let callee = node_text(callee_node, source);
+    if !RULE_REGISTRATION_FUNCTIONS.contains(&callee) {
+        return;
+    }
+
+    let Some(arg_list) = find_named_child(call, "argument_list") else {
+        return;
+    };
+    let mut args_cursor = arg_list.walk();
+    let first_arg = arg_list
+        .named_children(&mut args_cursor)
+        .find(|c| c.kind() != "comment");
+
+    if let Some(arg) = first_arg {
+        if arg.kind() == "string_literal" {
+            let text = node_text(arg, source);
+            // Strip surrounding quotes; XS only uses double quotes for
+            // string literals, but be defensive against single quotes.
+            let name = text.trim_matches('"').trim_matches('\'').to_string();
+            if !name.is_empty() {
+                out.insert(name);
+            }
+        }
+    }
 }
 
 fn extract_rule(node: tree_sitter::Node<'_>, _source: &str, out: &mut Vec<Symbol>) {
@@ -720,5 +792,59 @@ mod tests {
         assert!(!s.is_forward);
         assert_eq!(s.params.len(), 1);
         assert_eq!(s.params[0].name, "x");
+    }
+
+    #[test]
+    fn test_symbol_kind_rule_variant_exists() {
+        // Verify the enum variant exists and is distinct from Function.
+        assert_ne!(SymbolKind::Rule, SymbolKind::Function);
+    }
+
+    #[test]
+    fn test_extract_rule_from_xs_enable_rule() {
+        let src = r#"void init() { xsEnableRule("updateBreakdown"); }"#;
+        let tree = parser::parse(src).expect("parse");
+        let regs = extract_rule_registrations(&tree, src);
+        assert!(regs.contains("updateBreakdown"));
+    }
+
+    #[test]
+    fn test_extract_rule_from_tr_rule_add() {
+        let src = r#"void init() { trRuleAdd("updateBreakdown", 1); }"#;
+        let tree = parser::parse(src).expect("parse");
+        let regs = extract_rule_registrations(&tree, src);
+        assert!(regs.contains("updateBreakdown"));
+    }
+
+    #[test]
+    fn test_extract_rule_from_tr_rule_add_active() {
+        let src = r#"void init() { trRuleAddActive("updateBreakdown", 1); }"#;
+        let tree = parser::parse(src).expect("parse");
+        let regs = extract_rule_registrations(&tree, src);
+        assert!(regs.contains("updateBreakdown"));
+    }
+
+    #[test]
+    fn test_extract_multiple_rules() {
+        let src = r#"
+            void init() {
+                xsEnableRule("ruleA");
+                xsDisableRule("ruleB");
+                trRuleAdd("ruleC", 5);
+            }
+        "#;
+        let tree = parser::parse(src).expect("parse");
+        let regs = extract_rule_registrations(&tree, src);
+        assert_eq!(regs.len(), 3);
+        assert!(regs.contains("ruleA"));
+        assert!(regs.contains("ruleB"));
+        assert!(regs.contains("ruleC"));
+    }
+
+    #[test]
+    fn test_extract_no_rules_from_empty_file() {
+        let tree = parser::parse("").expect("parse");
+        let regs = extract_rule_registrations(&tree, "");
+        assert!(regs.is_empty());
     }
 }

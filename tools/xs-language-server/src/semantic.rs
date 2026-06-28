@@ -14,7 +14,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
 use crate::diagnostics::DiagnosticsByUri;
@@ -40,6 +39,10 @@ pub struct ParsedFile {
 #[derive(Debug, Clone, Default)]
 pub struct VirtualProject {
     pub files: HashMap<PathBuf, ParsedFile>,
+    /// Rules registered through runtime helpers (e.g. `xsEnableRule("foo")`).
+    /// Each entry is a synthetic `Symbol` so that rule resolution can return
+    /// a stable reference without allocating per lookup.
+    pub registered_rules: HashMap<String, Symbol>,
 }
 
 impl VirtualProject {
@@ -47,14 +50,17 @@ impl VirtualProject {
     /// tests and fixtures; the LSP server builds from the workspace instead.
     pub fn from_files(files: HashMap<PathBuf, String>) -> Self {
         let mut out = HashMap::new();
+        let mut registered_rules = HashMap::new();
         for (path, source) in files {
-            if let Some(table) = parser::parse(&source)
-                .map(|tree| crate::symbols::build_symbol_table(&tree, &source))
-            {
+            if let Some(tree) = parser::parse(&source) {
+                let table = crate::symbols::build_symbol_table(&tree, &source);
+                for name in crate::symbols::extract_rule_registrations(&tree, &source) {
+                    registered_rules.entry(name.clone()).or_insert_with(|| make_rule_symbol(&name));
+                }
                 out.insert(path, ParsedFile { source, table });
             }
         }
-        Self { files: out }
+        Self { files: out, registered_rules }
     }
 
     /// Build a semantic project from a `workspace::VirtualProject` by parsing
@@ -73,6 +79,7 @@ impl VirtualProject {
         cache_dir: &Path,
     ) -> Self {
         let mut files = HashMap::new();
+        let mut registered_rules = HashMap::new();
         let visible = project.visible_files(workspace);
         tracing::debug!(
             "semantic::load_from_workspace: walking {} visible files",
@@ -108,9 +115,32 @@ impl VirtualProject {
                     continue;
                 }
             };
+            // Capture dynamic rule registrations (xsEnableRule, trRuleAdd, ...)
+            // so calls into registered-but-not-defined rules resolve.
+            if let Some(tree) = parser::parse(&source) {
+                for name in crate::symbols::extract_rule_registrations(&tree, &source) {
+                    registered_rules.entry(name.clone()).or_insert_with(|| make_rule_symbol(&name));
+                }
+            }
             files.insert(path, ParsedFile { source, table: symbols });
         }
-        Self { files }
+        Self { files, registered_rules }
+    }
+}
+
+fn make_rule_symbol(name: &str) -> Symbol {
+    Symbol {
+        name: name.to_string(),
+        kind: SymbolKind::Rule,
+        ty: String::new(),
+        params: Vec::new(),
+        is_extern: false,
+        is_mutable: false,
+        is_forward: false,
+        visibility: Visibility::Public,
+        full_range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+        selection_range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+        detail: format!("rule {name}"),
     }
 }
 
@@ -146,7 +176,7 @@ impl std::fmt::Debug for Resolution<'_> {
 }
 
 fn is_callable_symbol(s: &Symbol) -> bool {
-    s.kind == SymbolKind::Function
+    matches!(s.kind, SymbolKind::Function | SymbolKind::Rule)
 }
 
 /// Resolve a callee name against the workspace, the engine API, and builtin
@@ -177,6 +207,12 @@ pub fn resolve_callee<'a>(
                 return Resolution::Workspace(sym);
             }
         }
+    }
+
+    // Rules registered through runtime helpers (xsEnableRule, trRuleAdd, ...)
+    // are callable even when no `rule foo {}` definition exists in the project.
+    if let Some(sym) = project.registered_rules.get(name) {
+        return Resolution::Workspace(sym);
     }
 
     if let Some(syscall) = engine.lookup(name) {
@@ -656,7 +692,7 @@ pub fn check_forward_declarations_for_merged_view(
             continue;
         }
 
-        if forward_callable_merged(merged, &callee, callee_range.start.line) {
+        if forward_callable_merged(merged, project, &callee, callee_range.start.line) {
             continue;
         }
 
@@ -749,11 +785,16 @@ pub fn check_mutable_redefinitions_for_merged_view(merged: &MergedView) -> Vec<D
     diags
 }
 
-fn forward_callable_merged(merged: &MergedView, callee: &str, call_line: u32) -> bool {
+fn forward_callable_merged(
+    merged: &MergedView,
+    project: &VirtualProject,
+    callee: &str,
+    call_line: u32,
+) -> bool {
     for ms in merged
         .symbols()
         .iter()
-        .filter(|ms| ms.symbol.kind == SymbolKind::Function && ms.symbol.name == callee)
+        .filter(|ms| is_callable_symbol(&ms.symbol) && ms.symbol.name == callee)
     {
         if ms.symbol.is_mutable {
             return true;
@@ -766,7 +807,10 @@ fn forward_callable_merged(merged: &MergedView, callee: &str, call_line: u32) ->
             return true;
         }
     }
-    false
+
+    // Runtime-registered rules are callable even without a `rule` definition
+    // in the merged scope.
+    project.registered_rules.contains_key(callee)
 }
 
 // --- internal helpers ---
@@ -840,12 +884,19 @@ fn forward_callable(
 
     // Defined in another file? Functions are visible across files in the same
     // virtual project regardless of `extern`.
-    project.files.iter().any(|(path, file)| {
+    let defined_elsewhere = project.files.iter().any(|(path, file)| {
         path != current_file
             && file.table.symbols.iter().any(|s| {
                 s.kind == SymbolKind::Function && s.name == callee && !s.is_forward
             })
-    })
+    });
+    if defined_elsewhere {
+        return true;
+    }
+
+    // Rules registered through runtime helpers are callable even when the
+    // rule body is defined in a different translation unit.
+    project.registered_rules.contains_key(callee)
 }
 
 /// Collect bare identifier call expressions from a tree.
@@ -899,7 +950,7 @@ fn find_named_child<'a>(
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::OnceLock;
 
     use tempfile::TempDir;
@@ -964,6 +1015,44 @@ mod tests {
         assert!(
             matches!(res, Resolution::Unresolved),
             "expected unresolved for unknown callee, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_callee_finds_rule() {
+        let prj = project(&[("a.xs", "rule updateBreakdown {}\nvoid foo() {}\n")]);
+        let res = resolve_callee(&prj, engine_api(), None, "updateBreakdown", 10);
+        match res {
+            Resolution::Workspace(sym) => assert_eq!(sym.kind, SymbolKind::Rule),
+            _ => panic!("expected rule symbol, got {res:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_callee_finds_registered_rule() {
+        let prj = project(&[(
+            "a.xs",
+            "void init() { xsEnableRule(\"updateBreakdown\"); }\n",
+        )]);
+        let res = resolve_callee(&prj, engine_api(), None, "updateBreakdown", 10);
+        match res {
+            Resolution::Workspace(sym) => assert_eq!(sym.kind, SymbolKind::Rule),
+            _ => panic!("expected registered rule symbol, got {res:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_callee_unknown_rule_emits_error() {
+        // A rule that is neither defined nor registered should still produce
+        // an unresolved-symbol diagnostic.
+        let prj = project(&[("a.xs", "void foo() { updateBreakdown(); }\n")]);
+        let diags = check_forward_declarations(&prj, &EngineApi::default(), &p("a.xs"));
+        assert!(
+            diags.iter().any(|d| {
+                d.message.contains("updateBreakdown") && d.message.contains("Error 0310")
+            }),
+            "expected Error 0310 for unknown rule, got: {:?}",
+            diags
         );
     }
 

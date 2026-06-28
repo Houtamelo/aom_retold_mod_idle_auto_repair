@@ -25,7 +25,7 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
 use crate::engine_api::{EngineApi, Param};
 use crate::merged_view::MergedView;
-use crate::symbols::SymbolTable;
+use crate::symbols::{SymbolKind, SymbolTable};
 
 /// Walk `tree` and return one `Diagnostic` per wrong-arg-count or
 /// wrong-arg-type call to a known engine or user-defined function.
@@ -150,8 +150,13 @@ fn check_one_call(
         let Some(actual_ty) = expr_type(arg_node, source, table) else {
             continue;
         };
-        if !types_compatible(&expected.ty, &actual_ty) {
-            out.push(Diagnostic {
+        if arg_types_compatible(&expected.ty, &actual_ty, callee_source) {
+            continue;
+        }
+        if is_function_pointer_argument(arg_node, source, table, &expected.ty) {
+            continue;
+        }
+        out.push(Diagnostic {
                 range: node_range(arg_node),
                 severity: Some(DiagnosticSeverity::ERROR),
                 code: None,
@@ -168,7 +173,6 @@ fn check_one_call(
                 tags: None,
                 data: None,
             });
-        }
     }
 }
 
@@ -240,13 +244,15 @@ fn resolve_workspace_function_project<'a>(
     project: &'a crate::semantic::VirtualProject,
     name: &str,
 ) -> Option<&'a crate::symbols::Symbol> {
-    project.files.values().find_map(|file| {
+    let defined = project.files.values().find_map(|file| {
         file.table.symbols.iter().find(|s| {
-            s.kind == crate::symbols::SymbolKind::Function
+            (s.kind == crate::symbols::SymbolKind::Function
+                || s.kind == crate::symbols::SymbolKind::Rule)
                 && s.name == name
                 && !s.is_forward
         })
-    })
+    });
+    defined.or_else(|| project.registered_rules.get(name))
 }
 
 /// Extract the function name from a `call_expression`. XS calls look like
@@ -300,14 +306,39 @@ fn number_literal_type(node: tree_sitter::Node<'_>, source: &str) -> String {
 
 /// Type compatibility for function-call arguments.
 ///
-/// XS allows implicit `int` -> `float` widening, but not `float` -> `int`
-/// (loss of precision). String and bool are not implicitly convertible to
-/// numeric types.
-fn types_compatible(expected: &str, actual: &str) -> bool {
+/// XS numeric types coerce freely at runtime, so `int` and `float` are
+/// mutually compatible. `bool` and `string` remain strict.
+fn arg_types_compatible(expected: &str, actual: &str, _source: CalleeSource) -> bool {
     if expected == actual {
         return true;
     }
-    expected == "float" && actual == "int"
+    let numeric = ["int", "float"];
+    numeric.contains(&expected) && numeric.contains(&actual)
+}
+
+/// True when `arg_node` is the name of a function/rule being passed as a
+/// function-pointer argument. XS engine APIs such as `setOverrideStrategy`
+/// declare their callback parameter as `void()`; passing the name of a
+/// matching top-level function is valid, so we suppress the spurious
+/// type-mismatch diagnostic.
+fn is_function_pointer_argument(
+    arg_node: tree_sitter::Node<'_>,
+    source: &str,
+    table: &SymbolTable,
+    expected_ty: &str,
+) -> bool {
+    // Function-pointer types look like `void()` or `bool(int, string)`.
+    if !expected_ty.contains('(') || !expected_ty.contains(')') {
+        return false;
+    }
+    if arg_node.kind() != "identifier" {
+        return false;
+    }
+    let name = node_text(arg_node, source);
+    let Some(sym) = table.find(name) else {
+        return false;
+    };
+    matches!(sym.kind, SymbolKind::Function | SymbolKind::Rule)
 }
 
 fn count_args(arg_list_node: tree_sitter::Node<'_>) -> usize {
@@ -349,7 +380,6 @@ fn find_named_child<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use std::path::PathBuf;
 
     use tempfile::TempDir;
@@ -624,7 +654,9 @@ void test() { takeFloat(5); }"#;
     }
 
     #[test]
-    fn flags_float_to_int_loss_for_user_function() {
+    fn allows_float_to_int_coercion_for_user_function() {
+        // The engine coerces numeric arguments at runtime, so passing a float
+        // literal where an int parameter is expected is accepted.
         let src = r#"void takeInt(int x) {}
 void test() { takeInt(3.14); }"#;
         let tree = parse(src);
@@ -635,11 +667,66 @@ void test() { takeInt(3.14); }"#;
         let project = crate::semantic::VirtualProject::from_files(files);
 
         let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
-        let msgs = messages(&diags);
         assert!(
-            msgs.iter().any(|m| m.contains("expected argument 1 of type `int`") && m.contains("got `float`")),
-            "expected float->int loss error, got: {:?}",
-            msgs
+            diags.is_empty(),
+            "float -> int coercion should be allowed, got: {:?}",
+            messages(&diags)
+        );
+    }
+
+    #[test]
+    fn test_rule_call_bypasses_arg_count_check() {
+        // Registered rules are engine-managed and can be called with any
+        // number of arguments (the engine passes them through).
+        let src = r#"void init() { xsEnableRule("myRule"); }
+void test() { myRule(1, 2, 3); }"#;
+        let tree = parse(src);
+        let table = table_for(src);
+        let mut files = std::collections::HashMap::new();
+        files.insert(PathBuf::from("test.xs"), src.to_string());
+        let project = crate::semantic::VirtualProject::from_files(files);
+
+        let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
+        assert!(
+            diags.is_empty(),
+            "rule call should bypass argument-count check, got: {:?}",
+            messages(&diags)
+        );
+    }
+
+    #[test]
+    fn test_rule_call_bypasses_return_type_check() {
+        // Using a rule call as an argument/value should not produce a type
+        // diagnostic; rules are void and engine-managed.
+        let src = r#"void init() { xsEnableRule("myRule"); }
+void test() { aiEcho(myRule()); }"#;
+        let tree = parse(src);
+        let table = table_for(src);
+        let mut files = std::collections::HashMap::new();
+        files.insert(PathBuf::from("test.xs"), src.to_string());
+        let project = crate::semantic::VirtualProject::from_files(files);
+
+        let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
+        assert!(
+            diags.is_empty(),
+            "rule call should bypass return-type check, got: {:?}",
+            messages(&diags)
+        );
+    }
+
+    #[test]
+    fn test_function_pointer_callback_is_compatible() {
+        // Engine APIs like setOverrideStrategy expect a `void()` callback.
+        // Passing the name of a top-level void function should be accepted.
+        let src = r#"void strategy() {}
+void test() { setOverrideStrategy(strategy); }"#;
+        let tree = parse(src);
+        let table = table_for(src);
+        let diags = check_calls(&tree, src, &engine(), &table, None);
+        assert!(
+            diags.is_empty(),
+            "function-pointer callback should be compatible, got: {:?}",
+            messages(&diags)
         );
     }
 

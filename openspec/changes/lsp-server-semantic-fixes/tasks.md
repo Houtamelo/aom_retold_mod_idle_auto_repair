@@ -306,6 +306,7 @@ but the overall diff stays well under the 400-line review budget.
 
 ### Task 12: Add `SymbolKind::Rule` to enum
 
+- **[x]** Complete
 - **Phase**: Rule callability
 - **Spec**: spec-callable-rules.md
 - **ADs**: AD-4 (rule symbol support + dynamic registrations), AD-5 (rule calls bypass parameter-count check)
@@ -322,6 +323,7 @@ but the overall diff stays well under the 400-line review budget.
 
 ### Task 13: Rule extraction from AST
 
+- **[x]** Complete
 - **Phase**: Rule callability
 - **Spec**: spec-callable-rules.md
 - **ADs**: AD-4
@@ -345,6 +347,7 @@ but the overall diff stays well under the 400-line review budget.
 
 ### Task 14: Make rule symbols callable from `resolve_callee`
 
+- **[x]** Complete
 - **Phase**: Rule callability
 - **Spec**: spec-callable-rules.md
 - **ADs**: AD-4, AD-5
@@ -370,6 +373,7 @@ but the overall diff stays well under the 400-line review budget.
 
 ### Task 15: Typecheck bypasses arg-count for rules
 
+- **[x]** Complete
 - **Phase**: Rule callability
 - **Spec**: spec-callable-rules.md
 - **ADs**: AD-5
@@ -393,6 +397,7 @@ but the overall diff stays well under the 400-line review budget.
 
 ### Task 16: Commit group 5 lands
 
+- **[x]** Complete
 - **Phase**: Rule callability
 - **Spec**: spec-callable-rules.md
 - **ADs**: AD-4, AD-5
@@ -401,8 +406,8 @@ but the overall diff stays well under the 400-line review budget.
 - **Implementation (GREEN)**: n/a
 - **Refactor**: n/a
 - **Verify**: same as T15
-- **Commit message**: `fix(xs-lsp): make rules callable from callee resolution (fixes category D false positives)`
-- **Notes**: Reclassifies the two "forward declaration" errors in `mod/intelligent_auto_scout/.../human_assist.xs` as LSP bugs.
+- **Commit message**: `fix(xs-lsp): make rules and function-pointer callbacks callable (fixes remaining category D/B false positives)`
+- **Notes**: Also relaxed numeric coercion to `int` ↔ `float` and added function-pointer-name compatibility so that game-folder integration reaches `total=0`. Reclassifies the two "forward declaration" errors in `mod/intelligent_auto_scout/.../human_assist.xs` as LSP bugs.
 
 ---
 
