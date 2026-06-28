@@ -21,16 +21,16 @@ use crate::{semantic, typecheck};
 /// Walk the tree and collect one `Diagnostic` per error site.
 pub fn collect_diagnostics(tree: &Tree, source: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    walk(tree.root_node(), &mut out);
+    walk(tree.root_node(), source, &mut out);
     out
 }
 
-fn walk(node: Node, out: &mut Vec<Diagnostic>) {
+fn walk(node: Node, source: &str, out: &mut Vec<Diagnostic>) {
     if node.is_error() || node.is_missing() {
-        out.push(to_diagnostic(node));
+        out.push(to_diagnostic(node, source));
     }
     for child in node.children(&mut node.walk()) {
-        walk(child, out);
+        walk(child, source, out);
     }
 }
 
@@ -138,14 +138,18 @@ fn include_diagnostic_to_lsp(inc: &IncludeDiagnostic) -> Diagnostic {
     }
 }
 
-fn to_diagnostic(node: Node) -> Diagnostic {
+fn to_diagnostic(node: Node, source: &str) -> Diagnostic {
     let start = node.start_position();
     let end = node.end_position();
-    let kind = if node.is_missing() { "MISSING" } else { "ERROR" };
-    let snippet_len = (end.column - start.column).max(1);
-    let message = format!(
-        "Parse error: unexpected or invalid XS syntax ({kind} node, ~{snippet_len} column(s))"
-    );
+    let message = if node.is_missing() {
+        missing_token_message(node)
+    } else if node.is_error() {
+        unexpected_token_message(node, source)
+    } else {
+        // Defensive: should never be reached because callers only hand us
+        // ERROR / MISSING nodes, but keeps the exhaustiveness checker happy.
+        format!("Parse error near line {}, column {}", start.row + 1, start.column + 1)
+    };
     Diagnostic {
         range: Range {
             start: Position::new(start.row as u32, start.column as u32),
@@ -160,6 +164,48 @@ fn to_diagnostic(node: Node) -> Diagnostic {
         tags: None,
         data: None,
     }
+}
+
+/// Slice of `source` covered by `node`.
+fn node_text<'a>(node: Node<'a>, source: &'a str) -> &'a str {
+    &source[node.byte_range()]
+}
+
+/// Try to describe a MISSING node as `Missing '<token>'`.
+///
+/// A missing node's `kind()` is the expected symbol, which for anonymous
+/// terminals (e.g. `;`, `}`) is the literal token text. We use that as the
+/// display token; if it looks like a non-terminal or is empty, fall back to
+/// a line/column message that avoids exposing grammar internals.
+fn missing_token_message(node: Node) -> String {
+    let token = node.kind();
+    if token.is_empty() || token.chars().any(|c| c.is_alphabetic() && c.is_uppercase()) {
+        let pos = node.start_position();
+        return format!("Parse error near line {}, column {}", pos.row + 1, pos.column + 1);
+    }
+    format!("Missing '{}'", token)
+}
+
+/// Try to describe an ERROR node as `Unexpected <kind> '<text>'`.
+///
+/// Looks at the error node's first named child. If that child is an
+/// identifier, the message names it directly. Otherwise we describe the
+/// unexpected token by its grammar kind. Falls back to line/column when the
+/// node contains no usable children.
+fn unexpected_token_message(node: Node, source: &str) -> String {
+    let pos = node.start_position();
+    // Prefer the first named child because it usually points at the token
+    // that the parser could not consume.
+    let target = node
+        .children(&mut node.walk())
+        .find(|c| c.is_named())
+        .unwrap_or(node);
+    let kind = target.kind();
+    let text = node_text(target, source);
+    if kind.is_empty() || text.is_empty() {
+        return format!("Parse error near line {}, column {}", pos.row + 1, pos.column + 1);
+    }
+    format!("Unexpected {} '{}'", kind, text)
 }
 
 /// Diagnostics grouped by the URI to which they belong.
