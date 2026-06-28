@@ -237,17 +237,15 @@ impl LanguageServer for XsLanguageServer {
                 // Markdown. No options (no work-done progress, no dynamic
                 // registration) — keep it simple until clients ask for more.
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
-                // Week 2: go-to-definition resolves engine-API symbols to
-                // a virtual `xs-stub://engine/<name>` URI (range 0:0-0:0
-                // since stubs have no real source position). No
-                // linkSupport yet — that comes when we have real workspace
-                // symbols.
+                // Engine-API symbols have no source location and return
+                // `null`; workspace-defined symbols jump to their real
+                // declaration. No linkSupport yet.
                 definition_provider: Some(OneOf::Left(true)),
                 // Week 3: document symbol outline built from the per-file
                 // symbol table.
                 document_symbol_provider: Some(OneOf::Left(true)),
-                // Week 4: find all uses of an identifier in the current
-                // file (workspace-wide lands in week 5+).
+                // Find all uses of an identifier across the workspace.
+                // Engine-API symbols are resolved by scanning visible files.
                 references_provider: Some(OneOf::Left(true)),
                 // Week 4: rename an identifier across the current file,
                 // with prepare_rename enabled so the client can ask first
@@ -567,8 +565,8 @@ impl LanguageServer for XsLanguageServer {
         };
 
         // Merged include-paste scope first so included symbols jump to their
-        // defining file. Fall back to the current file's symbol table, then
-        // to a virtual URI for engine symbols.
+        // defining file. Fall back to the current file's symbol table.
+        // Engine-API symbols have no source location and return null.
         let location = if let Some(ms) = self
             .get_or_build_merged_view(uri, &text)
             .await
