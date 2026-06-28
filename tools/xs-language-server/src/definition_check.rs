@@ -4,15 +4,13 @@
 //!
 //!   * non-`ref` parameters without a default value
 //!   * `ref` parameters that carry a default value
+//!   * top-level variables of scalar type without an initializer
 //!   * `const` variables initialized with a non-constant expression
 //!
-//! Note: top-level variable uninitialized declarations (e.g.
-//! `AttackWave gLandAttackWave;`) are NOT flagged here. The XS compiler
-//! requires initialization only for scalar types (int, float, bool, string);
-//! class/struct instances are allowed to be declared without an initializer
-//! because they are constructed lazily via method calls. The LSP does not
-//! have enough type information to distinguish scalars from classes reliably,
-//! so this check is deferred to the compiler itself.
+//! Note: class/struct instances (e.g. `AttackWave gFoo;`) are accepted by
+//! the compiler with default field values, so they don't need an initializer
+//! at the declaration site. The scalar set is fixed by the grammar
+//! (`bool | int | float | string | vector`) — anything else is a class.
 //!
 //! These checks mirror the compiler so the LSP can flag errors before the
 //! file is ever loaded by the engine.
@@ -95,9 +93,7 @@ fn validate_declaration(node: Node<'_>, source: &str, out: &mut Vec<Diagnostic>)
         return;
     }
 
-    // `const` declarations must have a constant RHS expression. (Scalar
-    // types only — `const` on class types is meaningless since the type
-    // already encodes immutability, but the parser accepts it.)
+    // `const` declarations must have a constant RHS expression.
     if let Some(init) = find_named_child(node, "init_declarator") {
         if declaration_has_modifier(node, "const") {
             if let Some(value_node) = init.child_by_field_name("value") {
@@ -112,12 +108,57 @@ fn validate_declaration(node: Node<'_>, source: &str, out: &mut Vec<Diagnostic>)
                 }
             }
         }
+        return;
     }
-    // Uninitialized top-level variables (e.g. `AttackWave gFoo;`) are NOT
-    // validated here. The XS compiler requires initialization only for
-    // scalar types; class/struct instances are constructed lazily. The
-    // LSP lacks reliable type information to distinguish them, so this
-    // check is deferred to the compiler.
+
+    // No initializer: only SCALAR-typed variables are required to have one.
+    // Class/struct instances (e.g. `AttackWave gFoo;`) are accepted by the
+    // compiler with default field values, so they don't need an initializer
+    // at the declaration site. The scalar set is fixed and known from the
+    // grammar: `bool`, `int`, `float`, `string`, `vector`. Anything else is
+    // a class type.
+    if declaration_has_modifier(node, "extern") {
+        return;
+    }
+    let Some(name_node) = find_named_child(node, "identifier") else {
+        return;
+    };
+    let name = node_text(name_node, source);
+    let type_node = find_named_child(node, "primitive_type")
+        .or_else(|| find_named_child(node, "array_type"));
+    match type_node {
+        Some(ty) if is_scalar_type(ty, source) => {
+            out.push(diagnostic(
+                node_range(name_node),
+                format!("variable `{name}` of scalar type must be initialized"),
+            ));
+        }
+        _ => {
+            // Class/struct type (or no resolvable type) — compiler accepts.
+        }
+    }
+}
+
+/// True if `type_node` is a scalar XS type per the grammar's
+/// `primitive_type` set (`bool`, `int`, `float`, `string`, `vector`),
+/// or an array of one of those.
+///
+/// The grammar at `tree-sitter-xs/src/grammar.json:1714` enumerates exactly:
+///   bool | int | float | string | vector | void
+/// We exclude `void` (no variable can be declared `void`) and treat any
+/// other named type or array of named type as a class.
+fn is_scalar_type(type_node: Node<'_>, source: &str) -> bool {
+    if type_node.kind() == "array_type" {
+        if let Some(elem) = type_node.child_by_field_name("element") {
+            return is_scalar_type(elem, source);
+        }
+        return false;
+    }
+    if type_node.kind() != "primitive_type" {
+        return false;
+    }
+    let text = node_text(type_node, source);
+    !matches!(text, "void")
 }
 
 /// True if `node` (a `declaration`) has a storage-class/type-qualifier
@@ -246,18 +287,87 @@ mod tests {
 
     #[test]
     fn flags_uninitialized_top_level_variable() {
-        // NOTE: The XS compiler requires initialization only for scalar
-        // types. Class/struct types (e.g. `AttackWave gFoo;`) are allowed
-        // to be declared without an initializer because they're constructed
-        // lazily via method calls. The LSP doesn't have reliable type
-        // information to distinguish them, so this check is NOT enforced
-        // at the LSP level. This test is kept as documentation of the
-        // intentional gap.
+        // Scalar types (int, float, bool, string, vector) must be
+        // initialized at declaration time. Class/struct instances are
+        // exempted (see `allows_uninitialized_class_variable`).
         let src = "int x;\n";
+        let diags = validate_definitions(&parse(src), src);
+        let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("variable `x` of scalar type must be initialized")),
+            "expected uninit-scalar diagnostic, got: {:?}", msgs
+        );
+    }
+
+    #[test]
+    fn allows_uninitialized_class_variable() {
+        // Class/struct instances are accepted by the compiler with
+        // default field values. The shipped game scripts use this pattern
+        // heavily for things like `AttackWave gLandAttackWave;` which
+        // are then configured via setter calls.
+        let src = "AttackWave gFoo;\n";
         let diags = validate_definitions(&parse(src), src);
         assert!(
             diags.is_empty(),
-            "uninit-var check is intentionally deferred to the compiler, got: {:?}",
+            "class declaration without init should be allowed, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn flags_uninitialized_float_variable() {
+        // Same rule as int — float is a scalar type per the grammar.
+        let src = "float x;\n";
+        let diags = validate_definitions(&parse(src), src);
+        let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("variable `x` of scalar type must be initialized")),
+            "float should be flagged as scalar, got: {:?}", msgs
+        );
+    }
+
+    #[test]
+    fn flags_uninitialized_bool_variable() {
+        let src = "bool x;\n";
+        let diags = validate_definitions(&parse(src), src);
+        let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("variable `x` of scalar type must be initialized")),
+            "bool should be flagged as scalar, got: {:?}", msgs
+        );
+    }
+
+    #[test]
+    fn flags_uninitialized_string_variable() {
+        let src = "string x;\n";
+        let diags = validate_definitions(&parse(src), src);
+        let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("variable `x` of scalar type must be initialized")),
+            "string should be flagged as scalar, got: {:?}", msgs
+        );
+    }
+
+    #[test]
+    fn flags_uninitialized_vector_variable() {
+        let src = "vector x;\n";
+        let diags = validate_definitions(&parse(src), src);
+        let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("variable `x` of scalar type must be initialized")),
+            "vector should be flagged as scalar, got: {:?}", msgs
+        );
+    }
+
+    #[test]
+    fn allows_uninitialized_extern_variable() {
+        // `extern` declarations name a definition elsewhere and are
+        // allowed without an initializer regardless of type.
+        let src = "extern int gFoo;\n";
+        let diags = validate_definitions(&parse(src), src);
+        assert!(
+            diags.is_empty(),
+            "extern int should be allowed without init, got: {:?}",
             diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }

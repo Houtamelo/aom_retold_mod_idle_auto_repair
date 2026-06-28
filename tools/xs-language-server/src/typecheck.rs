@@ -105,7 +105,7 @@ fn check_one_call(
     let callee_source = target.source();
     let name = target.name();
     let params = target.params();
-    let required_count = required_param_count(&params, callee_source);
+    let required_count = required_param_count(&params);
 
     let arg_list = find_named_child(call_node, "argument_list");
     let arg_count = arg_list.map(count_args).unwrap_or(0);
@@ -177,24 +177,27 @@ fn check_one_call(
 }
 
 /// Where a resolved callee's signature comes from.
+///
+/// Used by `arg_types_compatible` to decide whether numeric coercions apply
+/// (engine API is more permissive than workspace). The argument-count check
+/// no longer needs this distinction because the ref/optional rule is
+/// uniform across sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CalleeSource {
     Workspace,
     EngineApi,
 }
 
-fn required_param_count(params: &[Param], _source: CalleeSource) -> usize {
-    // The XS compiler enforces a default value on every non-`ref` parameter
-    // at definition time and rejects any default on a `ref` parameter.
-    // Until the LSP tracks `is_ref` reliably end-to-end (see Param::is_ref
-    // in symbols.rs — captured but not yet propagated into ref-required
-    // counting), we conservatively treat every parameter as having a
-    // default, i.e. all are optional at the call site. Ref params remain
-    // required by the compiler; the LSP simply can't see them yet and
-    // errs on the permissive side to avoid false positives. Workspace and
-    // engine-API callees follow the SAME rule.
-    let _ = params;
-    0
+/// Required parameter count at the call site.
+///
+/// The XS compiler enforces a uniform rule: every non-`ref` parameter has
+/// a default value at definition time (compiler-enforced, even when source
+/// omits `= value`); every `ref` parameter is required. This function
+/// counts only the `ref` parameters — the only ones the call site must
+/// supply. Workspace and engine-API callees follow the same rule; there is
+/// no source-based distinction here.
+fn required_param_count(params: &[Param]) -> usize {
+    params.iter().filter(|p| p.is_ref).count()
 }
 
 /// A resolved callee, either an engine syscall or a workspace function.
@@ -220,7 +223,16 @@ impl<'a> Callee<'a> {
 
     fn params(&self) -> Vec<Param> {
         match self {
-            Callee::Engine(s) => s.params.clone(),
+            Callee::Engine(s) => s
+                .params
+                .iter()
+                .map(|p| Param {
+                    ty: p.ty.clone(),
+                    name: p.name.clone(),
+                    default: p.default.clone(),
+                    is_ref: p.is_ref,
+                })
+                .collect(),
             Callee::Workspace(sym) => sym
                 .params
                 .iter()
@@ -228,6 +240,7 @@ impl<'a> Callee<'a> {
                     ty: p.ty.clone(),
                     name: p.name.clone(),
                     default: p.default.clone(),
+                    is_ref: p.is_ref,
                 })
                 .collect(),
         }
@@ -516,6 +529,89 @@ void test() { myFn(1, 2); }"#;
             diags.is_empty(),
             "workspace call supplying all required args should be clean, got: {:?}",
             messages(&diags)
+        );
+    }
+
+    // -- Regression tests for the ref-required rule ----------------------------
+    //
+    // The XS compiler enforces a uniform rule: every non-`ref` parameter has
+    // a default value at definition time; every `ref` parameter is required
+    // at the call site. These tests pin the rule down so a future regression
+    // (e.g. switching back to "source-based distinction" or "uniform zero")
+    // breaks the test suite.
+
+    fn check_workspace_call(decl: &str, caller: &str) -> Vec<tower_lsp::lsp_types::Diagnostic> {
+        let src = format!("{decl}\n{caller}");
+        let tree = parse(&src);
+        let table = table_for(&src);
+        let mut files = std::collections::HashMap::new();
+        files.insert(PathBuf::from("test.xs"), src.clone());
+        let project = crate::semantic::VirtualProject::from_files(files);
+        check_calls(&tree, &src, &engine(), &table, Some(&project))
+    }
+
+    #[test]
+    fn ref_param_missing_at_call_site_is_an_error() {
+        // (ref int x, int y): x is required, y has implicit default.
+        // Calling as `f()` omits x -> error.
+        let decl = "void myFn(ref int x, int y) {}";
+        let caller = "void test() { myFn(); }";
+        let diags = check_workspace_call(decl, caller);
+        let msgs = messages(&diags);
+        assert!(
+            msgs.iter().any(|m| m.contains("expected 1 required argument") && m.contains("got 0")),
+            "missing ref param should error, got: {:?}", msgs
+        );
+    }
+
+    #[test]
+    fn ref_param_provided_at_call_site_is_ok() {
+        // (ref int x, int y): x required, y has implicit default.
+        // Calling as `f(someRefVar)` supplies x and omits y -> OK.
+        let decl = "void myFn(ref int x, int y) {}";
+        let caller = "void test() { int z = 0; myFn(z); }";
+        let diags = check_workspace_call(decl, caller);
+        assert!(
+            diags.is_empty(),
+            "supplying ref + omitting default should be OK, got: {:?}",
+            messages(&diags)
+        );
+    }
+
+    #[test]
+    fn no_ref_params_means_any_call_count_above_ref_required_is_ok() {
+        // (int x, int y): neither is ref. Calling with no args is fine
+        // because the compiler forces defaults on all non-ref params.
+        let decl = "void myFn(int x, int y) {}";
+        let caller = "void test() { myFn(); }";
+        let diags = check_workspace_call(decl, caller);
+        assert!(
+            diags.is_empty(),
+            "no-ref callee with no args should be OK, got: {:?}",
+            messages(&diags)
+        );
+    }
+
+    #[test]
+    fn ref_param_must_appear_before_non_ref_params_with_defaults() {
+        // (ref int x, int y = 0): x required, y defaulted.
+        // Calling as `f(1)` provides only one arg, missing x -> error.
+        let decl = "void myFn(ref int x, int y = 0) {}";
+        let caller = "void test() { int z = 0; myFn(z); }";
+        let diags = check_workspace_call(decl, caller);
+        assert!(
+            diags.is_empty(),
+            "supplying ref + omitting defaulted non-ref should be OK, got: {:?}",
+            messages(&diags)
+        );
+
+        // Calling as `f()` -> error.
+        let caller2 = "void test() { myFn(); }";
+        let diags2 = check_workspace_call(decl, caller2);
+        let msgs2 = messages(&diags2);
+        assert!(
+            msgs2.iter().any(|m| m.contains("expected 1 required argument")),
+            "missing ref with defaulted non-ref should still error, got: {:?}", msgs2
         );
     }
 

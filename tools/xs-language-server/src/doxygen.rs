@@ -180,6 +180,7 @@ fn parse_function_file(path: &Path, source_filename: &str) -> Result<Vec<Syscall
                 ty,
                 name: pname.clone(),
                 default: defaults.get(&pname).cloned(),
+                is_ref: false,
             })
             .collect();
 

@@ -21,6 +21,16 @@ pub struct Param {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+    /// `ref` modifier — parameter passed by reference. The XS compiler
+    /// rejects defaults on ref params. Currently always `false` for engine
+    /// API params because the Doxygen archive does not capture this; once
+    /// extraction is enhanced the field will be populated.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_ref: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
