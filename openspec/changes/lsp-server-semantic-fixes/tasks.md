@@ -415,6 +415,7 @@ but the overall diff stays well under the 400-line review budget.
 
 ### Task 17: Bump plugin version 0.1.5 → 0.1.6
 
+- **[x]** Complete
 - **Phase**: Plugin version bump + docs
 - **Spec**: proposal.md §Plugin version impact, project `AGENTS.md` plugin-version policy
 - **ADs**: n/a
@@ -434,6 +435,7 @@ but the overall diff stays well under the 400-line review budget.
 
 ### Task 18: Update `docs/post-lsp-migration-issues.md` with resolution status
 
+- **[x]** Complete
 - **Phase**: Plugin version bump + docs
 - **Spec**: proposal.md §Success criteria
 - **ADs**: n/a
