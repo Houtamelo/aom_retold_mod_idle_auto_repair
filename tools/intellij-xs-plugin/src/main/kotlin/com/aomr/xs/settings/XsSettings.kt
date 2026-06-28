@@ -6,6 +6,7 @@ import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
 import com.intellij.openapi.components.service
 import com.intellij.openapi.project.Project
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Project-level persistent settings for the XS Language Server client.
@@ -34,6 +35,8 @@ class XsSettings : PersistentStateComponent<XsSettings.State> {
 
     private var state = State()
 
+    private val listeners = CopyOnWriteArrayList<Listener>()
+
     override fun getState(): State = state
 
     override fun loadState(state: State) {
@@ -41,11 +44,36 @@ class XsSettings : PersistentStateComponent<XsSettings.State> {
     }
 
     /**
-     * Replaces the current mod list with a new one, mutating the persisted state.
+     * Adds a listener that is notified whenever [setModPaths] mutates the
+     * persisted mod list. The listener is invoked synchronously on the same
+     * thread that calls [setModPaths].
+     */
+    fun addModPathsListener(listener: Listener) {
+        listeners.add(listener)
+    }
+
+    /**
+     * Removes a previously registered listener.
+     */
+    fun removeModPathsListener(listener: Listener) {
+        listeners.remove(listener)
+    }
+
+    /**
+     * Replaces the current mod list with a new one, mutating the persisted state
+     * and notifying all registered listeners.
      */
     fun setModPaths(paths: List<String>) {
         state.modPaths.clear()
         state.modPaths.addAll(paths)
+        listeners.forEach { it.modPathsChanged(paths) }
+    }
+
+    /**
+     * Listener contract for mod-list changes.
+     */
+    fun interface Listener {
+        fun modPathsChanged(newPaths: List<String>)
     }
 
     companion object {

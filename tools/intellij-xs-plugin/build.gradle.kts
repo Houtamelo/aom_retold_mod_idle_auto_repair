@@ -30,7 +30,7 @@ repositories {
 
 dependencies {
     intellijPlatform {
-        create("IC", providers.gradleProperty("platformVersion"))
+        create(providers.gradleProperty("platformType"), providers.gradleProperty("platformVersion"))
         bundledPlugins(
             "org.jetbrains.plugins.textmate",
         )
@@ -103,7 +103,7 @@ tasks {
 
     // Build the Rust LSP server and copy the release binary into the
     // plugin's bundled resources. This is what makes the plugin zip
-    // self-contained: `XsLspConnection` extracts the binary from the
+    // self-contained: `XsBinaryResolver` extracts the binary from the
     // classpath at runtime and runs it as a stdio child process.
     //
     // The IntelliJ plugin's gradle project is standalone (no top-level

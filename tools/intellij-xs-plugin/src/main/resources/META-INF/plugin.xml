@@ -11,10 +11,13 @@
 
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.lang</depends>
+    <depends>com.intellij.modules.lsp</depends>
+    <depends>com.intellij.modules.ultimate</depends>
     <depends>org.jetbrains.plugins.textmate</depends>
     <depends optional="true">com.intellij.modules.rider</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+        <platform.lsp.serverSupportProvider implementation="com.aomr.xs.lsp.XsLspSupportProvider"/>
         <fileTypeFactory implementation="com.aomr.xs.XsFileTypeFactory"/>
         <textmate.bundleProvider implementation="com.aomr.xs.textmate.XsTextMateBundleProvider"/>
         <lang.ast.factory language="XS" implementationClass="com.aomr.xs.psi.XsASTFactory"/>

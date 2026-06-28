@@ -1,10 +1,10 @@
 package com.aomr.xs.startup
 
-import com.aomr.xs.lsp.XsLspServerManager
 import com.aomr.xs.settings.XsAppSettings
 import com.aomr.xs.settings.XsModAutoDetector
 import com.aomr.xs.settings.XsSettings
 import com.intellij.notification.NotificationAction
+import com.intellij.notification.NotificationGroup
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.AnActionEvent
@@ -44,40 +44,49 @@ class XsStartupActivity : StartupActivity.DumbAware {
                     notifyNoModsDetected(project)
                 } else {
                     projectSettings.setModPaths(detected)
+                    // The [XsSettings] listener in [XsLspServerManager] will push
+                    // the detected folders to a running server. If the manager
+                    // service has not been created yet, the LSP server descriptor
+                    // will pick up the persisted mod list when the first .xs file
+                    // is opened.
                 }
             } else {
                 notifyNoModsDetected(project)
             }
         }
 
-        XsLspServerManager.getInstance(project).updateSettings(
-            gamePath = appSettings.state.gamePath,
-            modPaths = projectSettings.state.modPaths
-        )
+        // The platform starts the LSP server lazily on the first .xs file open
+        // via XsLspSupportProvider.fileOpened(). No explicit start is needed here.
     }
 
     private fun notifyMissingGamePath(project: Project) {
-        val notification = NotificationGroupManager.getInstance()
-            .getNotificationGroup("XS Language Server")
-            .createNotification(
-                "Game folder not configured",
-                "Open Settings → Languages & Frameworks → XS Language Server to set the Age of Mythology: Retold install root.",
-                NotificationType.WARNING
-            )
-            .addAction(OpenSettingsAction(project))
+        val notification = createNotification(
+            project,
+            "Game folder not configured",
+            "Open Settings → Languages & Frameworks → XS Language Server to set the Age of Mythology: Retold install root."
+        ) ?: return
         notification.notify(project)
     }
 
     private fun notifyNoModsDetected(project: Project) {
-        val notification = NotificationGroupManager.getInstance()
-            .getNotificationGroup("XS Language Server")
-            .createNotification(
-                "No mod folders detected",
-                "No game/ directories were found in this project. Add mod paths manually in Settings → XS Language Server → Mods.",
-                NotificationType.WARNING
-            )
-            .addAction(OpenSettingsAction(project))
+        val notification = createNotification(
+            project,
+            "No mod folders detected",
+            "No game/ directories were found in this project. Add mod paths manually in Settings → XS Language Server → Mods."
+        ) ?: return
         notification.notify(project)
+    }
+
+    private fun createNotification(
+        project: Project,
+        title: String,
+        content: String,
+    ): com.intellij.notification.Notification? {
+        @Suppress("DEPRECATION")
+        val group: NotificationGroup = NotificationGroupManager.getInstance().getNotificationGroup("XS Language Server")
+            ?: return null
+        return group.createNotification(title, content, NotificationType.WARNING)
+            .addAction(OpenSettingsAction(project))
     }
 
     private class OpenSettingsAction(private val project: Project) : NotificationAction("Open Settings") {

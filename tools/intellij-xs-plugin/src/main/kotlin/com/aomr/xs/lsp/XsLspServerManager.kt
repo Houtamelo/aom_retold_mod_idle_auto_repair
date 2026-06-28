@@ -1,218 +1,170 @@
 package com.aomr.xs.lsp
 
-import com.aomr.xs.settings.XsAppSettings
 import com.aomr.xs.settings.XsSettings
-import com.intellij.openapi.Disposable
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.Logger
-import com.intellij.openapi.editor.event.DocumentEvent
-import com.intellij.openapi.editor.event.DocumentListener
-import com.intellij.openapi.fileEditor.FileDocumentManager
-import com.intellij.openapi.fileEditor.FileEditorManager
-import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.openapi.vfs.VirtualFileEvent
-import com.intellij.openapi.vfs.VirtualFileListener
-import com.intellij.openapi.vfs.VirtualFileManager
-import org.eclipse.lsp4j.DidChangeWatchedFilesParams
-import org.eclipse.lsp4j.FileChangeType
-import org.eclipse.lsp4j.FileEvent
+import com.intellij.platform.lsp.api.LspServer
+import com.intellij.platform.lsp.api.LspServerManager
+import org.eclipse.lsp4j.DidChangeWorkspaceFoldersParams
+import org.eclipse.lsp4j.WorkspaceFolder
+import org.eclipse.lsp4j.WorkspaceFoldersChangeEvent
 import java.io.File
 
 /**
- * Per-project service that owns the LSP connection and wires IntelliJ's
- * editor events to LSP didOpen / didChange / didClose.
+ * Per-project service that keeps the LSP server in sync with the user's
+ * configured mod list.
  *
- * Settings drive the lifecycle:
- * - The **game folder** is read from [XsAppSettings] (application-level,
- *   global) and triggers a server restart when it changes.
- * - The **mod list** is read from [XsSettings] (project-level) and is
- *   sent as a `workspace/didChangeWorkspaceFolders` delta on change.
+ * The platform owns the server process lifecycle; this manager only:
+ * - Computes added/removed mod-folder deltas.
+ * - Sends `workspace/didChangeWorkspaceFolders` to running servers.
+ * - Restarts the server when the game folder changes.
  */
 @Service(Service.Level.PROJECT)
-class XsLspServerManager(private val project: Project) : Disposable {
+class XsLspServerManager(private val project: Project) : com.intellij.openapi.Disposable {
 
     private val log = Logger.getInstance(XsLspServerManager::class.java)
-    private var connection: XsLspConnection? = null
-    private var currentGamePath: String = ""
+
+    @Volatile
     private var currentModPaths: List<String> = emptyList()
-    private val versions = mutableMapOf<String, Int>()
-    private var virtualFileListener: VirtualFileListener? = null
+
+    @Volatile
+    private var currentGamePath: String = ""
+
+    /**
+     * Test/production seam for sending a workspace-folder delta.
+     *
+     * In production this delegates to [doSendWorkspaceFolderChange], which
+     * forwards the notification to every running XS LSP server. Tests replace
+     * the property with a capture double.
+     */
+    internal var sendWorkspaceFolderChange: (added: List<String>, removed: List<String>) -> Boolean =
+        ::doSendWorkspaceFolderChange
+
+    /**
+     * Test seam for [restartServer]. When set, it is invoked instead of the
+     * platform's [LspServerManager.stopAndRestartIfNeeded].
+     */
+    internal var restartServerHandler: (() -> Unit)? = null
 
     init {
-        installEditorListeners()
+        val settings = XsSettings.getInstance(project)
+        // Initialise the delta baseline from persisted settings so that the
+        // first settings change correctly removes folders that are no longer
+        // configured (see verify-report "CRITICAL" finding).
+        currentModPaths = settings.state.modPaths.toList()
+        settings.addModPathsListener(XsSettings.Listener { notifyWorkspaceFoldersChanged(it) })
     }
 
     /**
-     * Starts the LSP server using the current [XsAppSettings] game folder
-     * and the current [XsSettings] mod list. If the game path is blank,
-     * the server is not started (the user is expected to set it).
+     * Reacts to a settings change coming from the XS settings page.
+     *
+     * A game-folder change requires a server restart because the LSP server
+     * caches the engine API at startup. A mod-list change is normally
+     * propagated through the [XsSettings] listener registered in [init]; this
+     * method is retained for callers that bypass [XsSettings.setModPaths].
      */
-    @Synchronized
-    fun start() {
-        val appSettings = XsAppSettings.getInstance()
-        val projectSettings = XsSettings.getInstance(project)
-        val gamePath = appSettings.state.gamePath
-        val modPaths = projectSettings.state.modPaths
-        updateSettings(gamePath, modPaths)
-    }
-
-    /**
-     * Reacts to a settings change. Restarts the server when the game path
-     * changes; re-sends workspace folders when the mod list changes.
-     */
-    @Synchronized
     fun updateSettings(gamePath: String, modPaths: List<String>) {
         if (gamePath.isBlank()) {
-            log.info("Game path not configured; LSP server will not start.")
+            log.info("Game path not configured; LSP server will not be restarted.")
             return
         }
-        if (connection != null && gamePath == currentGamePath) {
-            // Game path unchanged; just ensure workspace folders are current.
-            updateWorkspaceFolders(modPaths)
-            return
+        if (gamePath != currentGamePath) {
+            currentGamePath = gamePath
+            currentModPaths = modPaths
+            restartServer()
+        } else {
+            notifyWorkspaceFoldersChanged(modPaths)
         }
-        stop()
-        val conn = XsLspConnection(project, gamePath)
-        if (!conn.start()) {
-            showError("Failed to start XS Language Server for game path: $gamePath")
-            return
-        }
-        connection = conn
-        currentGamePath = gamePath
-        installGameFolderWatcher(gamePath)
-        updateWorkspaceFolders(modPaths)
     }
 
-    @Synchronized
-    override fun dispose() {
-        log.info("Disposing XS LSP server manager")
-        stop()
-    }
-
-    @Synchronized
-    private fun stop() {
-        removeGameFolderWatcher()
-        connection?.stop()
-        connection = null
-        currentGamePath = ""
-        currentModPaths = emptyList()
-        versions.clear()
-    }
-
-    private fun installEditorListeners() {
-        project.messageBus.connect(this).subscribe(
-            FileEditorManagerListener.FILE_EDITOR_MANAGER,
-            object : FileEditorManagerListener {
-                override fun fileOpened(source: FileEditorManager, file: VirtualFile) {
-                    if (file.extension == "xs") onFileOpened(file)
-                }
-
-                override fun fileClosed(source: FileEditorManager, file: VirtualFile) {
-                    if (file.extension == "xs") onFileClosed(file)
-                }
-            }
-        )
-
-        val factory = com.intellij.openapi.editor.EditorFactory.getInstance()
-        factory.eventMulticaster.addDocumentListener(
-            object : DocumentListener {
-                override fun documentChanged(event: DocumentEvent) {
-                    val file = FileDocumentManager.getInstance().getFile(event.document) ?: return
-                    if (file.extension != "xs") return
-                    onFileChanged(file, event.document.text)
-                }
-            },
-            this
-        )
-    }
-
-    private fun installGameFolderWatcher(gamePath: String) {
-        removeGameFolderWatcher()
-        val gameDir = File(gamePath).resolve("game").normalize()
-        if (!gameDir.exists()) return
-
-        val listener = object : VirtualFileListener {
-            private fun maybeForward(event: VirtualFileEvent, kind: FileChangeType) {
-                val file = event.file
-                if (file.extension != "xs") return
-                val path = File(file.path).normalize().path
-                if (!path.startsWith(gameDir.path, ignoreCase = true)) return
-                val uri = file.toUriString()
-                val conn = connection ?: return
-                conn.didChangeWatchedFiles(
-                    DidChangeWatchedFilesParams(
-                        listOf(FileEvent(uri, kind))
-                    )
-                )
-            }
-
-            override fun contentsChanged(event: VirtualFileEvent) = maybeForward(event, FileChangeType.Changed)
-            override fun fileCreated(event: VirtualFileEvent) = maybeForward(event, FileChangeType.Created)
-            override fun fileDeleted(event: VirtualFileEvent) = maybeForward(event, FileChangeType.Deleted)
-        }
-        VirtualFileManager.getInstance().addVirtualFileListener(listener, this)
-        virtualFileListener = listener
-    }
-
-    private fun removeGameFolderWatcher() {
-        virtualFileListener?.let {
-            VirtualFileManager.getInstance().removeVirtualFileListener(it)
-        }
-        virtualFileListener = null
-    }
-
-    @Synchronized
-    private fun updateWorkspaceFolders(updated: List<String>) {
+    /**
+     * Computes the delta between the previous and new mod lists and sends
+     * `workspace/didChangeWorkspaceFolders` to any running XS LSP servers.
+     * If the send cannot be performed (no running server or exception), the
+     * server is restarted so the new mod list is picked up in `initialize`.
+     */
+    fun notifyWorkspaceFoldersChanged(newModPaths: List<String>) {
         val previous = currentModPaths.toSet()
-        val next = updated.toSet()
+        val next = newModPaths.toSet()
         val added = (next - previous).toList()
         val removed = (previous - next).toList()
-        currentModPaths = updated
+        currentModPaths = newModPaths
         if (added.isEmpty() && removed.isEmpty()) return
-        // Pass paths (not pre-converted URIs). XsLspConnection handles the
-        // single path->URI conversion itself; doing it here as well used to
-        // produce double-prefixed URIs (`file:///home/.../file:/home/.../mod/foo`)
-        // that the LSP could never match against real file paths.
-        connection?.changeWorkspaceFolders(added, removed)
+
+        val sent = try {
+            sendWorkspaceFolderChange(added, removed)
+        } catch (e: Exception) {
+            log.warn("Failed to send workspace/didChangeWorkspaceFolders", e)
+            false
+        }
+        if (!sent) {
+            restartServer()
+        }
     }
 
-    private fun onFileOpened(file: VirtualFile) {
-        val doc = FileDocumentManager.getInstance().getDocument(file) ?: return
-        val uri = file.toUriString()
-        val version = bumpVersion(uri)
-        log.info("didOpen: $uri (v$version, ${doc.textLength} chars)")
-        connection?.didOpen(uri, doc.text, version)
+    private fun doSendWorkspaceFolderChange(addedPaths: List<String>, removedPaths: List<String>): Boolean {
+        val addedFolders = addedPaths.map { pathToWorkspaceFolder(it) }
+        val removedFolders = removedPaths.map { pathToWorkspaceFolder(it) }
+        val event = WorkspaceFoldersChangeEvent(addedFolders, removedFolders)
+        val params = DidChangeWorkspaceFoldersParams().apply { this.event = event }
+
+        val servers = LspServerManager.getInstance(project).getServersForProvider(XsLspSupportProvider::class.java)
+        if (servers.isEmpty()) {
+            log.info("No running XS LSP server; falling back to restart to apply workspace-folder changes.")
+            return false
+        }
+
+        var successCount = 0
+        for (server in servers) {
+            successCount += if (sendToServer(server, params, addedPaths, removedPaths)) 1 else 0
+        }
+        return successCount > 0
     }
 
-    private fun onFileChanged(file: VirtualFile, text: String) {
-        val uri = file.toUriString()
-        val version = bumpVersion(uri)
-        connection?.didChange(uri, text, version)
+    private fun sendToServer(
+        server: LspServer,
+        params: DidChangeWorkspaceFoldersParams,
+        addedPaths: List<String>,
+        removedPaths: List<String>,
+    ): Boolean {
+        return try {
+            server.sendNotification { lsp4jServer ->
+                lsp4jServer.workspaceService.didChangeWorkspaceFolders(params)
+            }
+            log.info(
+                "Sent workspace/didChangeWorkspaceFolders to ${server.descriptor.presentableName}: " +
+                    "+${addedPaths.size} -${removedPaths.size}"
+            )
+            for (path in addedPaths) {
+                log.info("  + mod folder (path): $path")
+            }
+            for (path in removedPaths) {
+                log.info("  - mod folder (path): $path")
+            }
+            true
+        } catch (e: Exception) {
+            log.warn("Failed to send workspace/didChangeWorkspaceFolders to ${server.descriptor.presentableName}", e)
+            false
+        }
     }
 
-    private fun onFileClosed(file: VirtualFile) {
-        val uri = file.toUriString()
-        log.info("didClose: $uri")
-        connection?.didClose(uri)
-        versions.remove(uri)
+    private fun pathToWorkspaceFolder(path: String): WorkspaceFolder {
+        return WorkspaceFolder(File(path).toURI().toString(), File(path).name)
     }
 
-    private fun bumpVersion(uri: String): Int {
-        val next = (versions[uri] ?: 0) + 1
-        versions[uri] = next
-        return next
+    private fun restartServer() {
+        restartServerHandler?.invoke() ?: run {
+            ApplicationManager.getApplication().invokeLater(Runnable {
+                LspServerManager.getInstance(project).stopAndRestartIfNeeded(XsLspSupportProvider::class.java)
+            }, project.disposed)
+        }
     }
 
-    private fun VirtualFile.toUriString(): String = File(path).toURI().toString()
-
-    private fun showError(message: String) {
-        val group = com.intellij.notification.NotificationGroupManager.getInstance()
-            .getNotificationGroup("XS Language Server")
-        val notification = group.createNotification(message, com.intellij.notification.NotificationType.ERROR)
-        notification.notify(project)
+    override fun dispose() {
+        // The platform stops the LSP server when the project is closed.
     }
 
     companion object {
