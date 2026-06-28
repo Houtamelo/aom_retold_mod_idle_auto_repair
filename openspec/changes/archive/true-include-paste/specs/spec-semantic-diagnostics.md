@@ -1,8 +1,8 @@
 # Semantic Diagnostics Specification
 
 > **Added/updated by change:** `xs-language-server` (workspace & engine-data redesign)  
-> **Updated by change:** `true-include-paste` (added include visibility rules to scenario §8)
-> **Archived:** 2026-06-25
+> **Updated by change:** `true-include-paste`
+> **Archived:** 2026-06-24
 > **Change verdict:** PASS WITH DEVIATIONS
 
 ## Capability summary
@@ -129,4 +129,4 @@ These are the errors that currently only surface inside AoM:R. Catching them at 
 | Change | Date | Verdict | Notes |
 |---|---|---|---|
 | `xs-language-server` | 2026-06-24 | PASS WITH DEVIATIONS | Initial spec. |
-| `true-include-paste` | 2026-06-25 | PASS WITH DEVIATIONS | Replaced the incomplete include scenario (AC 8) with explicit include-visibility scenarios and split the call-before-include case into its own scenario. |
+| `true-include-paste` | 2026-06-24 | — | Replaced the incomplete include scenario (AC 8) with explicit include-visibility scenarios and split the call-before-include case into its own scenario. |

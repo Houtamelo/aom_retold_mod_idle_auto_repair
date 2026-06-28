@@ -2,7 +2,7 @@
 
 > **Added/updated by change:** `xs-language-server` (workspace & engine-data redesign)  
 > **Updated by change:** `true-include-paste`
-> **Archived:** 2026-06-25
+> **Archived:** 2026-06-24
 > **Change verdict:** PASS WITH DEVIATIONS
 
 ## Capability summary
@@ -100,4 +100,4 @@ The merged view for an open file consumes `workspace::resolve_include` to resolv
 | Change | Date | Verdict | Notes |
 |---|---|---|---|
 | `xs-language-server` | 2026-06-24 | PASS WITH DEVIATIONS | Initial spec. |
-| `true-include-paste` | 2026-06-25 | PASS WITH DEVIATIONS | Added merged-view overlay scenarios and acceptance criterion 11. |
+| `true-include-paste` | 2026-06-24 | — | Added merged-view overlay scenarios and acceptance criterion 11. |
