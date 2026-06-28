@@ -25,6 +25,7 @@
         <lang.braceMatcher language="xs" implementationClass="com.aomr.xs.editor.XsBraceMatcher"/>
         <lang.quoteHandler language="xs" implementationClass="com.aomr.xs.editor.XsQuoteHandler"/>
         <lang.commenter language="xs" implementationClass="com.aomr.xs.editor.XsCommenter"/>
+        <lang.syntaxHighlighterFactory language="xs" implementationClass="com.aomr.xs.highlight.XsSyntaxHighlighterFactory"/>
 
         <notificationGroup id="XS Language Server" displayType="BALLOON"/>
 
