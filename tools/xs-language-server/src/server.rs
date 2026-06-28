@@ -594,19 +594,14 @@ impl LanguageServer for XsLanguageServer {
                     range: sym.selection_range,
                 },
                 None => {
-                    if self.engine.find_syscall(&ident).is_none()
-                        && self.engine.find_aiplan(&ident).is_none()
+                    if self.engine.find_syscall(&ident).is_some()
+                        || self.engine.find_aiplan(&ident).is_some()
                     {
+                        debug!("definition: `{ident}` is engine API; returning null");
+                    } else {
                         debug!("definition: identifier `{ident}` not in engine API or workspace");
-                        return Ok(None);
                     }
-                    // Virtual URI — these stubs don't have a real source position.
-                    let stub_uri = format!("xs-stub://engine/{ident}");
-                    Location {
-                        uri: Url::parse(&stub_uri)
-                            .map_err(|_e| tower_lsp::jsonrpc::Error::internal_error())?,
-                        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-                    }
+                    return Ok(None);
                 }
             }
         };
