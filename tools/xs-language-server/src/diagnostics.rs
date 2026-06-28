@@ -5,9 +5,10 @@
 //! diagnostics (extern collisions, forward declarations, mutable redefinition,
 //! user-function type checks) on top of the parse diagnostics.
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 use tree_sitter::{Node, Tree};
 
 use crate::engine_api::EngineApi;
@@ -115,4 +116,49 @@ fn to_diagnostic(node: Node) -> Diagnostic {
         tags: None,
         data: None,
     }
+}
+
+/// Diagnostics grouped by the URI to which they belong.
+pub type DiagnosticsByUri = HashMap<Url, Vec<Diagnostic>>;
+
+/// Stable classification bucket for a [`Diagnostic`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticCategory {
+    ExternCollision,
+    UnresolvedSymbol,
+    WrongArgCount,
+    WrongRangeUri,
+    Other,
+}
+
+/// Classify a diagnostic by its message content.
+pub fn categorize(d: &Diagnostic) -> DiagnosticCategory {
+    let msg = d.message.to_ascii_lowercase();
+    if msg.contains("duplicate extern") || msg.contains("extern collision") {
+        DiagnosticCategory::ExternCollision
+    } else if msg.contains("expected") && msg.contains("argument") {
+        DiagnosticCategory::WrongArgCount
+    } else if msg.contains("error 0310")
+        || msg.contains("invalid symbol lookup")
+        || msg.contains("unresolved")
+    {
+        DiagnosticCategory::UnresolvedSymbol
+    } else {
+        DiagnosticCategory::Other
+    }
+}
+
+/// True if `d` is a duplicate-`extern` / `extern`-collision diagnostic.
+pub fn is_duplicate_extern(d: &Diagnostic) -> bool {
+    categorize(d) == DiagnosticCategory::ExternCollision
+}
+
+/// True if `d` is an unresolved-symbol/use-before-declaration diagnostic.
+pub fn is_unresolved_symbol(d: &Diagnostic) -> bool {
+    categorize(d) == DiagnosticCategory::UnresolvedSymbol
+}
+
+/// True if `d` is a wrong-argument-count diagnostic.
+pub fn is_argument_mismatch(d: &Diagnostic) -> bool {
+    categorize(d) == DiagnosticCategory::WrongArgCount
 }

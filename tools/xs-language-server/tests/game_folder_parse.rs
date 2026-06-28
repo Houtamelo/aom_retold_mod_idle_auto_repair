@@ -17,8 +17,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use xs_language_server::diagnostics::{collect_all, DiagnosticCategory};
+use xs_language_server::engine_api::EngineApi;
+use xs_language_server::merged_view::MergedView;
 use xs_language_server::parser;
-use xs_language_server::semantic::{SemanticChecker, VirtualProject as SemProject};
+use xs_language_server::semantic::{VirtualProject as SemProject};
 use xs_language_server::symbols;
 use xs_language_server::workspace::{VirtualProject, Workspace};
 
@@ -379,12 +382,6 @@ fn every_game_folder_file_resolves_in_workspace() {
 // `unresolved == 0`.
 // ---------------------------------------------------------------------------
 
-/// Maximum acceptable unresolved-symbol count. After the true include-paste
-/// implementation (PR 3) scoped the integration test to top-level files and
-/// excluded `random_maps/`, the measured count is 0. This strict threshold
-/// catches any regression in cross-include symbol resolution.
-const UNRESOLVED_SYMBOL_THRESHOLD: usize = 0;
-
 /// Top-10 `bo_*` AI build-order callees used as regression guards. PR 1 made
 /// these parse as `Function` symbols; PR 3/4 verify that they resolve through
 /// the include-paste scope with zero unresolved-symbol diagnostics.
@@ -401,23 +398,27 @@ const TOP_BO_CALLEES: &[&str] = &[
     "boTech",
 ];
 
-/// Result of a full top-level-file semantic scan, cached so multiple tests
-/// can share the expensive analysis.
+/// Result of the full diagnostic pipeline over every top-level game folder
+/// file, cached so the per-category assertions can share the expensive scan.
 #[derive(Debug, Clone)]
-struct UnresolvedReport {
-    total_unresolved: usize,
+struct DiagnosticReport {
+    duplicate_extern_count: usize,
+    wrong_diagnostic_uri_count: usize,
+    unresolved_symbol_count: usize,
+    wrong_arg_count_count: usize,
+    rule_call_unresolved_count: usize,
+    /// Sum of all non-"Other" diagnostics returned by the pipeline across
+    /// the analyzed files (used as a catch-all gate).
+    total_diagnostic_count: usize,
     /// Counts only for the top `bo_*` callees.
     callee_counts: HashMap<String, usize>,
-    examples: Vec<String>,
+    /// Representative failures per category.
+    examples: HashMap<DiagnosticCategory, Vec<String>>,
 }
 
-/// Run the semantic checker over every top-level game-folder file and return
-/// a summary of unresolved-symbol diagnostics. The result is cached in a
-/// process-wide `OnceLock` so the threshold test and the per-callee guard
-/// test share the same scan.
-fn analyze_top_level_unresolved() -> Option<UnresolvedReport> {
+fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
     use std::sync::OnceLock;
-    static CACHE: OnceLock<Option<UnresolvedReport>> = OnceLock::new();
+    static CACHE: OnceLock<Option<DiagnosticReport>> = OnceLock::new();
     CACHE
         .get_or_init(|| {
             let game_dir = resolve_game_dir()?;
@@ -443,12 +444,6 @@ fn analyze_top_level_unresolved() -> Option<UnresolvedReport> {
                 .cloned()
                 .collect();
 
-            // The semantic checker only resolves workspace-defined symbols. Calls to
-            // engine syscalls (`kb*`, `ai*`, `tr*`, `xs*`, `rm*`) come back as
-            // `Error 0310: invalid symbol lookup '...'` because the engine API is
-            // not part of the virtual project. We load the engine API once and build
-            // a skip-list of known engine names so we can isolate genuinely
-            // unresolved workspace symbols.
             let engine_api = load_engine_api(&game_dir);
 
             // Build the semantic project from all game-folder files in one go. This
@@ -461,79 +456,226 @@ fn analyze_top_level_unresolved() -> Option<UnresolvedReport> {
                 sources.insert(path.clone(), source);
             }
             let project = SemProject::from_files(sources);
-            let checker = SemanticChecker::new(project);
 
+            let mut rule_names = HashSet::new();
+            for file in project.files.values() {
+                for sym in &file.table.symbols {
+                    if sym.kind == xs_language_server::symbols::SymbolKind::Rule {
+                        rule_names.insert(sym.name.clone());
+                    }
+                }
+            }
+
+            let game_root = game_dir.parent()?.to_path_buf();
+            let workspace = Workspace::new(game_root);
+            let ws_project = VirtualProject::default();
+            let cache_dir = xs_language_server::cache::state_cache_dir();
+
+            let mut duplicate_extern = 0usize;
+            let mut wrong_uri = 0usize;
+            let mut unresolved_symbol = 0usize;
+            let mut wrong_arg_count = 0usize;
+            let mut rule_call_unresolved = 0usize;
+            let mut total = 0usize;
             let mut callee_counts: HashMap<String, usize> = TOP_BO_CALLEES
                 .iter()
                 .map(|c| (c.to_string(), 0))
                 .collect();
-            let mut unresolved_symbol: usize = 0;
-            let mut unresolved_examples: Vec<String> = Vec::new();
+            let mut examples: HashMap<DiagnosticCategory, Vec<String>> = HashMap::new();
+            let mut record_example = |cat, path: &Path, message: &str| {
+                let entry = examples.entry(cat).or_default();
+                if entry.len() < 5 {
+                    entry.push(format!("{path:?}: {message}"));
+                }
+            };
 
             for path in &top_level_files {
-                let diags = checker.check_all(path);
+                let source = std::fs::read_to_string(path)
+                    .unwrap_or_else(|e| panic!("failed to read {path:?}: {e}"));
+                let tree = parser::parse(&source)
+                    .unwrap_or_else(|| panic!("parser returned None for {path:?}"));
+                let table = symbols::build_symbol_table(&tree, &source);
+                let merged =
+                    MergedView::build(path, &source, &table, &workspace, &ws_project, &cache_dir);
+                let diags = collect_all(
+                    &tree,
+                    &source,
+                    &engine_api,
+                    &table,
+                    Some(&project),
+                    Some(path),
+                    Some(&merged),
+                );
+
+                let line_count = source.lines().count() as u32;
+
                 for d in diags {
-                    if d.message.contains("Error 0310") || d.message.contains("invalid symbol lookup")
+                    let cat = xs_language_server::diagnostics::categorize(&d);
+                    match cat {
+                        DiagnosticCategory::ExternCollision => {
+                            duplicate_extern += 1;
+                            record_example(cat, path, &d.message);
+                        }
+                        DiagnosticCategory::WrongArgCount => {
+                            wrong_arg_count += 1;
+                            record_example(cat, path, &d.message);
+                        }
+                        DiagnosticCategory::UnresolvedSymbol => {
+                            unresolved_symbol += 1;
+                            if let Some(callee) = extract_callee_from_diagnostic(&d.message) {
+                                if rule_names.contains(&callee) {
+                                    rule_call_unresolved += 1;
+                                }
+                                if let Some(count) = callee_counts.get_mut(&callee) {
+                                    *count += 1;
+                                }
+                            }
+                            record_example(cat, path, &d.message);
+                        }
+                        _ => {}
+                    }
+
+                    if d.range.start.line > d.range.end.line
+                        || d.range.start.line >= line_count
+                        || d.range.end.line > line_count
                     {
-                        if let Some(callee) = extract_callee_from_diagnostic(&d.message) {
-                            if engine_api.contains(&callee) {
-                                continue;
-                            }
-                            if let Some(count) = callee_counts.get_mut(&callee) {
-                                *count += 1;
-                            }
-                        }
-                        unresolved_symbol += 1;
-                        if unresolved_examples.len() < 5 {
-                            unresolved_examples.push(format!("{path:?}: {}", d.message));
-                        }
+                        wrong_uri += 1;
+                        record_example(
+                            DiagnosticCategory::WrongRangeUri,
+                            path,
+                            &format!("{} (range {:?} outside {} lines)", d.message, d.range, line_count),
+                        );
+                    }
+
+                    if !matches!(cat, DiagnosticCategory::Other) {
+                        total += 1;
                     }
                 }
             }
 
             println!(
-                "Semantic check emitted diagnostics across {} top-level files ({} binary .xs skipped); \
-                 {} flagged as unresolved_symbol (threshold: {})",
+                "Diagnostic pipeline across {} top-level files ({} binary .xs skipped): \
+                 duplicate_extern={}, wrong_uri={}, unresolved_symbol={}, \
+                 wrong_arg_count={}, rule_call_unresolved={}, total={}",
                 top_level_files.len(),
                 binary_skipped,
+                duplicate_extern,
+                wrong_uri,
                 unresolved_symbol,
-                UNRESOLVED_SYMBOL_THRESHOLD,
+                wrong_arg_count,
+                rule_call_unresolved,
+                total,
             );
-            if !unresolved_examples.is_empty() {
-                for ex in &unresolved_examples {
-                    println!("  unresolved example: {ex}");
+            if !examples.is_empty() {
+                for (cat, exs) in &examples {
+                    println!("  {cat:?} examples:");
+                    for ex in exs {
+                        println!("    {ex}");
+                    }
                 }
             }
 
-            Some(UnresolvedReport {
-                total_unresolved: unresolved_symbol,
+            Some(DiagnosticReport {
+                duplicate_extern_count: duplicate_extern,
+                wrong_diagnostic_uri_count: wrong_uri,
+                unresolved_symbol_count: unresolved_symbol,
+                wrong_arg_count_count: wrong_arg_count,
+                rule_call_unresolved_count: rule_call_unresolved,
+                total_diagnostic_count: total,
                 callee_counts,
-                examples: unresolved_examples,
+                examples,
             })
         })
         .clone()
 }
 
 #[test]
-fn semantic_pipeline_unresolved_count_within_threshold() {
-    let Some(report) = analyze_top_level_unresolved() else {
-        eprintln!("AOMR_GAME_PATH not set, skipping semantic pipeline test");
+fn test_game_folder_duplicate_extern_count_is_zero() {
+    let Some(report) = analyze_top_level_diagnostics() else {
+        eprintln!("AOMR_GAME_PATH not set, skipping duplicate-extern test");
         return;
     };
-
     assert!(
-        report.total_unresolved <= UNRESOLVED_SYMBOL_THRESHOLD,
-        "found {} unresolved-symbol diagnostics \
-         (threshold {}). First examples: {:?}",
-        report.total_unresolved,
-        UNRESOLVED_SYMBOL_THRESHOLD,
+        report.duplicate_extern_count == 0,
+        "found {} duplicate-extern diagnostic(s). Examples: {:?}",
+        report.duplicate_extern_count,
+        report.examples.get(&DiagnosticCategory::ExternCollision),
+    );
+}
+
+#[test]
+fn test_game_folder_wrong_diagnostic_uri_count_is_zero() {
+    let Some(report) = analyze_top_level_diagnostics() else {
+        eprintln!("AOMR_GAME_PATH not set, skipping wrong-URI test");
+        return;
+    };
+    assert!(
+        report.wrong_diagnostic_uri_count == 0,
+        "found {} diagnostic(s) with a URI/range mismatch. Examples: {:?}",
+        report.wrong_diagnostic_uri_count,
+        report.examples.get(&DiagnosticCategory::WrongRangeUri),
+    );
+}
+
+#[test]
+fn test_game_folder_unresolved_symbol_count_is_zero() {
+    let Some(report) = analyze_top_level_diagnostics() else {
+        eprintln!("AOMR_GAME_PATH not set, skipping unresolved-symbol test");
+        return;
+    };
+    assert!(
+        report.unresolved_symbol_count == 0,
+        "found {} unresolved-symbol diagnostic(s). Examples: {:?}",
+        report.unresolved_symbol_count,
+        report.examples.get(&DiagnosticCategory::UnresolvedSymbol),
+    );
+}
+
+#[test]
+fn test_game_folder_wrong_arg_count_count_is_zero() {
+    let Some(report) = analyze_top_level_diagnostics() else {
+        eprintln!("AOMR_GAME_PATH not set, skipping wrong-arg-count test");
+        return;
+    };
+    assert!(
+        report.wrong_arg_count_count == 0,
+        "found {} wrong-arg-count diagnostic(s). Examples: {:?}",
+        report.wrong_arg_count_count,
+        report.examples.get(&DiagnosticCategory::WrongArgCount),
+    );
+}
+
+#[test]
+fn test_game_folder_rule_call_unresolved_count_is_zero() {
+    let Some(report) = analyze_top_level_diagnostics() else {
+        eprintln!("AOMR_GAME_PATH not set, skipping rule-call-unresolved test");
+        return;
+    };
+    assert!(
+        report.rule_call_unresolved_count == 0,
+        "found {} unresolved rule-call diagnostic(s). Examples: {:?}",
+        report.rule_call_unresolved_count,
+        report.examples.get(&DiagnosticCategory::UnresolvedSymbol),
+    );
+}
+
+#[test]
+fn test_game_folder_total_diagnostic_count_is_zero() {
+    let Some(report) = analyze_top_level_diagnostics() else {
+        eprintln!("AOMR_GAME_PATH not set, skipping total-diagnostic test");
+        return;
+    };
+    assert!(
+        report.total_diagnostic_count == 0,
+        "found {} total non-parse diagnostic(s). Examples: {:?}",
+        report.total_diagnostic_count,
         report.examples,
     );
 }
 
 #[test]
 fn top_bo_callees_have_zero_unresolved_calls() {
-    let Some(report) = analyze_top_level_unresolved() else {
+    let Some(report) = analyze_top_level_diagnostics() else {
         eprintln!("AOMR_GAME_PATH not set, skipping top-bo-callee guard test");
         return;
     };
@@ -558,50 +700,17 @@ fn top_bo_callees_have_zero_unresolved_calls() {
 }
 
 /// Load the engine API for the doxygen archive that ships next to `game/`.
-/// Returns the set of known syscall names (used to filter engine API calls
-/// out of the unresolved-symbol count), unioned with the set of XS builtin
-/// type constructors like `vector(...)`. If the archive is missing the test
-/// still runs — it just won't filter engine calls, which will surface as
-/// unresolved diagnostics and fail the test.
-fn load_engine_api(game_dir: &Path) -> HashSet<String> {
-    let mut known = builtin_constructors();
-    let Some(install_root) = game_dir.parent() else {
-        return known;
-    };
+fn load_engine_api(game_dir: &Path) -> EngineApi {
+    let install_root = game_dir
+        .parent()
+        .expect("game/ directory must have a parent install root");
     let archive = install_root.join("doxygen_retail.7z");
-    if !archive.is_file() {
-        eprintln!("{:?} not found, skipping engine-API filtering", archive);
-        return known;
-    }
     let cache_dir = xs_language_server::cache::state_cache_dir();
-    match xs_language_server::engine_api::EngineApi::load_from_archive(&archive, &cache_dir) {
-        Ok(api) => known.extend(api.syscalls.into_iter().map(|s| s.name)),
-        Err(e) => eprintln!("could not load engine API from {archive:?}: {e}"),
-    }
-    known
+    EngineApi::load_from_archive(&archive, &cache_dir)
+        .unwrap_or_else(|e| panic!("could not load engine API from {archive:?}: {e}"))
 }
 
-/// XS builtin type constructors and language keywords that the semantic
-/// checker treats as bare function calls but which the engine resolves
-/// implicitly. Without these in the skip list, every `vector(...)` call in
-/// the game folder would surface as `Error 0310` even though `vector` is a
-/// language-level constructor rather than a workspace or engine symbol.
-fn builtin_constructors() -> HashSet<String> {
-    [
-        // 3D vector constructor: `vector(x, y, z)`.
-        "vector",
-        // Vector helpers used as functions in many strategy scripts.
-        "xsVectorSet",
-        "xsVectorGetX",
-        "xsVectorGetY",
-        "xsVectorGetZ",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
-}
-
-/// Pull the callee name out of a `Error 0310: invalid symbol lookup 'X' at
+/// Pull the callee name out of an `Error 0310: invalid symbol lookup 'X' at
 /// line N` message. Returns `None` for malformed messages so the caller can
 /// decide whether to count them.
 fn extract_callee_from_diagnostic(message: &str) -> Option<String> {
