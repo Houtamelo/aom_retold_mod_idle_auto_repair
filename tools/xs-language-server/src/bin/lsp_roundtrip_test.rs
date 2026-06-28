@@ -22,6 +22,7 @@ const INITIALIZED: &str =
 const DID_OPEN: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/test.xs","languageId":"xs","version":1,"text":"rule test\nminInterval 5\nactive\n{\n   aiEcho(\"hello\");\n}"}}}"#;
 const DID_CHANGE: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/test.xs","version":2},"contentChanges":[{"text":"rule test2\nactive\n{\n   aiEcho(\"changed\");\n}"}]}}"#;
 const DID_OPEN_BAD: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/bad.xs","languageId":"xs","version":1,"text":"rule brokenRule\nminInterval 5\nactive\n{\n   int x = ;\n   aiEcho(\"hello\n}\n\nvoid unclosed(int a\n{\n}\n"}}}"#;
+const DID_CHANGE_BAD_FIX: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/bad.xs","version":2},"contentChanges":[{"text":"rule fixedRule\nminInterval 5\nactive\n{\n   aiEcho(\"hello\");\n}\n"}]}}"#;
 const COMPLETION_AI: &str = r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///tmp/test.xs"},"position":{"line":4,"character":6}}}"#;
 // Hover and go-to-definition at the same position — col 6 is on the 'c'
 // of "aiEcho" in the test file (line 4 = `   aiEcho("hello");`).
@@ -191,7 +192,7 @@ fn run_baseline() -> bool {
 
     // Write the full message sequence (including exit) so the server
     // processes everything and exits, flushing stdout.
-    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, COMPLETION_AI, HOVER_AI, DEFINITION_AI, DID_OPEN_WORKSPACE, HOVER_WORKSPACE, DEFINITION_WORKSPACE, HOVER_CONSTANT, DOCUMENT_SYMBOL, DID_OPEN_REFS, REFERENCES, RENAME, PREPARE_RENAME, PREPARE_RENAME_ENGINE, DID_OPEN_TYPES, SHUTDOWN, EXIT] {
+    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, DID_CHANGE_BAD_FIX, COMPLETION_AI, HOVER_AI, DEFINITION_AI, DID_OPEN_WORKSPACE, HOVER_WORKSPACE, DEFINITION_WORKSPACE, HOVER_CONSTANT, DOCUMENT_SYMBOL, DID_OPEN_REFS, REFERENCES, RENAME, PREPARE_RENAME, PREPARE_RENAME_ENGINE, DID_OPEN_TYPES, SHUTDOWN, EXIT] {
         eprintln!("[test] writing {} bytes", frame(msg).len());
         stdin
             .write_all(frame(msg).as_bytes())
@@ -221,6 +222,7 @@ fn run_baseline() -> bool {
     let mut prepare_rename_resp = None;
     let mut prepare_rename_engine_resp = None;
     let mut types_diag_raw: Option<String> = None;
+    let mut bad_clean_diag_raw: Option<String> = None;
 
     // Read everything from stdout, then parse.
     stdout.read_to_end(&mut all_bytes).expect("read stdout to end");
@@ -274,6 +276,9 @@ fn run_baseline() -> bool {
                         .and_then(|u| u.as_str());
                     if uri == Some("file:///tmp/types.xs") && types_diag_raw.is_none() {
                         types_diag_raw = Some(msg.to_string());
+                    }
+                    if uri == Some("file:///tmp/bad.xs") {
+                        bad_clean_diag_raw = Some(msg.to_string());
                     }
                 }
             }
@@ -370,6 +375,21 @@ fn run_baseline() -> bool {
         println!("PASS: malformed-file diagnostics published with parse errors");
     } else {
         println!("FAIL: missing diagnostics notification for /tmp/bad.xs");
+        all_pass = false;
+    }
+
+    // After fixing every diagnostic in /tmp/bad.xs, the server MUST publish an
+    // empty diagnostic array (version 2) so the client clears stale markers.
+    let bad_clean_empty = bad_clean_diag_raw.as_deref().map_or(false, |raw| {
+        raw.contains("\"uri\":\"file:///tmp/bad.xs\"")
+            && raw.contains("\"diagnostics\":[]")
+            && raw.contains("\"version\":2")
+    });
+    if bad_clean_empty {
+        println!("PASS: clean follow-up change publishes empty diagnostics for /tmp/bad.xs");
+    } else {
+        println!("FAIL: /tmp/bad.xs did not receive an empty diagnostic publish after being fixed");
+        println!("  last bad.xs diagnostic: {}", bad_clean_diag_raw.unwrap_or_default());
         all_pass = false;
     }
 
