@@ -19,7 +19,7 @@ use crate::symbols::SymbolTable;
 use crate::{semantic, typecheck};
 
 /// Walk the tree and collect one `Diagnostic` per error site.
-pub fn collect_diagnostics(tree: &Tree, _source: &str) -> Vec<Diagnostic> {
+pub fn collect_diagnostics(tree: &Tree, source: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     walk(tree.root_node(), &mut out);
     out
@@ -310,5 +310,61 @@ mod tests {
             categorize(&diag("mutable function 'foo' redefined with different signature")),
             DiagnosticCategory::Other
         );
+    }
+
+    fn parse_messages(src: &str) -> Vec<String> {
+        let tree = crate::parser::parse(src).expect("parse should succeed");
+        super::collect_diagnostics(&tree, src)
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
+
+    fn assert_no_internals(message: &str) {
+        let banned = ["MISSING", "ERROR", "node", "column(s)"];
+        for word in &banned {
+            assert!(
+                !message.contains(word),
+                "message {:?} must not contain internal token {:?}",
+                message,
+                word
+            );
+        }
+    }
+
+    #[test]
+    fn parse_message_for_missing_semicolon() {
+        let msgs = parse_messages("void f() { int x = 1 }\n");
+        let wanted = msgs.iter().find(|m| m == &&"Missing ';'".to_string());
+        assert!(wanted.is_some(), "expected \"Missing ';'\" among {:?}", msgs);
+        for m in &msgs {
+            assert_no_internals(m);
+        }
+    }
+
+    #[test]
+    fn parse_message_for_missing_closing_brace() {
+        let msgs = parse_messages("void f() { int x = 1;\n");
+        let wanted = msgs.iter().find(|m| m == &&"Missing '}'".to_string());
+        assert!(wanted.is_some(), "expected \"Missing '}}'\" among {:?}", msgs);
+        for m in &msgs {
+            assert_no_internals(m);
+        }
+    }
+
+    #[test]
+    fn parse_message_for_unexpected_identifier() {
+        let msgs = parse_messages("void f() { int x = foo bar; }\n");
+        let wanted = msgs
+            .iter()
+            .find(|m| m.starts_with("Unexpected identifier "));
+        assert!(
+            wanted.is_some(),
+            "expected an 'Unexpected identifier ...' message among {:?}",
+            msgs
+        );
+        for m in &msgs {
+            assert_no_internals(m);
+        }
     }
 }
