@@ -26,3 +26,4 @@ tools/intellij-xs-plugin/src/main/resources/bin/
 # Local AI runtime state
 .atl/
 .idea/
+.worktrees/

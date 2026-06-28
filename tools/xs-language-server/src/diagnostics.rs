@@ -19,18 +19,18 @@ use crate::symbols::SymbolTable;
 use crate::{semantic, typecheck};
 
 /// Walk the tree and collect one `Diagnostic` per error site.
-pub fn collect_diagnostics(tree: &Tree, _source: &str) -> Vec<Diagnostic> {
+pub fn collect_diagnostics(tree: &Tree, source: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    walk(tree.root_node(), &mut out);
+    walk(tree.root_node(), source, &mut out);
     out
 }
 
-fn walk(node: Node, out: &mut Vec<Diagnostic>) {
+fn walk(node: Node, source: &str, out: &mut Vec<Diagnostic>) {
     if node.is_error() || node.is_missing() {
-        out.push(to_diagnostic(node));
+        out.push(to_diagnostic(node, source));
     }
     for child in node.children(&mut node.walk()) {
-        walk(child, out);
+        walk(child, source, out);
     }
 }
 
@@ -107,6 +107,12 @@ pub fn collect_all(
         }
     }
 
+    // Always emit an entry for the current file so clients receive an empty
+    // publishDiagnostics notification when the last issue is resolved.
+    if let Some(uri) = &current_uri {
+        diags.entry(uri.clone()).or_default();
+    }
+
     diags
 }
 
@@ -132,14 +138,18 @@ fn include_diagnostic_to_lsp(inc: &IncludeDiagnostic) -> Diagnostic {
     }
 }
 
-fn to_diagnostic(node: Node) -> Diagnostic {
+fn to_diagnostic(node: Node, source: &str) -> Diagnostic {
     let start = node.start_position();
     let end = node.end_position();
-    let kind = if node.is_missing() { "MISSING" } else { "ERROR" };
-    let snippet_len = (end.column - start.column).max(1);
-    let message = format!(
-        "Parse error: unexpected or invalid XS syntax ({kind} node, ~{snippet_len} column(s))"
-    );
+    let message = if node.is_missing() {
+        missing_token_message(node)
+    } else if node.is_error() {
+        unexpected_token_message(node, source)
+    } else {
+        // Defensive: should never be reached because callers only hand us
+        // ERROR / MISSING nodes, but keeps the exhaustiveness checker happy.
+        format!("Parse error near line {}, column {}", start.row + 1, start.column + 1)
+    };
     Diagnostic {
         range: Range {
             start: Position::new(start.row as u32, start.column as u32),
@@ -153,6 +163,73 @@ fn to_diagnostic(node: Node) -> Diagnostic {
         related_information: None,
         tags: None,
         data: None,
+    }
+}
+
+/// Slice of `source` covered by `node`.
+fn node_text<'a>(node: Node<'a>, source: &'a str) -> &'a str {
+    &source[node.byte_range()]
+}
+
+/// Try to describe a MISSING node as `Missing '<token>'`.
+///
+/// A missing node's `kind()` is the expected symbol, which for anonymous
+/// terminals (e.g. `;`, `}`) is the literal token text. We use that as the
+/// display token; if it looks like a non-terminal or is empty, fall back to
+/// a line/column message that avoids exposing grammar internals.
+fn missing_token_message(node: Node) -> String {
+    let token = node.kind();
+    if token.is_empty() || token.chars().any(|c| c.is_alphabetic() && c.is_uppercase()) {
+        let pos = node.start_position();
+        return format!("Parse error near line {}, column {}", pos.row + 1, pos.column + 1);
+    }
+    format!("Missing '{}'", token)
+}
+
+/// Classify a tree-sitter node `kind` as something safe to put in a
+/// user-facing message. Returns `Some(<friendly name>)` if the kind is a
+/// concrete token (e.g. `identifier`, `string_literal`, punctuation), or
+/// `None` if the kind leaks parser internals (tree-sitter's `"ERROR"` /
+/// `"MISSING"` markers) or grammar non-terminals (snake_case symbols like
+/// `primitive_type`, `expression`, `_statement`).
+fn friendly_kind(kind: &str) -> Option<&str> {
+    if kind.is_empty() {
+        return None;
+    }
+    // Tree-sitter's internal error / missing markers MUST NOT be echoed.
+    if kind == "ERROR" || kind == "MISSING" {
+        return None;
+    }
+    // Grammar non-terminals are snake_case. We only want concrete tokens
+    // (identifiers, string/number literals, punctuation).
+    if kind.contains('_') {
+        return None;
+    }
+    Some(kind)
+}
+
+/// Try to describe an ERROR node as `Unexpected <kind> '<text>'`.
+///
+/// Looks at the error node's first named child. If the child's `kind` is a
+/// concrete token (per [`friendly_kind`]), the message names it directly.
+/// Otherwise we describe the unexpected token generically as `token '<text>'`.
+/// Falls back to line/column when the node contains no usable children.
+fn unexpected_token_message(node: Node, source: &str) -> String {
+    let pos = node.start_position();
+    // Prefer the first named child because it usually points at the token
+    // that the parser could not consume.
+    let target = node
+        .children(&mut node.walk())
+        .find(|c| c.is_named())
+        .unwrap_or(node);
+    let kind = target.kind();
+    let text = node_text(target, source);
+    if text.is_empty() {
+        return format!("Parse error near line {}, column {}", pos.row + 1, pos.column + 1);
+    }
+    match friendly_kind(kind) {
+        Some(k) => format!("Unexpected {} '{}'", k, text),
+        None => format!("Unexpected token '{}'", text),
     }
 }
 
@@ -304,5 +381,111 @@ mod tests {
             categorize(&diag("mutable function 'foo' redefined with different signature")),
             DiagnosticCategory::Other
         );
+    }
+
+    fn parse_messages(src: &str) -> Vec<String> {
+        let tree = crate::parser::parse(src).expect("parse should succeed");
+        super::collect_diagnostics(&tree, src)
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
+
+    fn assert_no_internals(message: &str) {
+        let banned = ["MISSING", "ERROR", "node", "column(s)"];
+        for word in &banned {
+            assert!(
+                !message.contains(word),
+                "message {:?} must not contain internal token {:?}",
+                message,
+                word
+            );
+        }
+    }
+
+    #[test]
+    fn parse_message_for_missing_semicolon() {
+        let msgs = parse_messages("void f() { int x = 1 }\n");
+        let wanted = msgs.iter().find(|m| m == &&"Missing ';'".to_string());
+        assert!(wanted.is_some(), "expected \"Missing ';'\" among {:?}", msgs);
+        for m in &msgs {
+            assert_no_internals(m);
+        }
+    }
+
+    #[test]
+    fn parse_message_for_missing_closing_brace() {
+        let msgs = parse_messages("void f() { int x = 1;\n");
+        let wanted = msgs.iter().find(|m| m == &&"Missing '}'".to_string());
+        assert!(wanted.is_some(), "expected \"Missing '}}'\" among {:?}", msgs);
+        for m in &msgs {
+            assert_no_internals(m);
+        }
+    }
+
+    #[test]
+    fn parse_message_for_unexpected_identifier() {
+        let msgs = parse_messages("void f() { int x = foo bar; }\n");
+        let wanted = msgs
+            .iter()
+            .find(|m| m.starts_with("Unexpected identifier "));
+        assert!(
+            wanted.is_some(),
+            "expected an 'Unexpected identifier ...' message among {:?}",
+            msgs
+        );
+        for m in &msgs {
+            assert_no_internals(m);
+        }
+    }
+
+    /// Edge case from `bad.xs`: a missing-expression-after-`=` produces an
+    /// ERROR node whose first named child has kind `"ERROR"` (tree-sitter's
+    /// internal error marker) or a grammar non-terminal like `"primitive_type"`.
+    /// The formatter MUST NOT leak either into the user-facing message.
+    #[test]
+    fn parse_message_for_missing_rhs_expression_does_not_leak_grammar_internals() {
+        // Match the exact context from the bad.xs fixture: a `;` immediately
+        // after `=` followed by another statement on the next line.
+        let src = "rule brokenRule\n\
+                   minInterval 5\n\
+                   active\n\
+                   {\n\
+                      int x = ;\n\
+                      aiEcho(\"hello\");\n\
+                   }\n";
+        let msgs = parse_messages(src);
+        for m in &msgs {
+            assert_no_internals(m);
+            // Grammar non-terminals are snake_case; they MUST NOT appear.
+            assert!(
+                !m.contains("primitive_type"),
+                "message {:?} leaks grammar non-terminal",
+                m
+            );
+        }
+    }
+
+    /// Edge case from `bad.xs`: a `"hello` (unterminated string literal)
+    /// produces a MISSING node for the closing `"`. Verify the formatter
+    /// describes it without exposing the source bytes or token kind.
+    #[test]
+    fn parse_message_for_unterminated_string_does_not_leak_grammar_internals() {
+        let msgs = parse_messages("void f() { aiEcho(\"hello\n }\n");
+        for m in &msgs {
+            assert_no_internals(m);
+        }
+    }
+
+    /// Edge case from `bad.xs`: a stray `;` between two statements produces
+    /// an ERROR node whose first named child has kind `"ERROR"` itself
+    /// (tree-sitter's internal error marker). The formatter MUST NOT echo
+    /// `"ERROR"` back to the user.
+    #[test]
+    fn parse_message_for_stray_semicolon_does_not_echo_error_token() {
+        let msgs = parse_messages("void f() { int x = 1;; int y = 2; }\n");
+        for m in &msgs {
+            assert_no_internals(m);
+        }
     }
 }

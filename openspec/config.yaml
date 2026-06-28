@@ -42,3 +42,22 @@ testing:
   sandboxed_tdd: false
   strict_tdd: false
   verification_method: manual_deploy_and_ingame_log
+
+# Per-domain override: tooling tasks (LSP server in Rust, IntelliJ plugin in
+# Kotlin/Gradle) DO have a test runner (`cargo test` and `./gradlew test`).
+# Strict TDD applies to any change touching:
+#   - tools/xs-language-server/ (Rust LSP)
+#   - tools/intellij-xs-plugin/ (Kotlin/Gradle plugin)
+# Rationale: tooling changes ship behavioral guarantees; tests are the
+# verification method. Modifications to XS scripts under mod/ still fall
+# under the global strict_tdd: false above (no test runner available).
+strict_tdd_overrides:
+  - domain: tools/xs-language-server/**
+    strict_tdd: true
+    test_runner: "cargo test --manifest-path tools/xs-language-server/Cargo.toml"
+    applies_to: [sdd-apply, sdd-verify]
+  - domain: tools/intellij-xs-plugin/**
+    strict_tdd: true
+    test_runner: "./gradlew :test"
+    applies_to: [sdd-apply, sdd-verify]
+    note: "Plugin tests use JUnit5 via Kotlin/Gradle. Foreign-uid may own build dirs; `sudo chown -R $(id -un):$(id -gn) tools/intellij-xs-plugin/{build,dist}` to unblock Gradle."
