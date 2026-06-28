@@ -20,11 +20,13 @@
         <platform.lsp.serverSupportProvider implementation="com.aomr.xs.lsp.XsLspSupportProvider"/>
         <fileTypeFactory implementation="com.aomr.xs.XsFileTypeFactory"/>
         <textmate.bundleProvider implementation="com.aomr.xs.textmate.XsTextMateBundleProvider"/>
-        <lang.ast.factory language="XS" implementationClass="com.aomr.xs.psi.XsASTFactory"/>
-        <lang.parserDefinition language="XS" implementationClass="com.aomr.xs.psi.XsParserDefinition"/>
-        <lang.braceMatcher language="XS" implementationClass="com.aomr.xs.editor.XsBraceMatcher"/>
-        <lang.quoteHandler language="XS" implementationClass="com.aomr.xs.editor.XsQuoteHandler"/>
-        <lang.commenter language="XS" implementationClass="com.aomr.xs.editor.XsCommenter"/>
+        <lang.ast.factory language="xs" implementationClass="com.aomr.xs.psi.XsASTFactory"/>
+        <lang.parserDefinition language="xs" implementationClass="com.aomr.xs.psi.XsParserDefinition"/>
+        <lang.braceMatcher language="xs" implementationClass="com.aomr.xs.editor.XsBraceMatcher"/>
+        <lang.quoteHandler language="xs" implementationClass="com.aomr.xs.editor.XsQuoteHandler"/>
+        <lang.commenter language="xs" implementationClass="com.aomr.xs.editor.XsCommenter"/>
+        <lang.syntaxHighlighterFactory language="xs" implementationClass="com.aomr.xs.highlight.XsSyntaxHighlighterFactory"/>
+        <colorSettingsPage implementation="com.aomr.xs.highlight.XsColorSettingsPage"/>
 
         <notificationGroup id="XS Language Server" displayType="BALLOON"/>
 

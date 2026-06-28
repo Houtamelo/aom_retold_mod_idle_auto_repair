@@ -1,5 +1,6 @@
 package com.aomr.xs.textmate
 
+import com.aomr.xs.XsLanguage
 import com.google.gson.JsonParser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -118,6 +119,11 @@ class XsTextMateBundleFormatTest {
         val first = grammars.get(0).asJsonObject
         assertFieldIsNonEmptyString(first, "language",
             "Each `contributes.grammars[]` entry needs a `language` field")
+        assertEquals(
+            "TextMate grammar language must match XsLanguage.ID",
+            XsLanguage.INSTANCE.id,
+            first.get("language").asString
+        )
         assertFieldIsNonEmptyString(first, "scopeName",
             "Each `contributes.grammars[]` entry needs a `scopeName` field")
         assertFieldIsNonEmptyString(first, "path",
