@@ -71,7 +71,13 @@ pub struct Param {
     /// Raw default-value expression text, e.g. `"-1"` or `"\"hi\""`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+    /// `ref` modifier — parameter passed by reference.
+    /// The XS compiler rejects defaults on ref params.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_ref: bool,
 }
+
+fn is_false(b: &bool) -> bool { !*b }
 
 impl Param {
     /// `int x` or `int x = 5` — used in hover signatures.
@@ -585,9 +591,26 @@ fn extract_params(node: tree_sitter::Node<'_>, source: &str) -> Vec<Param> {
             .map(|n| node_text(n, source).to_string())
             .unwrap_or_default();
         let default = extract_param_default(child, source);
-        params.push(Param { ty, name, default });
+        let is_ref = has_ref_qualifier(child);
+        params.push(Param { ty, name, default, is_ref });
     }
     params
+}
+
+/// True if the parameter declaration carries a `ref` type qualifier.
+fn has_ref_qualifier(node: tree_sitter::Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "type_qualifier" {
+            let mut inner = child.walk();
+            for token in child.children(&mut inner) {
+                if token.kind() == "ref" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn format_function_pointer_type(node: tree_sitter::Node<'_>, source: &str) -> String {

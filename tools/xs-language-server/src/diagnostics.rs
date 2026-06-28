@@ -11,6 +11,7 @@ use std::path::Path;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 use tree_sitter::{Node, Tree};
 
+use crate::definition_check;
 use crate::engine_api::EngineApi;
 use crate::merged_view::{IncludeDiagnostic, MergedView};
 use crate::semantic::VirtualProject;
@@ -54,6 +55,11 @@ pub fn collect_all(
         let parse_diags = collect_diagnostics(tree, source);
         if !parse_diags.is_empty() {
             diags.entry(uri.clone()).or_default().extend(parse_diags);
+        }
+
+        let definition_diags = definition_check::validate_definitions(tree, source);
+        if !definition_diags.is_empty() {
+            diags.entry(uri.clone()).or_default().extend(definition_diags);
         }
 
         let typecheck_diags =
@@ -160,6 +166,7 @@ pub enum DiagnosticCategory {
     UnresolvedSymbol,
     WrongArgCount,
     WrongArgType,
+    DefinitionError,
     WrongRangeUri,
     Other,
 }
@@ -169,6 +176,12 @@ pub fn categorize(d: &Diagnostic) -> DiagnosticCategory {
     let msg = d.message.to_ascii_lowercase();
     if msg.contains("duplicate extern") || msg.contains("extern collision") {
         DiagnosticCategory::ExternCollision
+    } else if msg.contains("must have a default value")
+        || msg.contains("cannot have a default value")
+        || msg.contains("must be initialized")
+        || msg.contains("must be assigned a constant expression")
+    {
+        DiagnosticCategory::DefinitionError
     } else if msg.contains("expected")
         && msg.contains("argument")
         && msg.contains("of type")
@@ -262,6 +275,26 @@ mod tests {
                 "expected argument 1 of type `int` for `aiPlanCreate`, got `float`"
             )),
             DiagnosticCategory::WrongArgType
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_category_assigns_definition_error() {
+        assert_eq!(
+            categorize(&diag("non-ref parameter `x` must have a default value")),
+            DiagnosticCategory::DefinitionError
+        );
+        assert_eq!(
+            categorize(&diag("ref parameter `x` cannot have a default value")),
+            DiagnosticCategory::DefinitionError
+        );
+        assert_eq!(
+            categorize(&diag("variable `x` must be initialized")),
+            DiagnosticCategory::DefinitionError
+        );
+        assert_eq!(
+            categorize(&diag("constant `x` must be assigned a constant expression")),
+            DiagnosticCategory::DefinitionError
         );
     }
 

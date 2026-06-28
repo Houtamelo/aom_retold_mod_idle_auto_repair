@@ -6,7 +6,7 @@ All six specs are satisfied:
 
 - **A.0 / A.1** — duplicate-`extern` detection is scoped to the current file + its transitive `include` closure, and any remaining collision diagnostics are published on the declaration's own URI/range.
 - **B** — callee resolution falls back to the already-loaded engine-API cache before emitting `Error 0310`.
-- **C** — argument-count checks use a source-aware required-count: workspace functions count non-defaulted parameters; engine syscalls treat all parameters as optional (extraction currently does not record `ref`).
+- **C** — argument-count checks use a uniform default-arg rule: every non-`ref` parameter is optional at the call site because the XS compiler forces defaults at definition time, regardless of whether the source shows `= value`.
 - **D** — `SymbolKind::Rule` symbols and dynamic rule registrations (`xsEnableRule`, `trRuleAdd`, `trRuleAddActive`, etc.) satisfy call expressions and bypass count/type checks.
 - **E / F** — `tests/game_folder_parse.rs` is rewritten to run the full `diagnostics::collect_all` pipeline and assert zero diagnostics per category (and zero total).
 
@@ -62,29 +62,21 @@ All six specs are satisfied:
 
 **Rationale**: matches spec D engine constraints.
 
-### AD-6: Source-aware default-argument count check
+### AD-6: Uniform default-arg rule (no source-based distinction)
 
-**Decision**: `typecheck.rs::check_argument_count` SHALL take a `CalleeSource` enum and apply the correct rule:
-
-```rust
-enum CalleeSource { Workspace, EngineApi }
-fn required_count(params: &[Param], source: CalleeSource) -> usize {
-    match source {
-        // Extraction does not record `ref`; being conservative would reintroduce
-        // false positives, so all engine parameters are treated as optional.
-        CalleeSource::EngineApi => 0,
-        CalleeSource::Workspace => params.iter().filter(|p| p.default.is_none()).count(),
-    }
-}
-```
-
-Calls with `arg_count > params.len()` are "too many arguments". Calls with `arg_count < required_count` are "too few required arguments".
-
-**Rejected alternatives**:
-- Single uniform rule (would either flag legitimate engine calls or accept invalid workspace calls).
-- Treat engine parameters without extracted defaults as required (would leave ~Category C false positives).
-
-**Rationale**: XS requires every non-`ref` parameter to have a default. Workspace functions lacking a documented default are conservative required; engine parameters are always supplied a default by the runtime.
+- **Decision**: the call-site argument-count check SHALL be uniform across
+  workspace and engine-API callees. Every non-`ref` parameter is optional
+  (has a default value, compiler-enforced at definition time). Every
+  `ref` parameter is required (and cannot have a default — the compiler
+  rejects attempts). The LSP's `required_param_count` returns 0 for both
+  source variants because it cannot yet reliably distinguish ref params
+  end-to-end.
+- **Rejected**: source-based distinction (workspace params without
+  explicit `= value` are required). Wrong because the compiler forces
+  defaults at definition time even when source omits them.
+- **Rejected**: separate rule for engine API (treat all as optional) vs
+  workspace (treat params without explicit defaults as required). Same
+  reason.
 
 ### AD-7: Test harness expansion
 
@@ -151,6 +143,8 @@ pub enum DiagnosticCategory {
     ExternCollision,
     UnresolvedSymbol,
     WrongArgCount,
+    WrongArgType,
+    DefinitionError,
     WrongRangeUri,
     Other,
 }
@@ -316,9 +310,9 @@ semantic::check_forward_declarations → DiagnosticsByUri (current file URI)
   (workspace → engine.lookup(name)? → unresolved)
   ↓
 typecheck::check_calls_with_merged  → current-file diagnostics
-  (engine params: required_count = 0)
-  (workspace params: required_count = non-defaulted)
+  (all params treated as optional at the call site)
   (rules: skip)
+  (ref params: not yet tracked end-to-end, counting errs permissive)
   ↓
 diagnostics::categorize             → DiagnosticCategory
   ↓
@@ -338,12 +332,12 @@ server publishes per-URI
 | B | `test_unknown_call_unresolved` | `Error 0310` for `foobarBaz()` |
 | C | `test_engine_api_call_omits_trailing_defaults` | no diagnostic for `aiPlanCreate(0, 0)` |
 | C | `test_engine_api_call_too_many_args` | diagnostic for 7 args to 4-param syscall |
-| C | `test_workspace_call_missing_required` | diagnostic for `myFn(1)` when second param has no default |
+| C | `allows_omitting_workspace_arguments_without_explicit_default` | no diagnostic for `myFn(1)` even though source shows no explicit default |
 | C | `test_workspace_call_omits_defaults` | no diagnostic for `void f(int x=-1,int y=-1) { }` called as `f(1)` |
 | D | `test_rule_call_resolves` | no diagnostic for calling a defined rule |
 | D | `test_rule_call_bypasses_arg_count` | no diagnostic for `r(1, 2)` on rule `r` |
 | D | `test_registered_rule_call_resolves` | `xsEnableRule("foo")` makes `foo()` resolvable |
-| F | `test_game_folder_zero_diagnostics_all_categories` | 6 category counts and total all `== 0` |
+| F | `test_game_folder_zero_diagnostics_all_categories` | 7 category counts and total all `== 0` |
 
 ## Risks + mitigations
 

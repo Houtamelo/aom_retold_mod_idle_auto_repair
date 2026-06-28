@@ -183,13 +183,18 @@ enum CalleeSource {
     EngineApi,
 }
 
-fn required_param_count(params: &[Param], source: CalleeSource) -> usize {
-    match source {
-        // The engine runtime supplies defaults for all non-`ref` parameters,
-        // even when the Doxygen extraction did not capture them.
-        CalleeSource::EngineApi => 0,
-        CalleeSource::Workspace => params.iter().filter(|p| p.default.is_none()).count(),
-    }
+fn required_param_count(params: &[Param], _source: CalleeSource) -> usize {
+    // The XS compiler enforces a default value on every non-`ref` parameter
+    // at definition time and rejects any default on a `ref` parameter.
+    // Until the LSP tracks `is_ref` reliably end-to-end (see Param::is_ref
+    // in symbols.rs — captured but not yet propagated into ref-required
+    // counting), we conservatively treat every parameter as having a
+    // default, i.e. all are optional at the call site. Ref params remain
+    // required by the compiler; the LSP simply can't see them yet and
+    // errs on the permissive side to avoid false positives. Workspace and
+    // engine-API callees follow the SAME rule.
+    let _ = params;
+    0
 }
 
 /// A resolved callee, either an engine syscall or a workspace function.
@@ -444,28 +449,11 @@ mod tests {
     }
 
     #[test]
-    fn flags_wrong_arg_count_too_few_for_workspace_function() {
+    fn allows_omitting_workspace_arguments_without_explicit_default() {
+        // XS compiler forces every non-ref param to have a default at
+        // definition time; even without explicit `= value` in source, the
+        // param is optional at the call site.
         let src = r#"void myFn(int a, int b) {}
-void test() { myFn(1); }"#;
-        let tree = parse(src);
-        let table = table_for(src);
-        let mut files = std::collections::HashMap::new();
-        files.insert(PathBuf::from("test.xs"), src.to_string());
-        let project = crate::semantic::VirtualProject::from_files(files);
-
-        let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
-        let msgs = messages(&diags);
-        assert!(
-            msgs.iter()
-                .any(|m| m.contains("expected 2 required argument") && m.contains("got 1")),
-            "missing count diagnostic, got: {:?}",
-            msgs
-        );
-    }
-
-    #[test]
-    fn allows_omitting_default_workspace_arguments() {
-        let src = r#"void myFn(int a, int b = 0) {}
 void test() { myFn(1); }"#;
         let tree = parse(src);
         let table = table_for(src);
@@ -476,7 +464,7 @@ void test() { myFn(1); }"#;
         let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
         assert!(
             diags.is_empty(),
-            "omitted default workspace argument should be allowed, got: {:?}",
+            "myFn(1) should be legal because XS forces defaults on non-ref params, got: {:?}",
             messages(&diags)
         );
     }

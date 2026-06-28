@@ -6,6 +6,7 @@
 
 pub mod cache;
 pub mod completion;
+pub mod definition_check;
 pub mod diagnostics;
 pub mod doxygen;
 pub mod engine_api;

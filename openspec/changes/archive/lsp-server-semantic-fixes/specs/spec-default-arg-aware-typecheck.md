@@ -24,11 +24,14 @@ The current `typecheck::check_one_call` uses `arg_count != params.len()`, which 
 - WHEN the LSP lints a call site `aiPlanCreate(0, 0, 0, 0, 0, 0, 0)` (7 arguments)
 - THEN a "too many arguments" diagnostic SHALL be emitted
 
-### Scenario: error — missing required workspace argument
+### Revised requirement: no source-based "missing required argument" diagnostic
 
-- GIVEN a workspace-defined function `int myFn(int a, int b)` with no documented defaults
-- WHEN the LSP lints `myFn(1)` (1 argument)
-- THEN a "missing required argument" diagnostic SHALL be emitted
+> The LSP SHALL treat every parameter as optional at the call site. The XS compiler
+> enforces a default value on every non-`ref` parameter at definition time; this
+> default may be implicit (not written in source). The LSP therefore does not flag
+> "missing argument" errors based on source-visible defaults. `ref` parameters
+> remain required by the compiler; the LSP will enforce this once `Param::is_ref`
+> is propagated into the call-site check.
 
 ### Scenario: happy path — engine API parameter without extracted default is still optional
 
@@ -39,9 +42,9 @@ The current `typecheck::check_one_call` uses `arg_count != params.len()`, which 
 ## XS-engine constraints
 
 - XS requires every non-`ref` parameter to have a default value; trailing positional arguments can be omitted.
+- XS rejects any default value on a `ref` parameter; `ref` parameters are therefore always required.
 - XS does not support skipping non-trailing positional arguments (e.g., `f(1,,3)` is invalid).
-- Workspace-defined functions without documented defaults must be treated conservatively as required.
-- Engine-API parameters with no extracted default value are still supplied a default by the engine, so they SHALL be treated as optional.
+- The LSP's call-site argument-count check SHALL be uniform across workspace and engine-API callees, because the same compiler rule applies to both.
 
 ## Out of scope
 
@@ -57,8 +60,8 @@ The current `typecheck::check_one_call` uses `arg_count != params.len()`, which 
 
 ## Acceptance criteria
 
-1. A call site with `arg_count < params.len()` is LEGAL if every parameter in positions `arg_count..params.len()` has a documented default value (workspace functions) or is a non-`ref` engine-API parameter.
+1. A call site with `arg_count <= params.len()` is LEGAL; the XS compiler forces a default on every non-`ref` parameter at definition time.
 2. A call site with `arg_count > params.len()` SHALL be flagged as an error (too many arguments).
-3. A call site with `arg_count < required_count`, where `required_count` counts non-`ref` parameters without a documented default value, SHALL be flagged as an error (missing required argument).
-4. For workspace-defined functions, parameters without a documented default value SHALL be treated as required.
-5. For engine-API syscalls, all non-`ref` parameters SHALL be treated as optional even when the extraction did not capture a default value.
+3. The LSP SHALL NOT flag a call site as "missing required argument" solely because a workspace parameter lacks a source-visible default value.
+4. Once `Param::is_ref` is propagated into the call-site check, `ref` parameters SHALL be treated as required.
+5. Engine-API syscalls and workspace-defined functions SHALL follow the same uniform rule.
