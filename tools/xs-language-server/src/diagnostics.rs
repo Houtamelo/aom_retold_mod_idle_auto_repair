@@ -192,6 +192,8 @@ fn missing_token_message(node: Node) -> String {
 /// identifier, the message names it directly. Otherwise we describe the
 /// unexpected token by its grammar kind. Falls back to line/column when the
 /// node contains no usable children.
+/// Otherwise we describe the unexpected token generically as `token '<text>'`.
+/// Falls back to line/column when the node contains no usable children.
 fn unexpected_token_message(node: Node, source: &str) -> String {
     let pos = node.start_position();
     // Prefer the first named child because it usually points at the token
@@ -409,6 +411,56 @@ mod tests {
             "expected an 'Unexpected identifier ...' message among {:?}",
             msgs
         );
+        for m in &msgs {
+            assert_no_internals(m);
+        }
+    }
+
+    /// Edge case from `bad.xs`: a missing-expression-after-`=` produces an
+    /// ERROR node whose first named child has kind `"ERROR"` (tree-sitter's
+    /// internal error marker) or a grammar non-terminal like `"primitive_type"`.
+    /// The formatter MUST NOT leak either into the user-facing message.
+    #[test]
+    fn parse_message_for_missing_rhs_expression_does_not_leak_grammar_internals() {
+        // Match the exact context from the bad.xs fixture: a `;` immediately
+        // after `=` followed by another statement on the next line.
+        let src = "rule brokenRule\n\
+                   minInterval 5\n\
+                   active\n\
+                   {\n\
+                      int x = ;\n\
+                      aiEcho(\"hello\");\n\
+                   }\n";
+        let msgs = parse_messages(src);
+        for m in &msgs {
+            assert_no_internals(m);
+            // Grammar non-terminals are snake_case; they MUST NOT appear.
+            assert!(
+                !m.contains("primitive_type"),
+                "message {:?} leaks grammar non-terminal",
+                m
+            );
+        }
+    }
+
+    /// Edge case from `bad.xs`: a `"hello` (unterminated string literal)
+    /// produces a MISSING node for the closing `"`. Verify the formatter
+    /// describes it without exposing the source bytes or token kind.
+    #[test]
+    fn parse_message_for_unterminated_string_does_not_leak_grammar_internals() {
+        let msgs = parse_messages("void f() { aiEcho(\"hello\n }\n");
+        for m in &msgs {
+            assert_no_internals(m);
+        }
+    }
+
+    /// Edge case from `bad.xs`: a stray `;` between two statements produces
+    /// an ERROR node whose first named child has kind `"ERROR"` itself
+    /// (tree-sitter's internal error marker). The formatter MUST NOT echo
+    /// `"ERROR"` back to the user.
+    #[test]
+    fn parse_message_for_stray_semicolon_does_not_echo_error_token() {
+        let msgs = parse_messages("void f() { int x = 1;; int y = 2; }\n");
         for m in &msgs {
             assert_no_internals(m);
         }
