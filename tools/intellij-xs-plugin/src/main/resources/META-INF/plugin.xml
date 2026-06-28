@@ -26,6 +26,7 @@
         <lang.quoteHandler language="xs" implementationClass="com.aomr.xs.editor.XsQuoteHandler"/>
         <lang.commenter language="xs" implementationClass="com.aomr.xs.editor.XsCommenter"/>
         <lang.syntaxHighlighterFactory language="xs" implementationClass="com.aomr.xs.highlight.XsSyntaxHighlighterFactory"/>
+        <colorSettingsPage implementation="com.aomr.xs.highlight.XsColorSettingsPage"/>
 
         <notificationGroup id="XS Language Server" displayType="BALLOON"/>
 
