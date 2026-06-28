@@ -12,6 +12,25 @@ Free features gained: semantic highlighting, inlay hints, folding, breadcrumbs, 
 
 Plugin 0.1.4 → 0.1.5. `.zip` at `dist/intellij-xs-plugin-0.1.5.zip` (~3.9 MB).
 
+## Resolution (2026-06-28)
+
+The follow-up SDD cycle `lsp-server-semantic-fixes` addressed Categories A–D and closed the test-coverage gap. After the fixes, running the game-folder integration test against the retail AoM:R install reports:
+
+```
+duplicate_extern=0, wrong_uri=0, unresolved_symbol=0,
+wrong_arg_count=0, rule_call_unresolved=0, total=0
+```
+
+- **Category A.0 (duplicate extern)**: Fixed by scoping collision detection to the current logical link unit (current file + transitive includes) and allowing duplicate `extern` declarations that share the same include chain.
+- **Category A.1 (wrong diagnostic location)**: Fixed by emitting duplicate-extern diagnostics under the declaring file's URI and range instead of the open file.
+- **Category B (missing engine API symbols)**: Fixed by wiring `EngineApi::lookup` into `resolve_callee`, adding a static builtin-callees list for `vector`/vector helpers, and capturing rules registered through `xsEnableRule`/`trRuleAdd` family so rule calls resolve.
+- **Category C (wrong argument counts)**: Fixed by making the argument-count check default-aware (engine-API params treated as optional, workspace params required only when no default), allowing int/float runtime coercion, and accepting function/rule names where a function-pointer type is expected.
+- **Category D (forward declarations in `human_assist.xs`)**: Re-evaluated; the two reported callables are now resolvable after rule-registration support. The remaining forward-declaration rules in `AGENTS.md` still apply to user-defined functions that are not rules.
+- **Test coverage gap**: `tests/game_folder_parse.rs` now asserts per-category counts (`duplicate_extern`, `wrong_uri`, `unresolved_symbol`, `wrong_arg_count`, `rule_call_unresolved`, `total`) are all zero.
+- **Plugin version**: Bumped to **0.1.6** because the bundled LSP binary changed.
+
+**Still open**: Category E (no syntax highlighting) was not in scope for this cycle.
+
 ## Categories of Remaining Issues
 
 Smoke test surfaced ~200 diagnostics in `mod/intelligent_auto_scout/game/ai/human_assist/human_assist.xs`. Most are false positives in the LSP server. Categorized below.
@@ -171,11 +190,11 @@ assert_eq!(argument_mismatches, 0, "wrong argument counts");
 
 To reproduce all of the above:
 
-1. Install plugin 0.1.5 from `dist/intellij-xs-plugin-0.1.5.zip` in Rider 2026.2
+1. Install plugin 0.1.6 from `dist/intellij-xs-plugin-0.1.6.zip` in Rider 2026.2
 2. Configure the game folder path in Settings → Languages & Frameworks → XS Language Server (point at AoM:R install root)
 3. Open `mod/intelligent_auto_scout/game/ai/human_assist/human_assist.xs`
-4. Observe ~200 diagnostics in the editor + Problems window
-5. Observe no syntax highlighting (text appears plain)
+4. Semantic diagnostics for Categories A–D should no longer appear; any remaining diagnostics are likely real user-code issues
+5. Observe no syntax highlighting (text appears plain) — Category E remains open
 
 ## Suggested Next SDD Cycle
 
