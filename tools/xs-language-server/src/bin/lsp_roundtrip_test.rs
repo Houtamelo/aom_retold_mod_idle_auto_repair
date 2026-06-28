@@ -10,6 +10,7 @@
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use serde_json::json;
 use tower_lsp::lsp_types::Url;
@@ -1557,13 +1558,172 @@ fn run_cycle_does_not_hang() -> bool {
     }
 }
 
+/// Engine-symbol references test.
+///
+/// Creates a tiny mod with two files that both call the engine API function
+/// `aiEcho`, then invokes `textDocument/references` on `aiEcho` and asserts
+/// that at least two workspace `Location`s are returned within 500 ms.
+fn run_engine_references_test() -> bool {
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir();
+    let game_root = tmp.join(format!("aomr_eng_game_{pid}"));
+    let mod_root = tmp.join(format!("aomr_eng_mod_{pid}"));
+
+    let _ = std::fs::remove_dir_all(&game_root);
+    let _ = std::fs::remove_dir_all(&mod_root);
+
+    let doxy_src = resolve_test_game_path().join("doxygen_retail.7z");
+    std::fs::create_dir_all(&game_root).expect("create game root");
+    std::fs::copy(&doxy_src, game_root.join("doxygen_retail.7z")).expect("copy doxygen archive");
+
+    let mod_dir = mod_root.join("game").join("ai").join("engine_ref_test");
+    let main_path = mod_dir.join("main.xs");
+    let util_path = mod_dir.join("util.xs");
+    std::fs::create_dir_all(&mod_dir).unwrap();
+    std::fs::write(
+        &main_path,
+        "void useAiEcho()\n{\n   aiEcho(\"main\");\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &util_path,
+        "void alsoUse()\n{\n   aiEcho(\"util\");\n}\n",
+    )
+    .unwrap();
+
+    let game_root = std::fs::canonicalize(&game_root).unwrap();
+    let mod_root = std::fs::canonicalize(&mod_root).unwrap();
+    let main_uri = Url::from_file_path(&main_path).unwrap();
+    let mod_uri = Url::from_file_path(&mod_root).unwrap();
+
+    let server_path = locate_server_binary();
+    let mut child = Command::new(&server_path)
+        .arg("--game-path")
+        .arg(&game_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn xs-language-server for engine references test");
+
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut stdout = child.stdout.take().expect("child stdout");
+
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 2000,
+        "method": "initialize",
+        "params": {
+            "processId": null,
+            "capabilities": {},
+            "trace": "off",
+            "rootUri": null,
+            "workspaceFolders": [{ "uri": mod_uri, "name": "engine_ref_mod" }]
+        }
+    })
+    .to_string();
+    let initialized = json!({"jsonrpc":"2.0","method":"initialized","params":{}}).to_string();
+    let did_open = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": main_uri,
+                "languageId": "xs",
+                "version": 1,
+                "text": "void useAiEcho()\n{\n   aiEcho(\"main\");\n}\n"
+            }
+        }
+    })
+    .to_string();
+    let references = json!({
+        "jsonrpc": "2.0",
+        "id": 2001,
+        "method": "textDocument/references",
+        "params": {
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 2, "character": 5 },
+            "context": { "includeDeclaration": false }
+        }
+    })
+    .to_string();
+    let shutdown = json!({"jsonrpc":"2.0","id":2002,"method":"shutdown"}).to_string();
+    let exit = json!({"jsonrpc":"2.0","method":"exit"}).to_string();
+
+    for msg in &[init, initialized, did_open] {
+        stdin.write_all(frame(msg).as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let start = Instant::now();
+    stdin.write_all(frame(&references).as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    stdin.write_all(frame(&shutdown).as_bytes()).unwrap();
+    stdin.write_all(frame(&exit).as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    drop(stdin);
+
+    let status = child.wait().expect("wait on engine-references child");
+    let mut stderr_text = String::new();
+    child.stderr.take().expect("stderr").read_to_string(&mut stderr_text).unwrap();
+
+    let mut all_bytes = Vec::new();
+    stdout.read_to_end(&mut all_bytes).unwrap();
+    let mut cursor = std::io::Cursor::new(&all_bytes);
+    let references_resp = read_response_with_id(&mut cursor, 2001).ok();
+    let elapsed = start.elapsed();
+
+    let _ = std::fs::remove_dir_all(&game_root);
+    let _ = std::fs::remove_dir_all(&mod_root);
+
+    let has_panic = stderr_text.lines().any(|l| l.contains("panic") || l.contains("FATAL"));
+    if has_panic {
+        println!("FAIL (engine references): stderr contains panic/FATAL");
+        for line in stderr_text.lines() {
+            println!("  {line}");
+        }
+        return false;
+    }
+    if !status.success() {
+        println!("FAIL (engine references): server exited with {}", status);
+        return false;
+    }
+
+    let Some(resp) = references_resp else {
+        println!("FAIL (engine references): no references response received");
+        return false;
+    };
+
+    let raw = resp.to_string();
+    let uri_count = raw.matches("\"uri\":").count() + raw.matches("\"uri\": ").count();
+    if uri_count >= 2 && elapsed.as_millis() <= 500 {
+        println!(
+            "PASS (engine references): returned {} aiEcho location(s) in {} ms",
+            uri_count,
+            elapsed.as_millis()
+        );
+        true
+    } else {
+        println!(
+            "FAIL (engine references): expected >=2 locations in <=500 ms, got {} in {} ms",
+            uri_count,
+            elapsed.as_millis()
+        );
+        println!("  response: {}", resp);
+        false
+    }
+}
+
 fn main() {
     let baseline_ok = run_baseline();
     let workspace_ok = run_workspace_tests();
     let semantic_ok = run_semantic_tests();
     let include_ok = run_include_tests();
+    let engine_refs_ok = run_engine_references_test();
 
-    if baseline_ok && workspace_ok && semantic_ok && include_ok {
+    if baseline_ok && workspace_ok && semantic_ok && include_ok && engine_refs_ok {
         std::process::exit(0);
     } else {
         std::process::exit(1);
