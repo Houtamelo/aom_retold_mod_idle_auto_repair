@@ -1,0 +1,24 @@
+{
+  "grammars": [
+    {
+      "name": "xs",
+      "camelcase": "Xs",
+      "scope": "source.xs",
+      "path": ".",
+      "file-types": ["xs"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "XS grammar for tree-sitter (Age of Mythology: Retold scripting language)"
+  },
+  "bindings": {
+    "c": true,
+    "go": false,
+    "node": false,
+    "python": false,
+    "rust": true,
+    "swift": false
+  }
+}

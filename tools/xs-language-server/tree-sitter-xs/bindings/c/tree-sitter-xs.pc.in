@@ -1,0 +1,11 @@
+prefix=@PREFIX@
+exec_prefix=@EXEC_PREFIX@
+libdir=@LIBDIR@
+includedir=@INCLUDEDIR@
+
+Name: tree-sitter-xs
+Description: XS grammar for tree-sitter
+URL: https://github.com/tree-sitter/tree-sitter-xs
+Version: @VERSION@
+Libs: -L${libdir} -ltree-sitter-xs
+Cflags: -I${includedir}

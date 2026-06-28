@@ -96,6 +96,7 @@ void enableAutoScouting(int unitID = -1)
 {
    // This function is called from the UI, the UI doesn't know our context so we must set it explicitly.
    xsSetContextPlayer(cMyID);
+
    debugVPS("Enabling automatic scouting for unit: " + unitID + ".");
    int planID = aiPlanCreate("Autoscout with unit: " + unitID, cPlanExplore);
    aiPlanAddUnitType(planID, cUnitTypeUnit, 1,1,1);
@@ -135,7 +136,7 @@ active
 // isFarmPlacementEnabled
 // This function is called by the UI to know the state of the Farm toggle button.
 //==============================================================================
-bool isFarmPlacementEnabled() 
+bool isFarmPlacementEnabled()
 {
    return gAllowedToFarm;
 }

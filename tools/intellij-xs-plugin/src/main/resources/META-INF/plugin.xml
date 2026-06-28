@@ -1,0 +1,39 @@
+<idea-plugin>
+    <id>com.aomr.xs</id>
+    <name>XS Language Support</name>
+    <vendor>aomr</vendor>
+
+    <description><![CDATA[
+        <p>Language support for Age of Mythology: Retold XS scripts via a Rust LSP server.</p>
+    ]]></description>
+
+    <idea-version since-build="242" until-build="252.*"/>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.lang</depends>
+    <depends>com.intellij.modules.lsp</depends>
+    <depends>com.intellij.modules.ultimate</depends>
+    <depends>org.jetbrains.plugins.textmate</depends>
+    <depends optional="true">com.intellij.modules.rider</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <platform.lsp.serverSupportProvider implementation="com.aomr.xs.lsp.XsLspSupportProvider"/>
+        <fileTypeFactory implementation="com.aomr.xs.XsFileTypeFactory"/>
+        <textmate.bundleProvider implementation="com.aomr.xs.textmate.XsTextMateBundleProvider"/>
+        <lang.ast.factory language="XS" implementationClass="com.aomr.xs.psi.XsASTFactory"/>
+        <lang.parserDefinition language="XS" implementationClass="com.aomr.xs.psi.XsParserDefinition"/>
+        <lang.braceMatcher language="XS" implementationClass="com.aomr.xs.editor.XsBraceMatcher"/>
+        <lang.quoteHandler language="XS" implementationClass="com.aomr.xs.editor.XsQuoteHandler"/>
+        <lang.commenter language="XS" implementationClass="com.aomr.xs.editor.XsCommenter"/>
+
+        <notificationGroup id="XS Language Server" displayType="BALLOON"/>
+
+        <projectConfigurable
+            parentId="language"
+            instance="com.aomr.xs.settings.XsConfigurable"
+            id="xsLsp"
+            displayName="XS Language Server"/>
+
+        <postStartupActivity implementation="com.aomr.xs.startup.XsStartupActivity"/>
+    </extensions>
+</idea-plugin>

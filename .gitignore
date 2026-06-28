@@ -1,13 +1,28 @@
 # Extracted vanilla game data — reference only, not part of the mod.
 # Re-extract from Data.bar with CryBar.Cli when needed.
-extracted/*
-!extracted/xs.vsix
+extracted/
+*.vsix
 
 # CryBar tools (download, not source).
-tools/
+tools/*
+!tools/intellij-xs-plugin/
+!tools/xs-language-server/
+
+# Smoke-test artifacts (LSP binary + plugin zip). Built fresh per smoke test.
+# See docs/smoke-test-setup.md for what these are and how to use them.
+dist/
+
+# Bundled LSP binary (staging area). The Rust crate is built by
+# `tools/intellij-xs-plugin/build.gradle.kts::copyLspServerToResources`,
+# which copies the release binary here. This directory is then packaged
+# into the plugin's JAR (and the .zip). Never commit the binary directly.
+tools/intellij-xs-plugin/src/main/resources/bin/
 
 # OS / editor noise
 .DS_Store
 *.swp
+# Rust build artifacts (target/ is per-developer; do not commit).
+**/target/
 # Local AI runtime state
 .atl/
+.idea/

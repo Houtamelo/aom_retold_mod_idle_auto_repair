@@ -1,0 +1,16 @@
+[package]
+name = "tree-sitter-xs"
+version = "0.1.0"
+edition = "2021"
+description = "XS grammar for tree-sitter (Age of Mythology: Retold scripting language)"
+license = "MIT"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter = "0.26"
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1"

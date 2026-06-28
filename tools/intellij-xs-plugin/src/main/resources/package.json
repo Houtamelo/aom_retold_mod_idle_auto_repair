@@ -1,0 +1,16 @@
+{
+  "name": "xs",
+  "displayName": "XS",
+  "description": "Age of Mythology: Retold XS scripting language — syntax highlighting via TextMate bundle",
+  "version": "0.1.0",
+  "publisher": "aomr",
+  "contributes": {
+    "grammars": [
+      {
+        "language": "xs",
+        "scopeName": "source.xs",
+        "path": "./syntaxes/xs.tmLanguage.json"
+      }
+    ]
+  }
+}

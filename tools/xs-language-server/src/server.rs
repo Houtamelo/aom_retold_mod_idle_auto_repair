@@ -1,0 +1,1131 @@
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
+use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::*;
+use tower_lsp::{Client, LanguageServer};
+use tracing::{debug, info, warn};
+
+use crate::{completion, diagnostics, engine_api, merged_view, parser, references, semantic, symbols, word, workspace};
+
+/// Holds the parsed-but-not-yet-processed text of every document the client
+/// has opened. Populated by `did_open` / `did_change`, cleared by `did_close`.
+#[derive(Default)]
+pub struct DocumentStore {
+    inner: HashMap<Url, String>,
+}
+
+impl DocumentStore {
+    pub fn open(&mut self, uri: Url, text: String) {
+        self.inner.insert(uri, text);
+    }
+
+    pub fn change(&mut self, uri: &Url, text: String) {
+        self.inner.insert(uri.clone(), text);
+    }
+
+    pub fn close(&mut self, uri: &Url) {
+        self.inner.remove(uri);
+    }
+
+    pub fn get(&self, uri: &Url) -> Option<&str> {
+        self.inner.get(uri).map(String::as_str)
+    }
+
+    pub fn uris(&self) -> Vec<Url> {
+        self.inner.keys().cloned().collect()
+    }
+}
+
+pub struct XsLanguageServer {
+    pub client: Client,
+    pub documents: Arc<Mutex<DocumentStore>>,
+    /// Per-file symbol tables, rebuilt on every `did_open` / `did_change`.
+    pub symbol_tables: Arc<Mutex<HashMap<Url, symbols::SymbolTable>>>,
+    /// Per-file merged include-paste views, keyed by content-hash.
+    pub merged_views: Arc<Mutex<HashMap<Url, (merged_view::MergedViewCacheKey, merged_view::MergedView)>>>,
+    pub engine: engine_api::SharedEngineApi,
+    pub game_path: PathBuf,
+    /// Registered workspace folders, each representing one mod.
+    pub workspace: Arc<Mutex<workspace::Workspace>>,
+    /// Most recently touched document, used to scope `workspace/symbol`.
+    pub last_active_uri: Arc<Mutex<Option<Url>>>,
+    /// Capabilities advertised by the client on initialize.
+    pub client_capabilities: Arc<Mutex<ClientCapabilities>>,
+}
+
+impl XsLanguageServer {
+    pub fn new(
+        client: Client,
+        engine: engine_api::SharedEngineApi,
+        game_path: PathBuf,
+    ) -> Self {
+        let workspace = workspace::Workspace::new(game_path.clone());
+        Self {
+            client,
+            documents: Arc::new(Mutex::new(DocumentStore::default())),
+            symbol_tables: Arc::new(Mutex::new(HashMap::new())),
+            merged_views: Arc::new(Mutex::new(HashMap::new())),
+            engine,
+            game_path,
+            workspace: Arc::new(Mutex::new(workspace)),
+            last_active_uri: Arc::new(Mutex::new(None)),
+            client_capabilities: Arc::new(Mutex::new(ClientCapabilities::default())),
+        }
+    }
+
+    /// Re-evaluate ownership for every open document after the workspace
+    /// folder set changes. Newly-unowned files receive the engine-API-only
+    /// warning; newly-owned files are silently re-analysed on the next edit.
+    async fn revalidate_open_document_ownership(&self) {
+        let uris = {
+            let docs = self.documents.lock().await;
+            docs.uris()
+        };
+        for uri in uris {
+            let owned = {
+                let ws = self.workspace.lock().await;
+                ws.lookup_mod(&uri).is_some()
+            };
+            if !owned {
+                let registered: Vec<String> = {
+                    let ws = self.workspace.lock().await;
+                    ws.mods().iter().map(|m| m.mod_uri.to_string()).collect()
+                };
+                let file_path = uri.to_file_path().ok();
+                warn_unowned_file(&self.client, &uri, &registered, file_path.as_deref()).await;
+            }
+        }
+    }
+
+    /// Return a cached merged view for `uri` when the content hash matches,
+    /// otherwise build a new one from the current buffer and cache it.
+    async fn get_or_build_merged_view(
+        &self,
+        uri: &Url,
+        text: &str,
+    ) -> Option<merged_view::MergedView> {
+        if let Some(cached) = self.cached_merged_view(uri, text).await {
+            return Some(cached);
+        }
+        let current_file = uri.to_file_path().ok()?;
+        let (ws_clone, project) = {
+            let ws = self.workspace.lock().await;
+            let entry = ws.lookup_mod(uri);
+            let project = match entry {
+                Some(e) => ws.build_virtual_project(e),
+                None => workspace::VirtualProject::default(),
+            };
+            (ws.clone(), project)
+        };
+        let own_table = {
+            let tables = self.symbol_tables.lock().await;
+            tables.get(uri).cloned().unwrap_or_default()
+        };
+        let cache_dir = crate::cache::state_cache_dir();
+        let view = merged_view::MergedView::build(
+            &current_file,
+            text,
+            &own_table,
+            &ws_clone,
+            &project,
+            &cache_dir,
+        );
+        let key = merged_view::MergedViewCacheKey::new(text, &view);
+        {
+            let mut views = self.merged_views.lock().await;
+            views.insert(uri.clone(), (key, view.clone()));
+        }
+        Some(view)
+    }
+
+    /// Look up a cached merged view for `uri` that matches `text`.
+    ///
+    /// Returns `None` when there is no cache entry or the content hash differs,
+    /// forcing a rebuild on the next call to [`Self::get_or_build_merged_view`].
+    async fn cached_merged_view(&self, uri: &Url, text: &str) -> Option<merged_view::MergedView> {
+        let views = self.merged_views.lock().await;
+        let (key, view) = views.get(uri)?;
+        let expected = merged_view::MergedViewCacheKey::new(text, view);
+        if key == &expected {
+            Some(view.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Remove a single cached merged view. Called on `textDocument/didOpen`
+    /// (to clear stale state) and `textDocument/didClose`.
+    async fn clear_merged_view_cache(&self, uri: &Url) {
+        let mut views = self.merged_views.lock().await;
+        views.remove(uri);
+    }
+
+    /// Drop every cached merged view whose include closure contains any of
+    /// `changed_paths`. Returns the affected open-file URIs so callers can
+    /// re-diagnose them.
+    async fn invalidate_merged_views_for(&self, changed_paths: &[PathBuf]) -> Vec<Url> {
+        if changed_paths.is_empty() {
+            return Vec::new();
+        }
+        let mut views = self.merged_views.lock().await;
+        let mut affected = Vec::new();
+        for uri in views.keys().cloned().collect::<Vec<_>>() {
+            let impacted = views
+                .get(&uri)
+                .map(|(_, mv)| changed_paths.iter().any(|p| mv.files().any(|f| f == p)))
+                .unwrap_or(false);
+            if impacted {
+                views.remove(&uri);
+                affected.push(uri);
+            }
+        }
+        affected
+    }
+}
+
+#[tower_lsp::async_trait]
+impl LanguageServer for XsLanguageServer {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Seed workspace folders from the initialize request (added by clients
+        // such as IntelliJ at startup).
+        if let Some(folders) = params.workspace_folders {
+            let mut ws = self.workspace.lock().await;
+            for folder in folders {
+                let uri = folder.uri.clone();
+                if let Err(e) = ws.register_mod(uri.clone()) {
+                    warn!("failed to register workspace folder {}: {}", uri, e);
+                }
+            }
+        }
+
+        {
+            let mut caps = self.client_capabilities.lock().await;
+            *caps = params.capabilities;
+        }
+
+        info!(
+            "initialize: client={:?}, root_uri={:?}, workspace_folders={}\
+             , capabilities=present ({} syscalls, {} aiplans loaded)",
+            params.client_info.map(|i| i.name),
+            params.root_uri,
+            self.workspace.lock().await.mods().len(),
+            self.engine.syscalls.len(),
+            self.engine.aiplans.len(),
+        );
+
+        Ok(InitializeResult {
+            capabilities: ServerCapabilities {
+                // We re-parse on every change. Full sync is fine for now;
+                // incremental sync lands in week 4 if needed.
+                text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                    TextDocumentSyncKind::FULL,
+                )),
+                completion_provider: Some(CompletionOptions {
+                    // We don't need resolve_provider; detail is in the item.
+                    resolve_provider: Some(false),
+                    // Trigger on every identifier character and dot.
+                    trigger_characters: Some(vec![
+                        ".".to_string(),
+                        "_".to_string(),
+                    ]),
+                    ..Default::default()
+                }),
+                // Week 2: hover returns the syscall signature + help as
+                // Markdown. No options (no work-done progress, no dynamic
+                // registration) — keep it simple until clients ask for more.
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                // Week 2: go-to-definition resolves engine-API symbols to
+                // a virtual `xs-stub://engine/<name>` URI (range 0:0-0:0
+                // since stubs have no real source position). No
+                // linkSupport yet — that comes when we have real workspace
+                // symbols.
+                definition_provider: Some(OneOf::Left(true)),
+                // Week 3: document symbol outline built from the per-file
+                // symbol table.
+                document_symbol_provider: Some(OneOf::Left(true)),
+                // Week 4: find all uses of an identifier in the current
+                // file (workspace-wide lands in week 5+).
+                references_provider: Some(OneOf::Left(true)),
+                // Week 4: rename an identifier across the current file,
+                // with prepare_rename enabled so the client can ask first
+                // whether the cursor is on a renameable identifier.
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
+                // Phase 2: workspace symbols are scoped to the active mod.
+                workspace_symbol_provider: Some(OneOf::Left(true)),
+                // Phase 2: workspace folders and dynamic file watching.
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
+                }),
+                diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
+                    DiagnosticOptions {
+                        identifier: Some("xs-language-server".to_string()),
+                        inter_file_dependencies: true,
+                        workspace_diagnostics: false,
+                        work_done_progress_options: Default::default(),
+                    },
+                )),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+
+    async fn initialized(&self, _: InitializedParams) {
+        info!("initialized: client confirmed init");
+
+        let (dynamic_supported, game_path) = {
+            let caps = self.client_capabilities.lock().await;
+            let supported = caps
+                .workspace
+                .as_ref()
+                .and_then(|w| w.did_change_watched_files.as_ref())
+                .and_then(|d| d.dynamic_registration)
+                .unwrap_or(false);
+            (supported, self.game_path.clone())
+        };
+
+        if dynamic_supported {
+            let pattern = format!(
+                "{}/game/**/*.xs",
+                game_path.to_string_lossy().replace('\\', "/")
+            );
+            let client = self.client.clone();
+            tokio::spawn(async move {
+                let options = DidChangeWatchedFilesRegistrationOptions {
+                    watchers: vec![FileSystemWatcher {
+                        glob_pattern: GlobPattern::String(pattern),
+                        kind: None,
+                    }],
+                };
+                let registration = Registration {
+                    id: "xs-game-folder-watcher".to_string(),
+                    method: "workspace/didChangeWatchedFiles".to_string(),
+                    register_options: Some(
+                        serde_json::to_value(options)
+                            .unwrap_or(serde_json::Value::Null),
+                    ),
+                };
+                if let Err(e) = client.register_capability(vec![registration]).await {
+                    warn!("failed to register didChangeWatchedFiles watcher: {}", e);
+                } else {
+                    info!("registered didChangeWatchedFiles watcher for game folder");
+                }
+            });
+        } else {
+            info!("client does not support dynamic watched-file registration");
+        }
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        info!("shutdown requested");
+        Ok(())
+    }
+
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        let uri = params.text_document.uri.clone();
+        let text = params.text_document.text;
+        let version = params.text_document.version;
+        debug!("did_open: {} ({} bytes, v{})", uri, text.len(), version);
+        {
+            let mut docs = self.documents.lock().await;
+            docs.open(uri.clone(), text.clone());
+        }
+
+        // Track the active document for workspace-symbol scoping.
+        {
+            let mut active = self.last_active_uri.lock().await;
+            *active = Some(uri.clone());
+        }
+
+        // Determine whether this file belongs to a registered mod.
+        let owning_mod = {
+            let ws = self.workspace.lock().await;
+            ws.lookup_mod(&uri).cloned()
+        };
+
+        if owning_mod.is_none() {
+            // Log enough context to diagnose why lookup failed: which mods
+            // are registered, what the file path resolved to, and what
+            // prefix match would have succeeded.
+            let ws = self.workspace.lock().await;
+            let registered: Vec<String> = ws.mods().iter()
+                .map(|m| m.mod_uri.to_string())
+                .collect();
+            let file_path = uri.to_file_path().ok();
+            warn_unowned_file(
+                &self.client,
+                &uri,
+                registered.as_slice(),
+                file_path.as_deref(),
+            )
+            .await;
+        } else {
+            info!(
+                "did_open: {} owned by mod_uri={}",
+                uri,
+                owning_mod.as_ref().map(|m| m.mod_uri.as_str()).unwrap_or("?")
+            );
+        }
+
+        self.clear_merged_view_cache(&uri).await;
+        self.rebuild_symbol_table(&uri, &text).await;
+        self.publish_diagnostics(&uri, &text, version).await;
+    }
+
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let uri = params.text_document.uri.clone();
+        let version = params.text_document.version;
+        // FULL sync: only one change with the entire new text.
+        let text = params
+            .content_changes
+            .into_iter()
+            .next()
+            .map(|c| c.text)
+            .unwrap_or_default();
+        debug!("did_change: {} ({} bytes, v{})", uri, text.len(), version);
+        {
+            let mut docs = self.documents.lock().await;
+            docs.change(&uri, text.clone());
+        }
+        {
+            let mut active = self.last_active_uri.lock().await;
+            *active = Some(uri.clone());
+        }
+        self.rebuild_symbol_table(&uri, &text).await;
+        self.publish_diagnostics(&uri, &text, version).await;
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let uri = params.text_document.uri;
+        debug!("did_close: {}", uri);
+        let mut docs = self.documents.lock().await;
+        docs.close(&uri);
+        let mut tables = self.symbol_tables.lock().await;
+        tables.remove(&uri);
+        self.clear_merged_view_cache(&uri).await;
+    }
+
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        let added_count = params.event.added.len();
+        let removed_count = params.event.removed.len();
+        info!(
+            "did_change_workspace_folders: +{} -{}",
+            added_count, removed_count
+        );
+
+        {
+            let mut ws = self.workspace.lock().await;
+            for folder in &params.event.added {
+                info!("  + registering mod folder: uri={} name={}", folder.uri, folder.name);
+                if let Err(e) = ws.register_mod(folder.uri.clone()) {
+                    warn!("failed to add workspace folder {}: {}", folder.uri, e);
+                }
+            }
+            for folder in &params.event.removed {
+                info!("  - unregistering mod folder: uri={}", folder.uri);
+                ws.unregister_mod(&folder.uri);
+            }
+            let summary: Vec<String> = ws.mods().iter()
+                .map(|m| format!("{} (overlay={})", m.mod_uri, m.overlay_path.display()))
+                .collect();
+            info!("registered mods after update ({} total):", summary.len());
+            for line in summary {
+                info!("    {}", line);
+            }
+        }
+
+        self.revalidate_open_document_ownership().await;
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        info!("did_change_watched_files: {} change(s)", params.changes.len());
+        let mut changed_paths = Vec::new();
+        for change in &params.changes {
+            debug!("watched file change: {:?} {:?}", change.typ, change.uri);
+            if let Ok(path) = change.uri.to_file_path() {
+                changed_paths.push(path.clone());
+                let rel = {
+                    let ws = self.workspace.lock().await;
+                    path.strip_prefix(ws.game_path().join("game"))
+                        .ok()
+                        .map(|p| p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+                };
+                if let Some(rel) = rel {
+                    let cache_dir = crate::cache::state_cache_dir();
+                    if let Err(e) = crate::cache::invalidate_parse_cache(&rel, &cache_dir) {
+                        warn!("failed to invalidate parse cache for {}: {}", rel, e);
+                    }
+                }
+            }
+        }
+
+        // Drop any cached merged view whose include closure contains a
+        // changed file, then re-diagnose those open files.
+        let affected = self.invalidate_merged_views_for(&changed_paths).await;
+        for uri in affected {
+            let (text, version) = {
+                let docs = self.documents.lock().await;
+                docs.get(&uri)
+                    .map(|t| (t.to_string(), 0i32))
+                    .unwrap_or_default()
+            };
+            if !text.is_empty() {
+                self.rebuild_symbol_table(&uri, &text).await;
+                self.publish_diagnostics(&uri, &text, version).await;
+            }
+        }
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+        let merged = self.get_or_build_merged_view(uri, &text).await;
+        let items = completion::complete(
+            &self.engine,
+            merged.as_ref(),
+            &text,
+            &params,
+        );
+        debug!("completion: {} item(s) at {:?}", items.len(), params.text_document_position.position);
+        Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let Some(ident) = word::identifier_at_cursor(&text, pos.line, pos.character) else {
+            debug!("hover: no identifier at {:?}", pos);
+            return Ok(None);
+        };
+
+        // Engine API first (richer info: signature + help text + return type).
+        // Merged include-paste scope second, with the current file's symbol
+        // table as a final fallback.
+        let markdown = if let Some(s) = self.engine.find_syscall(&ident) {
+            format_hover_syscall(s)
+        } else if let Some(c) = self.engine.find_aiplan(&ident) {
+            format_hover_aiplan(c)
+        } else if let Some(ms) = self
+            .get_or_build_merged_view(uri, &text)
+            .await
+            .and_then(|mv| mv.find(&ident).cloned())
+        {
+            format_hover_merged_symbol(&ms)
+        } else {
+            let tables = self.symbol_tables.lock().await;
+            match tables.get(uri).and_then(|t| t.find(&ident)) {
+                Some(sym) => format_hover_symbol(sym),
+                None => {
+                    debug!("hover: identifier `{ident}` not in engine API or workspace");
+                    return Ok(None);
+                }
+            }
+        };
+
+        debug!("hover: `{ident}` -> {} chars of markdown", markdown.len());
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: markdown,
+            }),
+            range: None,
+        }))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let Some(ident) = word::identifier_at_cursor(&text, pos.line, pos.character) else {
+            debug!("definition: no identifier at {:?}", pos);
+            return Ok(None);
+        };
+
+        // Merged include-paste scope first so included symbols jump to their
+        // defining file. Fall back to the current file's symbol table, then
+        // to a virtual URI for engine symbols.
+        let location = if let Some(ms) = self
+            .get_or_build_merged_view(uri, &text)
+            .await
+            .and_then(|mv| mv.find(&ident).cloned())
+        {
+            let def_path = ms
+                .provenance
+                .origin()
+                .map(PathBuf::from)
+                .or_else(|| uri.to_file_path().ok())
+                .ok_or_else(tower_lsp::jsonrpc::Error::internal_error)?;
+            let def_uri = Url::from_file_path(&def_path)
+                .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
+            Location {
+                uri: def_uri,
+                range: ms.symbol.selection_range,
+            }
+        } else {
+            let tables = self.symbol_tables.lock().await;
+            match tables.get(uri).and_then(|t| t.find(&ident)) {
+                Some(sym) => Location {
+                    uri: uri.clone(),
+                    range: sym.selection_range,
+                },
+                None => {
+                    if self.engine.find_syscall(&ident).is_none()
+                        && self.engine.find_aiplan(&ident).is_none()
+                    {
+                        debug!("definition: identifier `{ident}` not in engine API or workspace");
+                        return Ok(None);
+                    }
+                    // Virtual URI — these stubs don't have a real source position.
+                    let stub_uri = format!("xs-stub://engine/{ident}");
+                    Location {
+                        uri: Url::parse(&stub_uri)
+                            .map_err(|_e| tower_lsp::jsonrpc::Error::internal_error())?,
+                        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                    }
+                }
+            }
+        };
+
+        debug!("definition: `{ident}` -> {:?}", location.range.start);
+        Ok(Some(GotoDefinitionResponse::Scalar(location)))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = &params.text_document.uri;
+        let tables = self.symbol_tables.lock().await;
+        let Some(table) = tables.get(uri) else {
+            return Ok(None);
+        };
+        let items: Vec<DocumentSymbol> = table.symbols.iter().map(symbol_to_lsp).collect();
+        debug!(
+            "document_symbol: {} symbol(s) for {}",
+            items.len(),
+            uri
+        );
+        Ok(Some(DocumentSymbolResponse::Nested(items)))
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let query = params.query.to_lowercase();
+
+        let active_uri = {
+            let active = self.last_active_uri.lock().await;
+            match active.clone() {
+                Some(uri) => uri,
+                None => return Ok(None),
+            }
+        };
+
+        // Find the owning mod to scope the search.
+        let project = {
+            let ws = self.workspace.lock().await;
+            let Some(entry) = ws.lookup_mod(&active_uri) else {
+                return Ok(None);
+            };
+            ws.build_virtual_project(entry)
+        };
+
+        let ws_locked = self.workspace.lock().await;
+        let files = project.visible_files(&ws_locked);
+        drop(ws_locked);
+
+        let mut items = Vec::new();
+        for (rel, path) in files {
+            let Ok(uri) = Url::from_file_path(&path) else {
+                continue;
+            };
+            let Ok(text) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            let Some(tree) = parser::parse(&text) else {
+                continue;
+            };
+            let table = symbols::build_symbol_table(&tree, &text);
+            for sym in &table.symbols {
+                if !query.is_empty() && !sym.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                items.push(symbol_to_workspace_symbol(&sym, &uri, &rel));
+            }
+        }
+
+        debug!("workspace_symbol: {} item(s)", items.len());
+        Ok(Some(items))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let Some(ident) = word::identifier_at_cursor(&text, pos.line, pos.character) else {
+            debug!("references: no identifier at {:?}", pos);
+            return Ok(None);
+        };
+
+        // Engine API has no source location — return an empty list rather
+        // than a malformed Location.
+        if self.engine.find_syscall(&ident).is_some()
+            || self.engine.find_aiplan(&ident).is_some()
+        {
+            debug!("references: `{ident}` is engine API; returning []");
+            return Ok(Some(vec![]));
+        }
+
+        let current_file = uri.to_file_path().ok();
+        let merged = self.get_or_build_merged_view(uri, &text).await;
+
+        let mut locs = Vec::new();
+        let mut seen: HashSet<(String, u32, u32, u32, u32)> = HashSet::new();
+
+        if let Some(mv) = merged {
+            // Walk every file in the include-paste scope.
+            for path in mv.files() {
+                let source = mv.source(path).unwrap_or("");
+                let Some(tree) = parser::parse(source) else { continue };
+                let table = if current_file.as_deref() == Some(path) {
+                    Some(mv.own_table())
+                } else {
+                    mv.tables().get(path)
+                };
+                let raw = references::find_identifier_uses(&tree, source, &ident);
+                let ranges = match table {
+                    Some(t) => references::filter_declaration(
+                        raw,
+                        t,
+                        &ident,
+                        params.context.include_declaration,
+                    ),
+                    None => raw,
+                };
+                let Ok(file_uri) = Url::from_file_path(path) else { continue };
+                for range in ranges {
+                    if seen.insert((
+                        file_uri.to_string(),
+                        range.start.line,
+                        range.start.character,
+                        range.end.line,
+                        range.end.character,
+                    )) {
+                        locs.push(Location {
+                            uri: file_uri.clone(),
+                            range,
+                        });
+                    }
+                }
+            }
+        } else {
+            // Fallback to the current file only when no merged view is available.
+            let Some(tree) = parser::parse(&text) else {
+                debug!("references: parse failed for {}", uri);
+                return Ok(None);
+            };
+            let ranges = {
+                let tables = self.symbol_tables.lock().await;
+                let table = tables.get(uri);
+                let raw = references::find_identifier_uses(&tree, &text, &ident);
+                match table {
+                    Some(t) => references::filter_declaration(
+                        raw,
+                        t,
+                        &ident,
+                        params.context.include_declaration,
+                    ),
+                    None => raw,
+                }
+            };
+            for range in ranges {
+                if seen.insert((
+                    uri.to_string(),
+                    range.start.line,
+                    range.start.character,
+                    range.end.line,
+                    range.end.character,
+                )) {
+                    locs.push(Location {
+                        uri: uri.clone(),
+                        range,
+                    });
+                }
+            }
+        }
+
+        debug!(
+            "references: `{ident}` -> {} location(s) across merged scope",
+            locs.len()
+        );
+        Ok(Some(locs))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let new_name = &params.new_name;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let Some(ident) = word::identifier_at_cursor(&text, pos.line, pos.character) else {
+            debug!("rename: no identifier at {:?}", pos);
+            return Ok(None);
+        };
+
+        // Engine API symbols can't be renamed — no source to rewrite.
+        if self.engine.find_syscall(&ident).is_some()
+            || self.engine.find_aiplan(&ident).is_some()
+        {
+            debug!("rename: `{ident}` is engine API; refusing");
+            return Ok(None);
+        }
+
+        let Some(tree) = parser::parse(&text) else {
+            debug!("rename: parse failed for {}", uri);
+            return Ok(None);
+        };
+
+        let raw = references::find_identifier_uses(&tree, &text, &ident);
+        let ranges = {
+            let tables = self.symbol_tables.lock().await;
+            match tables.get(uri) {
+                Some(t) => references::filter_declaration(raw, t, &ident, /* include */ true),
+                None => raw,
+            }
+        };
+
+        if ranges.is_empty() {
+            return Ok(None);
+        }
+
+        let edits: Vec<TextEdit> = ranges
+            .into_iter()
+            .map(|range| TextEdit {
+                range,
+                new_text: new_name.clone(),
+            })
+            .collect();
+
+        let mut changes = HashMap::new();
+        changes.insert(uri.clone(), edits);
+        debug!(
+            "rename: `{ident}` -> `{}` ({} edit(s) in {})",
+            new_name,
+            changes.values().map(|v| v.len()).sum::<usize>(),
+            uri
+        );
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = &params.text_document.uri;
+        let pos = params.position;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let Some(ident) = word::identifier_at_cursor(&text, pos.line, pos.character) else {
+            debug!("prepare_rename: no identifier at {:?}", pos);
+            return Ok(None);
+        };
+
+        // Engine API symbols can't be renamed.
+        if self.engine.find_syscall(&ident).is_some()
+            || self.engine.find_aiplan(&ident).is_some()
+        {
+            debug!("prepare_rename: `{ident}` is engine API; refusing");
+            return Ok(None);
+        }
+
+        let Some(tree) = parser::parse(&text) else {
+            debug!("prepare_rename: parse failed for {}", uri);
+            return Ok(None);
+        };
+
+        let Some(range) = references::identifier_range_at(&tree, pos.line, pos.character) else {
+            debug!("prepare_rename: no identifier node under {:?}", pos);
+            return Ok(None);
+        };
+        Ok(Some(PrepareRenameResponse::Range(range)))
+    }
+}
+
+impl XsLanguageServer {
+    /// Re-parse `text` and rebuild the per-file symbol table for `uri`.
+    /// Called on `did_open` / `did_change`. On parse failure, we keep the
+    /// stale table rather than clearing it — the old symbols still help
+    /// with hover/definition until the user fixes the parse error.
+    async fn rebuild_symbol_table(&self, uri: &Url, text: &str) {
+        if let Some(tree) = parser::parse(text) {
+            let table = symbols::build_symbol_table(&tree, text);
+            debug!(
+                "rebuild_symbol_table: {} -> {} symbol(s)",
+                uri,
+                table.symbols.len()
+            );
+            let mut tables = self.symbol_tables.lock().await;
+            tables.insert(uri.clone(), table);
+        }
+    }
+
+    /// Parse `text` as XS and publish parse, type-check, and semantic
+    /// diagnostics per URI. An empty entry for a URI (clean file) is also
+    /// published so clients clear stale diagnostics for that file.
+    async fn publish_diagnostics(&self, uri: &Url, text: &str, version: i32) {
+        let current_file = uri.to_file_path().ok();
+        let project = if current_file.is_some() {
+            self.build_semantic_project(uri).await
+        } else {
+            None
+        };
+        let merged = self.get_or_build_merged_view(uri, text).await;
+
+        let diagnostics_by_uri = match parser::parse(text) {
+            Some(tree) => {
+                // Hold the symbol-tables lock briefly to look up the
+                // per-file table; releasing before the heavier checks keeps
+                // the lock window minimal.
+                let table = {
+                    let tables = self.symbol_tables.lock().await;
+                    tables.get(uri).cloned()
+                };
+                match table {
+                    Some(table) => diagnostics::collect_all(
+                        &tree,
+                        text,
+                        &self.engine,
+                        &table,
+                        project.as_ref(),
+                        current_file.as_deref(),
+                        merged.as_ref(),
+                    ),
+                    None => {
+                        let mut map = std::collections::HashMap::new();
+                        map.insert(uri.clone(), diagnostics::collect_diagnostics(&tree, text));
+                        map
+                    }
+                }
+            }
+            None => {
+                let mut map = std::collections::HashMap::new();
+                map.insert(uri.clone(), vec![Diagnostic {
+                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("xs-language-server".to_string()),
+                    message: "internal error: failed to install XS language".to_string(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                }]);
+                map
+            }
+        };
+        let total: usize = diagnostics_by_uri.values().map(|v| v.len()).sum();
+        debug!("publish_diagnostics: {} ({} issue(s) across {} URI(s))", uri, total, diagnostics_by_uri.len());
+        for (diag_uri, diags) in diagnostics_by_uri {
+            self.client
+                .publish_diagnostics(diag_uri, diags, Some(version))
+                .await;
+        }
+    }
+
+    /// Build a semantic virtual project for the mod that owns `uri`.
+    /// Returns `None` for unowned files. Loads every visible file in the
+    /// mod; files that fail to load (binary `.xs` random-map data, IO
+    /// errors, malformed UTF-8) are skipped with a warning log rather than
+    /// aborting the whole build.
+    async fn build_semantic_project(&self, uri: &Url) -> Option<semantic::VirtualProject> {
+        let (ws_clone, project) = {
+            let ws = self.workspace.lock().await;
+            let entry = ws.lookup_mod(uri).cloned()?;
+            let project = ws.build_virtual_project(&entry);
+            (ws.clone(), project)
+        };
+        let cache_dir = crate::cache::state_cache_dir();
+        Some(semantic::VirtualProject::load_from_workspace(
+            &ws_clone,
+            &project,
+            &cache_dir,
+        ))
+    }
+}
+
+/// Notify the client that a file is not covered by any registered mod.
+/// Logs every registered mod and the resolved file path so a user hitting
+/// this warning can grep the log to see exactly which prefixes were checked
+/// and which prefix would have matched.
+async fn warn_unowned_file(
+    client: &Client,
+    uri: &Url,
+    registered_mods: &[String],
+    file_path: Option<&std::path::Path>,
+) {
+    warn!(
+        "file not part of any registered mod; engine API only: {}",
+        uri
+    );
+    warn!("  resolved file path: {:?}", file_path);
+    if registered_mods.is_empty() {
+        warn!("  no mods registered with the LSP at all");
+        warn!("  (the IntelliJ plugin must call workspace/didChangeWorkspaceFolders");
+        warn!("   with the project's mod paths; check the XsStartupActivity run)");
+    } else {
+        warn!("  registered mod URIs ({}):", registered_mods.len());
+        for m in registered_mods {
+            warn!("    - {}", m);
+        }
+        if let Some(path) = file_path {
+            warn!("  hint: a mod at <mod_uri> owns a file when file_path.starts_with(<mod_uri>);");
+            warn!("        check for case sensitivity, trailing slash, or symlink mismatches");
+            warn!("        between the registered prefix and the actual file path.");
+        }
+    }
+    client
+        .show_message(
+            MessageType::WARNING,
+            "File not part of any registered mod; engine API only",
+        )
+        .await;
+}
+
+/// Format a syscall as a Markdown hover card.
+fn format_hover_syscall(s: &engine_api::Syscall) -> String {
+    let params = s
+        .params
+        .iter()
+        .map(|p| format!("{} {}", p.ty, p.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let signature = format!("{} {}({})", s.return_type, s.name, params);
+    let mut md = format!("```xs\n{}\n```\n", signature);
+    if !s.help.is_empty() {
+        // Indent multi-paragraph help so it renders as a single block under
+        // the code fence.
+        md.push_str(&s.help);
+        md.push('\n');
+    }
+    md
+}
+
+/// Format an AI-plan constant as a Markdown hover card.
+fn format_hover_aiplan(c: &engine_api::AiplanConstant) -> String {
+    let signature = format!("const {} {} = {}", c.variable_type, c.name, c.variable_value);
+    let md = format!("```xs\n{}\n```\n", signature);
+    md
+}
+
+/// Format a workspace symbol as a Markdown hover card. Workspace symbols
+/// don't carry help text, but they have a real source location.
+fn format_hover_symbol(s: &symbols::Symbol) -> String {
+    let kind_label = s.kind.label();
+    let mut md = format!("*{}* — `{}`\n", kind_label, s.detail);
+    if !s.params.is_empty() {
+        md.push_str("\n**Parameters:**\n");
+        for p in &s.params {
+            md.push_str(&format!("- `{} {}`\n", p.ty, p.name));
+        }
+    }
+    md
+}
+
+/// Format a merged-scope symbol for hover, including the file it was
+/// pasted from.
+fn format_hover_merged_symbol(ms: &merged_view::MergedSymbol) -> String {
+    let kind_label = ms.symbol.kind.label();
+    let mut md = format!("*{}* — `{}`\n", kind_label, ms.symbol.detail);
+    if !ms.symbol.params.is_empty() {
+        md.push_str("\n**Parameters:**\n");
+        for p in &ms.symbol.params {
+            md.push_str(&format!("- `{} {}`\n", p.ty, p.name));
+        }
+    }
+    if let Some(origin) = ms.provenance.origin() {
+        md.push_str(&format!("\n*Defined in: `{}`*\n", origin.display()));
+    }
+    md
+}
+
+/// Convert a workspace symbol to the LSP `DocumentSymbol` shape.
+fn symbol_to_lsp(s: &symbols::Symbol) -> DocumentSymbol {
+    let kind = match s.kind {
+        symbols::SymbolKind::Rule => SymbolKind::FUNCTION, // XS has no RULE kind in LSP
+        symbols::SymbolKind::Function => SymbolKind::FUNCTION,
+        symbols::SymbolKind::Variable => SymbolKind::VARIABLE,
+        symbols::SymbolKind::Constant => SymbolKind::CONSTANT,
+    };
+    DocumentSymbol {
+        name: s.name.clone(),
+        detail: Some(s.detail.clone()),
+        kind,
+        tags: None,
+        deprecated: None,
+        range: s.full_range,
+        selection_range: s.selection_range,
+        children: None,
+    }
+}
+
+/// Convert a workspace symbol to the LSP `SymbolInformation` shape for
+/// `workspace/symbol` responses.
+fn symbol_to_workspace_symbol(s: &symbols::Symbol, uri: &Url, _rel: &str) -> SymbolInformation {
+    let kind = match s.kind {
+        symbols::SymbolKind::Rule => SymbolKind::FUNCTION,
+        symbols::SymbolKind::Function => SymbolKind::FUNCTION,
+        symbols::SymbolKind::Variable => SymbolKind::VARIABLE,
+        symbols::SymbolKind::Constant => SymbolKind::CONSTANT,
+    };
+    SymbolInformation {
+        name: s.name.clone(),
+        kind,
+        tags: None,
+        deprecated: None,
+        location: Location {
+            uri: uri.clone(),
+            range: s.selection_range,
+        },
+        container_name: None,
+    }
+}
