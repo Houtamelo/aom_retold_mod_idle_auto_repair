@@ -29,8 +29,8 @@
 5. **HIGH — `MergedView.build`'s returned diagnostics message is "internal error: failed to install XS language"** when the user's source has a syntax error. The handler will surface this to the user on every typo. **R3-F-09**
 6. **HIGH — `extract_callee_name` in `typecheck.rs` returns just the method name for `obj.method(…)` calls** and then looks it up in the global engine API. Engine methods without their receiver will silently fail to type-check. **R2-F-08**
 7. **HIGH — `doxygen::parse_memproto_signature` keeps the `static` qualifier in `return_type`** even though the comment above says "drop it". Every cache consumer downstream sees `static int` as the type. **R4-F-01**
-8. **HIGH — `Param::render` is a dead function with three mutually contradictory comments** claiming it preserves defaults verbatim, doesn't, and "appends separately". `format_function_detail` is the actual hover path. **R1-F-01**
-9. **HIGH — Test `recovers_function_definition_from_error_node_with_body` doesn't actually exercise the ERROR-recovery branch.** The input parses cleanly via the normal `function_definition` rule; the test passes against the wrong path. **R1-F-03**
+8. **HIGH — `Param::render` is a dead function with three mutually contradictory comments** claiming it preserves defaults verbatim, doesn't, and "appends separately". `format_function_detail` is the actual hover path. **R1-F-01** — **[Resolved 2026-06-29]** via `openspec/changes/archive/2026-06-29-fix-lsp-symbols-cleanup/` (dead code deleted; PASS WITH WARNINGS, 209/209 tests)
+9. **HIGH — Test `recovers_function_definition_from_error_node_with_body` doesn't actually exercise the ERROR-recovery branch.** The input parses cleanly via the normal `function_definition` rule; the test passes against the wrong path. **R1-F-03** — **[Resolved 2026-06-29]** via `openspec/changes/archive/2026-06-29-fix-lsp-symbols-cleanup/` (test renamed to `function_definition_with_inner_error_in_default_value_still_extracts`; PASS WITH WARNINGS, 209/209 tests)
 10. **HIGH — `word.rs::identifier_at_cursor` slices line_str by byte offset while LSP `Position.character` is in UTF-16 code units.** For any non-ASCII character before the cursor, the function either panics ("byte index not on char boundary") or returns the wrong identifier. **R1-F-04**
 11. **HIGH — Three duplicated `node_range` / `node_text` / `find_named_child` helpers** across `semantic.rs`, `typecheck.rs`, `symbols.rs`, `references.rs`, `definition_check.rs`. One bug-fix away from divergence. **R2-F-21, R3-F-22**
 
@@ -114,7 +114,7 @@ async fn did_close(&self, params: DidCloseTextDocumentParams) {
 
 ### R1 — Parser+Symbols (4 HIGH)
 
-#### R1-F-01 · comment-mismatch · `symbols.rs:82-92`
+#### R1-F-01 · comment-mismatch · `symbols.rs:82-92` · **[Resolved 2026-06-29]** via `openspec/changes/archive/2026-06-29-fix-lsp-symbols-cleanup/` (dead `Param::render` and `is_false` deleted; PASS WITH WARNINGS)
 
 `Param::render` claims to render `"int x = 5"`, the first in-body comment claims it preserves defaults verbatim, the second claims defaults are appended elsewhere. The implementation ignores `source` and `format!("{} {}", self.ty, self.name)` only emits the bare type + name. The function is never called by anything — `format_function_detail` (lines 560-573) does the real hover rendering.
 
@@ -136,7 +136,7 @@ impl Param {
 
 ---
 
-#### R1-F-02 · comment-mismatch · `symbols.rs:162-166 and 456-462`
+#### R1-F-02 · comment-mismatch · `symbols.rs:162-166 and 456-462` · **[Refuted 2026-06-29 — direct parser inspection showed forward declarations DO produce ERROR nodes; the `extract_error_*` helpers are needed]** (no code change; schedule separate `fix-tree-sitter-xs-forward-declarations` change)
 
 The comment above the `ERROR` → arm claims that "the XS grammar currently parses function forward declarations … as an ERROR node". But the grammar's `_declaration_declarator` already aliases `function_declarator`, and the existing test `extracts_forward_declaration` proves `void bar(int x = -1);` parses as a regular Function symbol — no ERROR involved. The entire `extract_error_forward_declaration` branch is unreachable for normal XS.
 
@@ -153,7 +153,7 @@ The comment above the `ERROR` → arm claims that "the XS grammar currently pars
 
 ---
 
-#### R1-F-03 · comment-mismatch · `symbols.rs:806-818`
+#### R1-F-03 · comment-mismatch · `symbols.rs:806-818` · **[Resolved 2026-06-29]** via `openspec/changes/archive/2026-06-29-fix-lsp-symbols-cleanup/` (test renamed to `function_definition_with_inner_error_in_default_value_still_extracts`; PASS WITH WARNINGS)
 
 Test `recovers_function_definition_from_error_node_with_body` claims to test the ERROR-recovery path, but the input `void broken(int x = [ ] { }) { }` parses the parameter default `[ ] { }` as a well-formed `lambda_expression` and matches the regular `function_definition` rule. The test exercises the wrong branch and passes for the wrong reason.
 
@@ -906,3 +906,4 @@ The complete raw reviewer outputs are persisted to Engram under topic keys `sdd/
 
 Last verified: 2026-06-29 against commit 0053352ad36c32c474dbd6cd5eaa06ff2c763ac3
 Last verified: 2026-06-29 — R5-F-01, R5-F-02, R5-F-03 resolved via `openspec/changes/archive/2026-06-29-fix-lsp-test-honesty/` (PASS WITH WARNINGS, 203/203 tests)
+Last verified: 2026-06-29 — R1-F-01, R1-F-03 resolved; R1-F-02 refuted via `openspec/changes/archive/2026-06-29-fix-lsp-symbols-cleanup/` (PASS WITH WARNINGS, 209/209 tests)

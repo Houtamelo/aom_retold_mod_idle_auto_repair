@@ -73,22 +73,8 @@ pub struct Param {
     pub default: Option<String>,
     /// `ref` modifier — parameter passed by reference.
     /// The XS compiler rejects defaults on ref params.
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_ref: bool,
-}
-
-fn is_false(b: &bool) -> bool { !*b }
-
-impl Param {
-    /// `int x` or `int x = 5` — used in hover signatures.
-    pub fn render(&self, source: &str) -> String {
-        // Find the parameter declaration text in the source so we preserve
-        // default values verbatim.
-        // The caller already knows the byte range; we accept the source and
-        // let render just print type + name (defaults are appended separately).
-        let _ = source;
-        format!("{} {}", self.ty, self.name)
-    }
 }
 
 /// A single named XS construct visible at the top level of a file.
@@ -155,9 +141,7 @@ pub fn build_symbol_table(tree: &tree_sitter::Tree, source: &str) -> SymbolTable
     for child in root.children(&mut cursor) {
         match child.kind() {
             "rule_definition" => extract_rule(child, source, &mut table.symbols),
-            "function_definition" => {
-                extract_function(child, source, &mut table.symbols)
-            }
+            "function_definition" => extract_function(child, source, &mut table.symbols),
             "declaration" => extract_declaration(child, source, &mut table.symbols),
             // The XS grammar currently parses function forward declarations
             // (`void bar(int x = -1);`) as an ERROR node containing the type,
@@ -592,7 +576,12 @@ fn extract_params(node: tree_sitter::Node<'_>, source: &str) -> Vec<Param> {
             .unwrap_or_default();
         let default = extract_param_default(child, source);
         let is_ref = has_ref_qualifier(child);
-        params.push(Param { ty, name, default, is_ref });
+        params.push(Param {
+            ty,
+            name,
+            default,
+            is_ref,
+        });
     }
     params
 }
@@ -656,10 +645,7 @@ fn node_text<'a>(node: tree_sitter::Node<'a>, source: &'a str) -> &'a str {
 }
 
 /// First direct named child of `node` whose `kind()` matches `kind`.
-fn find_named_child<'a>(
-    node: tree_sitter::Node<'a>,
-    kind: &str,
-) -> Option<tree_sitter::Node<'a>> {
+fn find_named_child<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).find(|c| c.kind() == kind)
 }
@@ -772,10 +758,7 @@ mod tests {
         assert_eq!(s.params[0].default.as_deref(), Some("-1"));
         assert_eq!(s.params[1].ty, "void(int)");
         assert_eq!(s.params[1].name, "cb");
-        assert_eq!(
-            s.params[1].default.as_deref(),
-            Some("[](int id = -1) {}")
-        );
+        assert_eq!(s.params[1].default.as_deref(), Some("[](int id = -1) {}"));
         assert!(s.detail.contains("void(int) cb = [](int id = -1) {}"));
     }
 
@@ -783,7 +766,9 @@ mod tests {
     fn extracts_lambda_default_with_return_type() {
         let src = "void boConditionalWait(int planID = -1, bool() condition = []() -> bool { return(true); }) { }\n";
         let t = table_for(src);
-        let s = t.find("boConditionalWait").expect("boConditionalWait symbol");
+        let s = t
+            .find("boConditionalWait")
+            .expect("boConditionalWait symbol");
         assert_eq!(s.params.len(), 2);
         assert_eq!(s.params[1].ty, "bool()");
         assert_eq!(
@@ -804,13 +789,15 @@ mod tests {
     }
 
     #[test]
-    fn recovers_function_definition_from_error_node_with_body() {
-        // A header the main `function_definition` rule does not accept: a
-        // param with an ERROR default. The compound_statement body lets the
-        // error-recovery path produce a Function symbol.
+    fn function_definition_with_inner_error_in_default_value_still_extracts() {
+        // The regular `function_definition` rule matches this header despite
+        // an ERROR in the default-value subtree. The outer `{ }` body lets
+        // `extract_function` produce a usable Function symbol.
         let src = "void broken(int x = [ ] { }) { }\n";
         let t = table_for(src);
-        let s = t.find("broken").expect("broken symbol from ERROR recovery");
+        let s = t
+            .find("broken")
+            .expect("broken symbol from function_definition");
         assert_eq!(s.kind, SymbolKind::Function);
         assert!(!s.is_forward);
         assert_eq!(s.params.len(), 1);
