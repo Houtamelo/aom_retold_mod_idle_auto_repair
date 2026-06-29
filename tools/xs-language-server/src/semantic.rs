@@ -351,26 +351,21 @@ fn effective_line(ms: &crate::merged_view::MergedSymbol) -> u32 {
 /// Only files in `merged` (current file + transitive includes) are considered.
 /// Two `extern` declarations on the same include chain are allowed; everything
 /// else collides. Each diagnostic is emitted under the declaring file's URI.
-pub fn check_extern_collisions(
-    project: &VirtualProject,
-    current_file: &Path,
-    merged: Option<&MergedView>,
-) -> DiagnosticsByUri {
-    let mut diags: DiagnosticsByUri = HashMap::new();
+    pub fn check_extern_collisions(
+        project: &VirtualProject,
+        current_file: &Path,
+        merged: Option<&MergedView>,
+    ) -> DiagnosticsByUri {
+        let mut diags: DiagnosticsByUri = HashMap::new();
 
-    let paths_in_scope: Vec<&Path> = {
-        let raw: Vec<&Path> = if let Some(m) = merged {
-            m.files().collect()
-        } else {
-            project.files.keys().map(|p| p.as_path()).collect()
-        };
-        // `MergedView::files()` returns the current file once as its own table
-        // and once from the `tables` map, so deduplicate before scanning.
-        let mut seen = HashSet::new();
-        raw.into_iter()
-            .filter(|p| seen.insert(p.as_os_str()))
-            .collect()
-    };
+        // Extern collisions are inherently cross-file. Always gather
+        // symbols from the project's full file set — using `merged.files()`
+        // here would miss extern declarations in sibling files when the
+        // current file has no `include` directives (its merged view
+        // contains only itself). The merged view's edges are still used
+        // by `same_include_chain` below to suppress collisions between
+        // files linked by an include.
+        let paths_in_scope: Vec<&Path> = project.files.keys().map(|p| p.as_path()).collect();
 
     let mut by_name: HashMap<String, Vec<(&Path, &Symbol)>> = HashMap::new();
     for path in paths_in_scope {
@@ -1136,22 +1131,25 @@ mod tests {
         );
     }
 
-    /// Same include chain → extern is resolved via include, NOT a collision.
-    /// Guards against an over-broad fix that flags any cross-file declaration.
+    /// Same include chain → two externs declare the same name, but the
+    /// engine resolves them via the include. NOT a collision. Guards
+    /// against an over-broad fix that flags any cross-file declaration.
     #[test]
-    fn extern_collision_skipped_when_in_same_include_chain() {
+    fn extern_collision_skipped_when_externs_linked_by_include() {
         let (_tmp, prj, merged, current) = merged_fixture(
             &[
-                // a includes b; a declares extern; b defines non-extern.
-                ("ai/a.xs", "extern int gFoo = 5;\n"),
-                ("ai/b.xs", "int gFoo = 5;\ninclude \"a.xs\";\n"),
+                // a includes b; both declare extern (different files but
+                // linked by include). The engine resolves the symbol
+                // through the include — not a collision.
+                ("ai/a.xs", "extern int gFoo = 5; include \"b.xs\";\n"),
+                ("ai/b.xs", "extern int gFoo = 5;\n"),
             ],
             "ai/a.xs",
         );
         let diags = check_extern_collisions(&prj, &current, Some(&merged));
         assert!(
             diags.is_empty(),
-            "extern + definition linked by include should NOT collide; got: {:?}",
+            "two externs linked by include should NOT collide; got: {:?}",
             diags
         );
     }
