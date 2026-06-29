@@ -7,6 +7,14 @@
 //! cleanly and missing or unreadable targets become diagnostics rather than
 //! fatal errors.
 //!
+//! Include-line propagation: each included symbol carries an `effective_line`
+//! that is the line of the earliest `include` directive in the analysed file
+//! that reaches the symbol. The builder walks includes depth-first in source
+//! order; the first reaching root edge sets `effective_line`, and subsequent
+//! edges to an already-visited file are skipped. Cycles are therefore bounded
+//! by the `visited` guard, and a symbol's effective line is stable for the
+//! lifetime of the `MergedView`.
+//!
 //! Resilience: a single bad include target (binary `.xs` random-map data,
 //! permission error, etc.) produces a `tracing::warn!` and is omitted from
 //! the merged view, but the merged view for the rest of the file STILL
@@ -36,6 +44,9 @@ pub enum VisibilityProvenance {
         introduced_at: PathBuf,
         /// 0-indexed line of that `include` directive in `introduced_at`.
         include_line: u32,
+        /// 0-indexed line of the earliest `include` directive in the
+        /// analysed file that reaches this symbol.
+        effective_line: u32,
     },
     /// Pasted from a file included transitively through one or more includes.
     TransitiveInclude {
@@ -48,6 +59,9 @@ pub enum VisibilityProvenance {
         include_line: u32,
         /// 1 = direct include, 2 = included by a direct include, etc.
         depth: usize,
+        /// 0-indexed line of the earliest `include` directive in the
+        /// analysed file that reaches this symbol.
+        effective_line: u32,
     },
 }
 
@@ -72,6 +86,16 @@ impl VisibilityProvenance {
         }
     }
 
+    /// The 0-indexed line of the earliest `include` directive in the analysed
+    /// file that reaches this symbol. Returns `0` for own-file symbols.
+    pub fn effective_line(&self) -> u32 {
+        match self {
+            VisibilityProvenance::OwnFile => 0,
+            VisibilityProvenance::DirectInclude { effective_line, .. } => *effective_line,
+            VisibilityProvenance::TransitiveInclude { effective_line, .. } => *effective_line,
+        }
+    }
+
     /// Inclusion depth: `0` for own-file symbols, `1` for direct includes,
     /// `2+` for transitive includes.
     pub fn depth(&self) -> usize {
@@ -88,6 +112,18 @@ impl VisibilityProvenance {
 pub struct MergedSymbol {
     pub symbol: Symbol,
     pub provenance: VisibilityProvenance,
+}
+
+impl MergedSymbol {
+    /// The 0-indexed line used for ordering this symbol in the analysed file.
+    /// For own-file symbols this is the symbol's definition line; for included
+    /// symbols it is the earliest current-file `include` line that reaches it.
+    pub fn effective_line(&self) -> u32 {
+        match self.provenance {
+            VisibilityProvenance::OwnFile => self.symbol.selection_range.start.line,
+            _ => self.provenance.effective_line(),
+        }
+    }
 }
 
 /// Directed graph of resolved includes for one file.
@@ -328,7 +364,7 @@ impl MergedView {
                         }
                     };
 
-                    add_included_symbols(&table, &to_path, file, line, 1, &mut view);
+                    add_included_symbols(&table, &to_path, file, line, line, 1, &mut view);
                     view.sources.insert(to_path.clone(), child_source.clone());
                     view.tables.insert(to_path.clone(), table);
 
@@ -336,6 +372,7 @@ impl MergedView {
                         &to_path,
                         &child_source,
                         1,
+                        line,
                         workspace,
                         project,
                         cache_dir,
@@ -429,10 +466,10 @@ impl MergedView {
     }
 
     /// Earliest line at which `name` is visible from the current file.
-    /// Returns `0` for own-file symbols and the relevant `include_line` for
-    /// included symbols.
+    /// Returns the symbol's definition line for own-file symbols and the
+    /// earliest current-file `include` line for included symbols.
     pub fn visibility_line(&self, name: &str) -> Option<u32> {
-        self.find(name).map(|ms| ms.provenance.include_line())
+        self.find(name).map(|ms| ms.effective_line())
     }
 
     /// All merged symbols.
@@ -445,6 +482,7 @@ fn walk_includes(
     file: &Path,
     source: &str,
     depth: usize,
+    effective_line: u32,
     workspace: &Workspace,
     project: &VirtualProject,
     cache_dir: &Path,
@@ -513,12 +551,19 @@ fn walk_includes(
                     }
                 };
 
-                add_included_symbols(&table, &to_path, file, line, depth + 1, view);
+                add_included_symbols(&table, &to_path, file, effective_line, line, depth + 1, view);
                 view.sources.insert(to_path.clone(), child_source.clone());
                 view.tables.insert(to_path.clone(), table);
 
                 walk_includes(
-                    &to_path, &child_source, depth + 1, workspace, project, cache_dir, visited,
+                    &to_path,
+                    &child_source,
+                    depth + 1,
+                    effective_line,
+                    workspace,
+                    project,
+                    cache_dir,
+                    visited,
                     view,
                 );
             }
@@ -542,6 +587,7 @@ fn add_included_symbols(
     table: &SymbolTable,
     origin: &Path,
     introduced_at: &Path,
+    effective_line: u32,
     include_line: u32,
     depth: usize,
     view: &mut MergedView,
@@ -555,6 +601,7 @@ fn add_included_symbols(
                 origin: origin.to_path_buf(),
                 introduced_at: introduced_at.to_path_buf(),
                 include_line,
+                effective_line,
             }
         } else {
             VisibilityProvenance::TransitiveInclude {
@@ -562,6 +609,7 @@ fn add_included_symbols(
                 introduced_at: introduced_at.to_path_buf(),
                 include_line,
                 depth,
+                effective_line,
             }
         };
         view.symbols.push(MergedSymbol {

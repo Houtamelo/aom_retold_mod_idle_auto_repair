@@ -18,7 +18,7 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url}
 
 use crate::diagnostics::DiagnosticsByUri;
 use crate::engine_api::{EngineApi, EngineSignature};
-use crate::merged_view::{MergedView, VisibilityProvenance};
+use crate::merged_view::MergedView;
 use crate::parser;
 use crate::symbols::{Symbol, SymbolKind, SymbolTable, Visibility};
 use crate::workspace::{Workspace, VirtualProject as WorkspaceVirtualProject};
@@ -191,10 +191,7 @@ pub fn resolve_callee<'a>(
     if let Some(m) = merged {
         if let Some(ms) = m.find(name) {
             if is_callable_symbol(&ms.symbol)
-                && (ms.symbol.is_mutable
-                    || ms.provenance.include_line() < call_line
-                    || (matches!(ms.provenance, VisibilityProvenance::OwnFile)
-                        && ms.symbol.selection_range.start.line < call_line))
+                && (ms.symbol.is_mutable || ms.effective_line() < call_line)
             {
                 return Resolution::Workspace(&ms.symbol);
             }
@@ -338,12 +335,10 @@ fn build_merged_view_from_project(
 /// Effective line for ordering symbols in the merged translation unit.
 ///
 /// Own-file symbols keep their source position; included symbols are treated
-/// as pasted at the line of the `include` directive that introduced them.
+/// as pasted at the earliest current-file `include` directive that reaches
+/// them.
 fn effective_line(ms: &crate::merged_view::MergedSymbol) -> u32 {
-    match ms.provenance {
-        VisibilityProvenance::OwnFile => ms.symbol.selection_range.start.line,
-        _ => ms.provenance.include_line(),
-    }
+    ms.effective_line()
 }
 
 /// Detect `extern` collisions scoped to the current logical link unit.
@@ -794,10 +789,7 @@ fn forward_callable_merged(
         if ms.symbol.is_mutable {
             return true;
         }
-        let def_line = match ms.provenance {
-            VisibilityProvenance::OwnFile => ms.symbol.selection_range.start.line,
-            _ => ms.provenance.include_line(),
-        };
+        let def_line = ms.effective_line();
         if def_line < call_line {
             return true;
         }
@@ -952,7 +944,7 @@ mod tests {
     use tower_lsp::lsp_types::Url;
 
     use crate::engine_api::EngineApi;
-    use crate::merged_view::MergedView;
+    use crate::merged_view::{MergedView, VisibilityProvenance};
     use crate::workspace::{VirtualProject as WorkspaceVirtualProject, Workspace};
 
     fn p(name: &str) -> PathBuf {
