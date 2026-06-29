@@ -966,7 +966,7 @@ fn run_semantic_tests() -> bool {
             "float_to_int_loss",
             vec![("float_to_int_loss.xs", include_str!("../semantic_fixtures/float_to_int_loss.xs"))],
             vec!["float_to_int_loss.xs"],
-            vec!["expected argument 1 of type `int`"],
+            vec!["narrowing conversion"],
             Vec::<&str>::new(),
         ),
         (
