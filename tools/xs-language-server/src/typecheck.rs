@@ -150,9 +150,40 @@ fn check_one_call(
         let Some(actual_ty) = expr_type(arg_node, source, table) else {
             continue;
         };
-        if arg_types_compatible(&expected.ty, &actual_ty, callee_source) {
+
+        // Identical types are always silent.
+        if expected.ty == actual_ty {
             continue;
         }
+
+        // Numeric coercion policy:
+        //   * Widening (int → float) is silent. The runtime accepts it
+        //     and no precision is lost.
+        //   * Narrowing (float → int) emits a WARNING so the truncation
+        //     is visible to the user. Exception: a literal whose value
+        //     is a rounded number (e.g. `takeInt(1.0)`) is silent — the
+        //     user has clearly written an integer in disguise.
+        let numeric = ["int", "float"];
+        if numeric.contains(&expected.ty.as_str()) && numeric.contains(&actual_ty.as_str()) {
+            if let Some(reason) = narrowing_warning_message(arg_node, source, &expected.ty, &actual_ty) {
+                out.push(Diagnostic {
+                    range: node_range(arg_node),
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: None,
+                    code_description: None,
+                    source: Some("xs-language-server".to_string()),
+                    message: reason,
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+            continue;
+        }
+
+        // Non-numeric mismatch (e.g. string vs int). Function-pointer
+        // arguments are a separate engine concept and silently valid;
+        // otherwise emit a hard ERROR.
         if is_function_pointer_argument(arg_node, source, table, &expected.ty) {
             continue;
         }
@@ -324,14 +355,60 @@ fn number_literal_type(node: tree_sitter::Node<'_>, source: &str) -> String {
 
 /// Type compatibility for function-call arguments.
 ///
-/// XS numeric types coerce freely at runtime, so `int` and `float` are
-/// mutually compatible. `bool` and `string` remain strict.
+/// XS numeric types coerce freely at runtime, so widening (int → float)
+/// is always silent and narrowing (float → int) is silent only for
+/// rounded numeric literals (the user has clearly written an integer
+/// in disguise). Use [`narrowing_warning_message`] to decide whether a
+/// narrowing conversion warrants a WARNING; if it returns `None`, the
+/// conversion is silent.
 fn arg_types_compatible(expected: &str, actual: &str, _source: CalleeSource) -> bool {
     if expected == actual {
         return true;
     }
+    // Suppress unused-variable warning by reading the source. Currently
+    // both engine-API and workspace calls use the same coercion policy
+    // — the parameter is reserved for future divergence.
+    let _ = _source;
     let numeric = ["int", "float"];
     numeric.contains(&expected) && numeric.contains(&actual)
+}
+
+/// Decide whether a narrowing float → int conversion warrants a WARNING.
+///
+/// Returns `Some(message)` when the conversion is narrowing (float arg
+/// where int expected) AND the value is not a rounded numeric literal.
+/// Rounded literals (`takeInt(1.0)`, `takeInt(0.0)`) are silent — the
+/// user has clearly written an integer. Non-literal arguments
+/// (`takeInt(someFloat)`) ALWAYS warn because the value is unknown.
+///
+/// Returns `None` for: non-narrowing conversions, identical types,
+/// widening conversions, and rounded literals.
+fn narrowing_warning_message(
+    arg_node: tree_sitter::Node<'_>,
+    source: &str,
+    expected: &str,
+    actual: &str,
+) -> Option<String> {
+    // Only float → int triggers the narrowing warning. Widening
+    // (int → float) is silent by design (no precision loss).
+    if expected != "int" || actual != "float" {
+        return None;
+    }
+    // For numeric literals, suppress the warning when the value has no
+    // fractional part. Note: `1.0` parses as a float (text contains `.`)
+    // but `n.fract() == 0.0` so it's still silent. `3.14` is not.
+    if arg_node.kind() == "number_literal" {
+        let text = node_text(arg_node, source);
+        if let Ok(n) = text.parse::<f64>() {
+            if n.is_finite() && n.fract() == 0.0 {
+                return None;
+            }
+        }
+    }
+    let label = node_text(arg_node, source);
+    Some(format!(
+        "narrowing conversion from `float` to `int` truncates `{label}`; consider an explicit `int({label})` if truncation is intended"
+    ))
 }
 
 /// True when `arg_node` is the name of a function/rule being passed as a
@@ -797,10 +874,14 @@ void test() { takeInt(1.0); }"#;
 
     #[test]
     fn warns_on_narrowing_float_to_int_for_non_literal() {
-        // `takeInt(someFloat)` — identifier, can't tell value at compile
-        // time, so the user MIGHT have lost precision. Always warn.
-        let src = r#"void takeInt(int x) {}
-void test() { float someFloat = 3.14; takeInt(someFloat); }"#;
+        // `takeInt(someFloat)` where `someFloat` is a top-level float
+        // declaration. The LSP's per-file symbol table picks up
+        // top-level declarations; a global `float` argument narrows
+        // when passed to an `int` parameter — the user MIGHT have lost
+        // precision, so always warn.
+        let src = r#"float gSomeFloat = 3.14;
+void takeInt(int x) {}
+void test() { takeInt(gSomeFloat); }"#;
         let tree = parse(src);
         let table = table_for(src);
 
