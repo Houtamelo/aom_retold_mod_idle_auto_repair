@@ -15,18 +15,18 @@ class XsColorSettingsPageTest {
         val text = pluginXml.use { it.reader().readText() }
         assertTrue(
             "plugin.xml must register XsColorSettingsPage",
-            text.contains("""<colorSettingsPage implementation="com.aomr.xs.highlight.XsColorSettingsPage""" )
+            text.contains("""<colorSettingsPage implementation="com.aomr.xs.highlight.XsColorSettingsPage""")
         )
     }
 
     @Test
-    fun displayNameIsLowercaseXs() {
+    fun test_display_name_is_XS_uppercase() {
         val page = XsColorSettingsPage()
-        assertEquals("xs", page.displayName)
+        assertEquals("XS", page.displayName)
     }
 
     @Test
-    fun descriptorsCoverRequiredCategories() {
+    fun test_existing_six_categories_still_present() {
         val page = XsColorSettingsPage()
         val descriptors = page.attributeDescriptors
         assertTrue("Descriptors must not be empty", descriptors.isNotEmpty())
@@ -37,6 +37,25 @@ class XsColorSettingsPageTest {
         assertTrue("Number descriptor must be present", keys.contains(XsTextAttributesKeys.XS_NUMBER))
         assertTrue("Identifier descriptor must be present", keys.contains(XsTextAttributesKeys.XS_IDENTIFIER))
         assertTrue("Default descriptor must be present", keys.contains(XsTextAttributesKeys.XS_DEFAULT))
+    }
+
+    @Test
+    fun test_attribute_descriptors_contain_12_new_keys() {
+        val page = XsColorSettingsPage()
+        val descriptors = page.attributeDescriptors
+        val keys = descriptors.map { it.key }.toSet()
+        assertTrue("IDENTIFIER_UNDER_CARET descriptor must be present", keys.contains(XsTextAttributes.IDENTIFIER_UNDER_CARET))
+        assertTrue("MATCHED_BRACE descriptor must be present", keys.contains(XsTextAttributes.MATCHED_BRACE))
+        assertTrue("UNMATCHED_BRACE descriptor must be present", keys.contains(XsTextAttributes.UNMATCHED_BRACE))
+        assertTrue("UNKNOWN_SYMBOL descriptor must be present", keys.contains(XsTextAttributes.UNKNOWN_SYMBOL))
+        assertTrue("BRACES descriptor must be present", keys.contains(XsTextAttributes.BRACES))
+        assertTrue("BRACKETS descriptor must be present", keys.contains(XsTextAttributes.BRACKETS))
+        assertTrue("COMMA descriptor must be present", keys.contains(XsTextAttributes.COMMA))
+        assertTrue("DOT descriptor must be present", keys.contains(XsTextAttributes.DOT))
+        assertTrue("OPERATION_SIGN descriptor must be present", keys.contains(XsTextAttributes.OPERATION_SIGN))
+        assertTrue("OVERLOADED_OPERATOR descriptor must be present", keys.contains(XsTextAttributes.OVERLOADED_OPERATOR))
+        assertTrue("PARENTHESES descriptor must be present", keys.contains(XsTextAttributes.PARENTHESES))
+        assertTrue("SEMI_COLON descriptor must be present", keys.contains(XsTextAttributes.SEMI_COLON))
     }
 
     @Test

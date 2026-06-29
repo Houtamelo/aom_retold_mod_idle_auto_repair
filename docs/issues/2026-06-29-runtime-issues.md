@@ -5,7 +5,7 @@
 | Reporter      | user (manual smoke test in a real mod project)                     |
 | Date          | 2026-06-29                                                         |
 | Plugin tested | `0.2.1` (`dist/intellij-xs-plugin-0.2.1.zip`)                      |
-| Status        | Issue 1 **resolved** by `fix-plugin-goto-definition-ctrl-click-keybind`; Issues 2–4 still open |
+| Status        | Issue 1 **resolved** by `fix-plugin-goto-definition-ctrl-click-keybind`; Issue 2 **resolved** by `fix-lsp-false-positive-forward-decl`; Issue 3 **resolved** by `expand-color-scheme-categories`; Issue 4 still open |
 | Resolution    | Plugin `0.2.3` registers `XsGotoDeclarationHandler` forwarding Ctrl+Click / `Ctrl+B` to the XS LSP server |
 
 ## Context
@@ -183,9 +183,7 @@ symbols, not user-defined functions in includes.
 ## Issue 3 — Color scheme expansion (UX improvement)
 
 ### Status
-Open. Pure plugin-side change; no LSP server changes required (assuming
-the LSP already exposes the symbol-kind / scope-kind information needed
-for the new categories, or it can be added cheaply).
+**Resolved 2026-06-29** by `openspec/changes/archive/2026-06-29-expand-color-scheme-categories/`. The plugin now exposes the inherited Rider General / Language Defaults categories under **Settings → Editor → Color Scheme → XS** and the page label is uppercase **XS**. The semantic-token-driven categories (engine/modded/unmodded functions, variables, constants, types, classes, and built-in type as a dedicated semantic category) remain deferred to a future LSP-side change.
 
 ### Steps to reproduce
 1. Open Rider settings: **Editor → Color Scheme → xs**.

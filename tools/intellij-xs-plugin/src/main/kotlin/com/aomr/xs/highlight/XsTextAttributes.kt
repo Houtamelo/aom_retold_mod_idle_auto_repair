@@ -1,0 +1,56 @@
+package com.aomr.xs.highlight
+
+import com.intellij.openapi.editor.DefaultLanguageHighlighterColors
+import com.intellij.openapi.editor.colors.CodeInsightColors
+import com.intellij.openapi.editor.colors.EditorColors
+import com.intellij.openapi.editor.colors.TextAttributesKey
+import com.intellij.openapi.editor.colors.TextAttributesKey.createTextAttributesKey
+
+/**
+ * Inherited Rider / IntelliJ color categories exposed under **XS** color scheme page.
+ *
+ * Each key is prefixed with `XS_` and falls back to a platform-defined key so that
+ * the new categories adopt the active IDE scheme by default. Users can override
+ * them in **Settings → Editor → Color Scheme → XS**.
+ */
+object XsTextAttributes {
+
+    /** Identifier under caret; inherits the platform caret-line identifier highlight. */
+    val IDENTIFIER_UNDER_CARET = createTextAttributesKey("XS_IDENTIFIER_UNDER_CARET", EditorColors.IDENTIFIER_UNDER_CARET_ATTRIBUTES)
+
+    /** Matched brace indicator; inherits platform matched-brace background. */
+    val MATCHED_BRACE = createTextAttributesKey("XS_MATCHED_BRACE", CodeInsightColors.MATCHED_BRACE_ATTRIBUTES)
+
+    /** Unmatched brace indicator; inherits platform unmatched-brace error background. */
+    val UNMATCHED_BRACE = createTextAttributesKey("XS_UNMATCHED_BRACE", CodeInsightColors.UNMATCHED_BRACE_ATTRIBUTES)
+
+    /** Unknown / unresolved symbol indicator; inherits platform wrong-reference highlighting. */
+    val UNKNOWN_SYMBOL = createTextAttributesKey("XS_UNKNOWN_SYMBOL", CodeInsightColors.WRONG_REFERENCES_ATTRIBUTES)
+
+    /** Curly braces `{` and `}`; inherits platform **Braces and Operators → Braces**. */
+    val BRACES = createTextAttributesKey("XS_BRACES", DefaultLanguageHighlighterColors.BRACES)
+
+    /** Square brackets `[` and `]`; inherits platform **Braces and Operators → Brackets**. */
+    val BRACKETS = createTextAttributesKey("XS_BRACKETS", DefaultLanguageHighlighterColors.BRACKETS)
+
+    /** Comma separator; inherits platform **Braces and Operators → Comma**. */
+    val COMMA = createTextAttributesKey("XS_COMMA", DefaultLanguageHighlighterColors.COMMA)
+
+    /** Dot / member-access `.`; inherits platform **Braces and Operators → Dot**. */
+    val DOT = createTextAttributesKey("XS_DOT", DefaultLanguageHighlighterColors.DOT)
+
+    /** Operation sign (e.g. `=`, `+`, `-`); inherits platform **Braces and Operators → Operation sign**. */
+    val OPERATION_SIGN = createTextAttributesKey("XS_OPERATION_SIGN", DefaultLanguageHighlighterColors.OPERATION_SIGN)
+
+    /**
+     * Overloaded operator; no dedicated platform key exists, so it inherits the same
+     * default as [OPERATION_SIGN] while appearing as a separate configurable category.
+     */
+    val OVERLOADED_OPERATOR = createTextAttributesKey("XS_OVERLOADED_OPERATOR", DefaultLanguageHighlighterColors.OPERATION_SIGN)
+
+    /** Parentheses `(` and `)`; inherits platform **Braces and Operators → Parentheses**. */
+    val PARENTHESES = createTextAttributesKey("XS_PARENTHESES", DefaultLanguageHighlighterColors.PARENTHESES)
+
+    /** Semicolon `;`; inherits platform **Braces and Operators → Semi-colon**. */
+    val SEMI_COLON = createTextAttributesKey("XS_SEMI_COLON", DefaultLanguageHighlighterColors.SEMICOLON)
+}
