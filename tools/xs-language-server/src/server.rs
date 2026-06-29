@@ -8,7 +8,10 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info, warn};
 
-use crate::{completion, diagnostics, engine_api, merged_view, parser, references, semantic, symbols, word, workspace};
+use crate::{
+    completion, diagnostics, engine_api, merged_view, parser, references, semantic, symbols, word,
+    workspace,
+};
 
 /// Holds the parsed-but-not-yet-processed text of every document the client
 /// has opened. Populated by `did_open` / `did_change`, cleared by `did_close`.
@@ -39,13 +42,95 @@ impl DocumentStore {
     }
 }
 
+/// Lock-pattern helpers for `did_close`. Kept in a private inner module and
+/// re-exported as `#[doc(hidden)]` public items only so the integration tests
+/// can exercise the lock-discipline invariant.
+mod lock_pattern {
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::ops::DerefMut;
+    use std::sync::Arc;
+
+    use tokio::sync::Mutex;
+    use tower_lsp::lsp_types::Url;
+
+    use super::DocumentStore;
+    use crate::symbols;
+
+    /// Internal async-mutex abstraction so `did_close_lock_pattern` can be
+    /// exercised in tests with an instrumented mutex.
+    pub trait AsyncMutex<T: ?Sized + Send>: Send + Sync {
+        type Guard<'a>: DerefMut<Target = T> + Send + 'a
+        where
+            Self: 'a;
+        fn lock(&self) -> impl Future<Output = Self::Guard<'_>> + Send;
+    }
+
+    impl<T: ?Sized + Send> AsyncMutex<T> for Mutex<T> {
+        type Guard<'a>
+            = tokio::sync::MutexGuard<'a, T>
+        where
+            T: 'a;
+        fn lock(&self) -> impl Future<Output = Self::Guard<'_>> + Send {
+            Mutex::lock(self)
+        }
+    }
+
+    impl<T: ?Sized + Send> AsyncMutex<T> for Arc<Mutex<T>> {
+        type Guard<'a>
+            = tokio::sync::MutexGuard<'a, T>
+        where
+            T: 'a;
+        fn lock(&self) -> impl Future<Output = Self::Guard<'_>> + Send {
+            Mutex::lock(self)
+        }
+    }
+
+    /// Lock-acquisition sequence for `textDocument/didClose`. Each state-bearing
+    /// mutex is held in its own scoped block so that no more than one guard is
+    /// alive at any await point.
+    pub async fn did_close_lock_pattern<D, S, Clear>(
+        documents: &D,
+        symbol_tables: &S,
+        clear_cache: Clear,
+        uri: &Url,
+    ) where
+        D: AsyncMutex<DocumentStore>,
+        S: AsyncMutex<HashMap<Url, symbols::SymbolTable>>,
+        Clear: Future<Output = ()> + Send,
+    {
+        {
+            let mut docs = documents.lock().await;
+            docs.close(uri);
+        }
+        {
+            let mut tables = symbol_tables.lock().await;
+            tables.remove(uri);
+        }
+        clear_cache.await;
+    }
+}
+
+/// Internal helpers for `did_close`. Re-exported as `#[doc(hidden)]` public
+/// items only so the integration tests can exercise the lock-discipline
+/// invariant; not part of the stable LSP API.
+#[doc(hidden)]
+pub use self::lock_pattern::{AsyncMutex, did_close_lock_pattern};
+
+/// LSP server state and request handlers.
+///
+/// All handlers that acquire more than one of the `Arc<Mutex<...>>` fields
+/// MUST scope each `lock().await` in its own `{ ... }` block so the guard is
+/// dropped before the next `.await`. No handler should hold two mutex guards
+/// at the same time.
 pub struct XsLanguageServer {
     pub client: Client,
     pub documents: Arc<Mutex<DocumentStore>>,
     /// Per-file symbol tables, rebuilt on every `did_open` / `did_change`.
     pub symbol_tables: Arc<Mutex<HashMap<Url, symbols::SymbolTable>>>,
     /// Per-file merged include-paste views, keyed by content-hash.
-    pub merged_views: Arc<Mutex<HashMap<Url, (merged_view::MergedViewCacheKey, merged_view::MergedView)>>>,
+    pub merged_views:
+        Arc<Mutex<HashMap<Url, (merged_view::MergedViewCacheKey, merged_view::MergedView)>>>,
     pub engine: engine_api::SharedEngineApi,
     pub game_path: PathBuf,
     /// Registered workspace folders, each representing one mod.
@@ -57,11 +142,7 @@ pub struct XsLanguageServer {
 }
 
 impl XsLanguageServer {
-    pub fn new(
-        client: Client,
-        engine: engine_api::SharedEngineApi,
-        game_path: PathBuf,
-    ) -> Self {
+    pub fn new(client: Client, engine: engine_api::SharedEngineApi, game_path: PathBuf) -> Self {
         let workspace = workspace::Workspace::new(game_path.clone());
         Self {
             client,
@@ -227,10 +308,7 @@ impl LanguageServer for XsLanguageServer {
                     // We don't need resolve_provider; detail is in the item.
                     resolve_provider: Some(false),
                     // Trigger on every identifier character and dot.
-                    trigger_characters: Some(vec![
-                        ".".to_string(),
-                        "_".to_string(),
-                    ]),
+                    trigger_characters: Some(vec![".".to_string(), "_".to_string()]),
                     ..Default::default()
                 }),
                 // Week 2: hover returns the syscall signature + help as
@@ -309,8 +387,7 @@ impl LanguageServer for XsLanguageServer {
                     id: "xs-game-folder-watcher".to_string(),
                     method: "workspace/didChangeWatchedFiles".to_string(),
                     register_options: Some(
-                        serde_json::to_value(options)
-                            .unwrap_or(serde_json::Value::Null),
+                        serde_json::to_value(options).unwrap_or(serde_json::Value::Null),
                     ),
                 };
                 if let Err(e) = client.register_capability(vec![registration]).await {
@@ -356,9 +433,7 @@ impl LanguageServer for XsLanguageServer {
             // are registered, what the file path resolved to, and what
             // prefix match would have succeeded.
             let ws = self.workspace.lock().await;
-            let registered: Vec<String> = ws.mods().iter()
-                .map(|m| m.mod_uri.to_string())
-                .collect();
+            let registered: Vec<String> = ws.mods().iter().map(|m| m.mod_uri.to_string()).collect();
             let file_path = uri.to_file_path().ok();
             warn_unowned_file(
                 &self.client,
@@ -371,7 +446,10 @@ impl LanguageServer for XsLanguageServer {
             info!(
                 "did_open: {} owned by mod_uri={}",
                 uri,
-                owning_mod.as_ref().map(|m| m.mod_uri.as_str()).unwrap_or("?")
+                owning_mod
+                    .as_ref()
+                    .map(|m| m.mod_uri.as_str())
+                    .unwrap_or("?")
             );
         }
 
@@ -406,11 +484,13 @@ impl LanguageServer for XsLanguageServer {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         debug!("did_close: {}", uri);
-        let mut docs = self.documents.lock().await;
-        docs.close(&uri);
-        let mut tables = self.symbol_tables.lock().await;
-        tables.remove(&uri);
-        self.clear_merged_view_cache(&uri).await;
+        did_close_lock_pattern(
+            &self.documents,
+            &self.symbol_tables,
+            self.clear_merged_view_cache(&uri),
+            &uri,
+        )
+        .await;
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
@@ -424,7 +504,10 @@ impl LanguageServer for XsLanguageServer {
         {
             let mut ws = self.workspace.lock().await;
             for folder in &params.event.added {
-                info!("  + registering mod folder: uri={} name={}", folder.uri, folder.name);
+                info!(
+                    "  + registering mod folder: uri={} name={}",
+                    folder.uri, folder.name
+                );
                 if let Err(e) = ws.register_mod(folder.uri.clone()) {
                     warn!("failed to add workspace folder {}: {}", folder.uri, e);
                 }
@@ -433,7 +516,9 @@ impl LanguageServer for XsLanguageServer {
                 info!("  - unregistering mod folder: uri={}", folder.uri);
                 ws.unregister_mod(&folder.uri);
             }
-            let summary: Vec<String> = ws.mods().iter()
+            let summary: Vec<String> = ws
+                .mods()
+                .iter()
                 .map(|m| format!("{} (overlay={})", m.mod_uri, m.overlay_path.display()))
                 .collect();
             info!("registered mods after update ({} total):", summary.len());
@@ -446,7 +531,10 @@ impl LanguageServer for XsLanguageServer {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        info!("did_change_watched_files: {} change(s)", params.changes.len());
+        info!(
+            "did_change_watched_files: {} change(s)",
+            params.changes.len()
+        );
         let mut changed_paths = Vec::new();
         for change in &params.changes {
             debug!("watched file change: {:?} {:?}", change.typ, change.uri);
@@ -491,13 +579,12 @@ impl LanguageServer for XsLanguageServer {
             docs.get(uri).unwrap_or("").to_string()
         };
         let merged = self.get_or_build_merged_view(uri, &text).await;
-        let items = completion::complete(
-            &self.engine,
-            merged.as_ref(),
-            &text,
-            &params,
+        let items = completion::complete(&self.engine, merged.as_ref(), &text, &params);
+        debug!(
+            "completion: {} item(s) at {:?}",
+            items.len(),
+            params.text_document_position.position
         );
-        debug!("completion: {} item(s) at {:?}", items.len(), params.text_document_position.position);
         Ok(Some(CompletionResponse::Array(items)))
     }
 
@@ -618,11 +705,7 @@ impl LanguageServer for XsLanguageServer {
             return Ok(None);
         };
         let items: Vec<DocumentSymbol> = table.symbols.iter().map(symbol_to_lsp).collect();
-        debug!(
-            "document_symbol: {} symbol(s) for {}",
-            items.len(),
-            uri
-        );
+        debug!("document_symbol: {} symbol(s) for {}", items.len(), uri);
         Ok(Some(DocumentSymbolResponse::Nested(items)))
     }
 
@@ -696,8 +779,8 @@ impl LanguageServer for XsLanguageServer {
         let mut locs = Vec::new();
         let mut seen: HashSet<(String, u32, u32, u32, u32)> = HashSet::new();
 
-        let is_engine_api = self.engine.find_syscall(&ident).is_some()
-            || self.engine.find_aiplan(&ident).is_some();
+        let is_engine_api =
+            self.engine.find_syscall(&ident).is_some() || self.engine.find_aiplan(&ident).is_some();
         let has_workspace_def = is_engine_api
             && (merged.as_ref().and_then(|mv| mv.find(&ident)).is_some()
                 || self
@@ -714,7 +797,9 @@ impl LanguageServer for XsLanguageServer {
             let (project, ws_locked) = {
                 let ws = self.workspace.lock().await;
                 let entry = ws.lookup_mod(uri);
-                let project = entry.map(|e| ws.build_virtual_project(e)).unwrap_or_default();
+                let project = entry
+                    .map(|e| ws.build_virtual_project(e))
+                    .unwrap_or_default();
                 (project, ws.clone())
             };
             let files = project.visible_files(&ws_locked);
@@ -730,10 +815,16 @@ impl LanguageServer for XsLanguageServer {
                     break;
                 }
                 let file_start = std::time::Instant::now();
-                let Ok(file_text) = tokio::fs::read_to_string(&path).await else { continue };
-                let Some(tree) = parser::parse(&file_text) else { continue };
+                let Ok(file_text) = tokio::fs::read_to_string(&path).await else {
+                    continue;
+                };
+                let Some(tree) = parser::parse(&file_text) else {
+                    continue;
+                };
                 let raw = references::find_identifier_uses(&tree, &file_text, &ident);
-                let Ok(file_uri) = Url::from_file_path(&path) else { continue };
+                let Ok(file_uri) = Url::from_file_path(&path) else {
+                    continue;
+                };
                 for range in raw {
                     if seen.insert((
                         file_uri.to_string(),
@@ -767,7 +858,9 @@ impl LanguageServer for XsLanguageServer {
             // Walk every file in the include-paste scope.
             for path in mv.files() {
                 let source = mv.source(path).unwrap_or("");
-                let Some(tree) = parser::parse(source) else { continue };
+                let Some(tree) = parser::parse(source) else {
+                    continue;
+                };
                 let table = if current_file.as_deref() == Some(path) {
                     Some(mv.own_table())
                 } else {
@@ -783,7 +876,9 @@ impl LanguageServer for XsLanguageServer {
                     ),
                     None => raw,
                 };
-                let Ok(file_uri) = Url::from_file_path(path) else { continue };
+                let Ok(file_uri) = Url::from_file_path(path) else {
+                    continue;
+                };
                 for range in ranges {
                     if seen.insert((
                         file_uri.to_string(),
@@ -857,9 +952,7 @@ impl LanguageServer for XsLanguageServer {
         };
 
         // Engine API symbols can't be renamed — no source to rewrite.
-        if self.engine.find_syscall(&ident).is_some()
-            || self.engine.find_aiplan(&ident).is_some()
-        {
+        if self.engine.find_syscall(&ident).is_some() || self.engine.find_aiplan(&ident).is_some() {
             debug!("rename: `{ident}` is engine API; refusing");
             return Ok(None);
         }
@@ -922,9 +1015,7 @@ impl LanguageServer for XsLanguageServer {
         };
 
         // Engine API symbols can't be renamed.
-        if self.engine.find_syscall(&ident).is_some()
-            || self.engine.find_aiplan(&ident).is_some()
-        {
+        if self.engine.find_syscall(&ident).is_some() || self.engine.find_aiplan(&ident).is_some() {
             debug!("prepare_rename: `{ident}` is engine API; refusing");
             return Ok(None);
         }
@@ -1000,22 +1091,30 @@ impl XsLanguageServer {
             }
             None => {
                 let mut map = std::collections::HashMap::new();
-                map.insert(uri.clone(), vec![Diagnostic {
-                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("xs-language-server".to_string()),
-                    message: "internal error: failed to install XS language".to_string(),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                }]);
+                map.insert(
+                    uri.clone(),
+                    vec![Diagnostic {
+                        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        code: None,
+                        code_description: None,
+                        source: Some("xs-language-server".to_string()),
+                        message: "internal error: failed to install XS language".to_string(),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    }],
+                );
                 map
             }
         };
         let total: usize = diagnostics_by_uri.values().map(|v| v.len()).sum();
-        debug!("publish_diagnostics: {} ({} issue(s) across {} URI(s))", uri, total, diagnostics_by_uri.len());
+        debug!(
+            "publish_diagnostics: {} ({} issue(s) across {} URI(s))",
+            uri,
+            total,
+            diagnostics_by_uri.len()
+        );
         for (diag_uri, diags) in diagnostics_by_uri {
             self.client
                 .publish_diagnostics(diag_uri, diags, Some(version))
@@ -1037,9 +1136,7 @@ impl XsLanguageServer {
         };
         let cache_dir = crate::cache::state_cache_dir();
         Some(semantic::VirtualProject::load_from_workspace(
-            &ws_clone,
-            &project,
-            &cache_dir,
+            &ws_clone, &project, &cache_dir,
         ))
     }
 }
@@ -1103,7 +1200,10 @@ fn format_hover_syscall(s: &engine_api::Syscall) -> String {
 
 /// Format an AI-plan constant as a Markdown hover card.
 fn format_hover_aiplan(c: &engine_api::AiplanConstant) -> String {
-    let signature = format!("const {} {} = {}", c.variable_type, c.name, c.variable_value);
+    let signature = format!(
+        "const {} {} = {}",
+        c.variable_type, c.name, c.variable_value
+    );
     let md = format!("```xs\n{}\n```\n", signature);
     md
 }
