@@ -1110,6 +1110,52 @@ mod tests {
             .any(|d| d.message.contains("extern collision") && d.message.contains("gFoo")));
     }
 
+    /// When the current file has no `include` directives, the merged view
+    /// contains only that file. `check_extern_collisions` used to scope
+    /// symbol gathering to `merged.files()`, missing extern declarations
+    /// declared in sibling files of the same mod. Extern collisions are
+    /// inherently cross-file, so the symbol-gathering scope must also be.
+    #[test]
+    fn extern_collision_fires_when_current_file_has_no_includes() {
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                ("ai/a.xs", "extern int gFoo = 5;\n"),
+                ("ai/b.xs", "int gFoo = 5;\n"),
+            ],
+            "ai/b.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
+        assert!(
+            total_count(&diags) >= 1,
+            "expected at least one extern collision diagnostic; a.xs declares extern gFoo, b.xs declares non-extern gFoo, neither includes the other — the LSP must see this"
+        );
+        assert!(
+            diags.values().flatten().any(|d| d.message.contains("extern collision")
+                && d.message.contains("gFoo")),
+            "diagnostic message should identify the colliding symbol"
+        );
+    }
+
+    /// Same include chain → extern is resolved via include, NOT a collision.
+    /// Guards against an over-broad fix that flags any cross-file declaration.
+    #[test]
+    fn extern_collision_skipped_when_in_same_include_chain() {
+        let (_tmp, prj, merged, current) = merged_fixture(
+            &[
+                // a includes b; a declares extern; b defines non-extern.
+                ("ai/a.xs", "extern int gFoo = 5;\n"),
+                ("ai/b.xs", "int gFoo = 5;\ninclude \"a.xs\";\n"),
+            ],
+            "ai/a.xs",
+        );
+        let diags = check_extern_collisions(&prj, &current, Some(&merged));
+        assert!(
+            diags.is_empty(),
+            "extern + definition linked by include should NOT collide; got: {:?}",
+            diags
+        );
+    }
+
     #[test]
     fn duplicate_extern_between_files_is_collision() {
         let (_tmp, prj, merged, current) = merged_fixture(
