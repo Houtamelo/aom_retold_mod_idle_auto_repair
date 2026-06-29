@@ -22,8 +22,7 @@ import com.intellij.openapi.vfs.LocalFileSystem
  * 2. If the game folder is empty, shows a non-blocking notification that
  *    opens the XS Language Server settings page.
  * 3. If the mod list is empty, runs [XsModAutoDetector] and persists results.
- * 4. Warns when auto-detection finds no mod folders.
- * 5. Starts the LSP server and sends the workspace folder list.
+ * 4. Starts the LSP server and sends the workspace folder list.
  */
 class XsStartupActivity : StartupActivity.DumbAware {
 
@@ -40,9 +39,7 @@ class XsStartupActivity : StartupActivity.DumbAware {
             val projectRoot = project.basePath?.let { LocalFileSystem.getInstance().findFileByPath(it) }
             if (projectRoot != null) {
                 val detected = XsModAutoDetector.scan(projectRoot)
-                if (detected.isEmpty()) {
-                    notifyNoModsDetected(project)
-                } else {
+                if (detected.isNotEmpty()) {
                     projectSettings.setModPaths(detected)
                     // The [XsSettings] listener in [XsLspServerManager] will push
                     // the detected folders to a running server. If the manager
@@ -50,8 +47,6 @@ class XsStartupActivity : StartupActivity.DumbAware {
                     // will pick up the persisted mod list when the first .xs file
                     // is opened.
                 }
-            } else {
-                notifyNoModsDetected(project)
             }
         }
 
@@ -64,15 +59,6 @@ class XsStartupActivity : StartupActivity.DumbAware {
             project,
             "Game folder not configured",
             "Open Settings → Languages & Frameworks → XS Language Server to set the Age of Mythology: Retold install root."
-        ) ?: return
-        notification.notify(project)
-    }
-
-    private fun notifyNoModsDetected(project: Project) {
-        val notification = createNotification(
-            project,
-            "No mod folders detected",
-            "No game/ directories were found in this project. Add mod paths manually in Settings → XS Language Server → Mods."
         ) ?: return
         notification.notify(project)
     }
