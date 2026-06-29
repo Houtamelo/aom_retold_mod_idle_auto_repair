@@ -114,7 +114,7 @@ The plugin's `build.gradle.kts:12` picks up the version via `providers.gradlePro
 
 1. Edit Rust sources under `tools/xs-language-server/src/`
 2. `cargo build` to build
-3. `cargo test` for unit tests (203 tests as of 2026-06-29; +5 from `tests/r5_test_honesty_repro.rs` covering R5-F-01/02/03)
+3. `cargo test` for unit tests (209 tests as of 2026-06-29; +5 from `tests/r5_test_honesty_repro.rs` covering R5-F-01/02/03, +6 from `tests/symbols_cleanup_repro.rs` covering R1-F-01/03)
 4. `cargo run --bin lsp_roundtrip_test` for the end-to-end LSP message sequence
 5. **Game folder integration test** (optional, requires the game installed):
    ```bash
