@@ -738,9 +738,11 @@ void test() { takeFloat(5); }"#;
     }
 
     #[test]
-    fn allows_float_to_int_coercion_for_user_function() {
-        // The engine coerces numeric arguments at runtime, so passing a float
-        // literal where an int parameter is expected is accepted.
+    fn warns_on_narrowing_float_to_int_for_unrounded_literal() {
+        // `takeInt(3.14)` — the literal has a fractional part. The engine
+        // truncates silently, which is a footgun for users who meant a
+        // round number. Emit a WARNING (not ERROR, since the runtime
+        // accepts it) so the truncation is visible.
         let src = r#"void takeInt(int x) {}
 void test() { takeInt(3.14); }"#;
         let tree = parse(src);
@@ -752,8 +754,67 @@ void test() { takeInt(3.14); }"#;
 
         let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
         assert!(
+            diags.iter().any(|d| matches!(
+                d.severity,
+                Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
+            ) && d.message.contains("narrowing")),
+            "expected a narrowing WARNING for `takeInt(3.14)`; got: {:?}",
+            messages(&diags)
+        );
+        // Should be a WARNING, not an ERROR — narrowing is allowed at
+        // runtime, the warning is advisory.
+        assert!(
+            diags.iter().all(|d| !matches!(
+                d.severity,
+                Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)
+            ) || !d.message.contains("argument")),
+            "narrowing float->int should be WARNING severity, not ERROR; got: {:?}",
+            messages(&diags)
+        );
+    }
+
+    #[test]
+    fn silent_for_rounded_float_literal() {
+        // `takeInt(1.0)` — the user clearly meant the integer 1 and wrote
+        // it in float form (common idiomatic — e.g. `divideCount / 2.0`).
+        // No fractional part, no truncation, no warning.
+        let src = r#"void takeInt(int x) {}
+void test() { takeInt(1.0); }"#;
+        let tree = parse(src);
+        let table = table_for(src);
+
+        let mut files = std::collections::HashMap::new();
+        files.insert(std::path::PathBuf::from("test.xs"), src.to_string());
+        let project = crate::semantic::VirtualProject::from_files(files);
+
+        let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
+        assert!(
             diags.is_empty(),
-            "float -> int coercion should be allowed, got: {:?}",
+            "rounded float literal `1.0` should not warn; got: {:?}",
+            messages(&diags)
+        );
+    }
+
+    #[test]
+    fn warns_on_narrowing_float_to_int_for_non_literal() {
+        // `takeInt(someFloat)` — identifier, can't tell value at compile
+        // time, so the user MIGHT have lost precision. Always warn.
+        let src = r#"void takeInt(int x) {}
+void test() { float someFloat = 3.14; takeInt(someFloat); }"#;
+        let tree = parse(src);
+        let table = table_for(src);
+
+        let mut files = std::collections::HashMap::new();
+        files.insert(std::path::PathBuf::from("test.xs"), src.to_string());
+        let project = crate::semantic::VirtualProject::from_files(files);
+
+        let diags = check_calls(&tree, src, &engine(), &table, Some(&project));
+        assert!(
+            diags.iter().any(|d| matches!(
+                d.severity,
+                Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
+            ) && d.message.contains("narrowing")),
+            "identifier-typed narrowing should ALWAYS warn; got: {:?}",
             messages(&diags)
         );
     }
