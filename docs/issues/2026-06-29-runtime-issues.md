@@ -5,7 +5,8 @@
 | Reporter      | user (manual smoke test in a real mod project)                     |
 | Date          | 2026-06-29                                                         |
 | Plugin tested | `0.2.1` (`dist/intellij-xs-plugin-0.2.1.zip`)                      |
-| Status        | All four issues **open** — no investigation or fix attempted yet   |
+| Status        | Issue 1 **resolved** by `fix-plugin-goto-definition-ctrl-click-keybind`; Issues 2–4 still open |
+| Resolution    | Plugin `0.2.3` registers `XsGotoDeclarationHandler` forwarding Ctrl+Click / `Ctrl+B` to the XS LSP server |
 
 ## Context
 
@@ -40,8 +41,7 @@ builds is installed; they reproduce on either.
 ## Issue 1 — Go-to-definition only works via right-click menu
 
 ### Status
-Open. Affects all four goto-definition entry points except the right-click
-context menu.
+**Resolved 2026-06-29** by `openspec/changes/archive/2026-06-29-fix-plugin-goto-definition-ctrl-click-keybind/`. The plugin now registers a `GotoDeclarationHandler` (`com.aomr.xs.navigation.XsGotoDeclarationHandler`) that forwards Ctrl+Click and the go-to-definition keybind (`Ctrl+B` / `⌘B`) to the active XS LSP server via `textDocument/definition`. Right-click and hover paths remain unchanged. See the change directory for the spec, design, and verify report.
 
 ### Steps to reproduce
 1. Open any `.xs` file in Rider with the plugin installed.

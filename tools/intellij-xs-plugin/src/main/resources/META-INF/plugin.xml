@@ -18,6 +18,15 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <platform.lsp.serverSupportProvider implementation="com.aomr.xs.lsp.XsLspSupportProvider"/>
+
+        <!-- Fallback for Ctrl+Click / go-to-definition keybind.
+             order="last" makes this handler run after platform handlers, so
+             it only contributes targets when the default LSP wiring does not. -->
+        <gotoDeclarationHandler
+            id="com.aomr.xs.gotoDeclarationHandler"
+            implementation="com.aomr.xs.navigation.XsGotoDeclarationHandler"
+            order="last"/>
+
         <fileTypeFactory implementation="com.aomr.xs.XsFileTypeFactory"/>
         <textmate.bundleProvider implementation="com.aomr.xs.textmate.XsTextMateBundleProvider"/>
         <lang.ast.factory language="xs" implementationClass="com.aomr.xs.psi.XsASTFactory"/>

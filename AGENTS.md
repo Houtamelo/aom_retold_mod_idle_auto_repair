@@ -110,6 +110,10 @@ The `copyLspServerToResources` Gradle task always picks up whatever LSP release 
 
 The plugin's `build.gradle.kts:12` picks up the version via `providers.gradleProperty("pluginVersion").get()`, so changing `gradle.properties` is enough — no other file needs editing.
 
+#### Plugin test fixture gotcha
+
+`BasePlatformTestCase` tests for `.xs` files should identify buffers by **file extension** (`virtualFile.extension == "xs"`) rather than `PsiElement.language`. In the headless fixture used by `./gradlew :test`, `configureByText("a.xs", ...)` produces PSI leaves whose `language` is reported as the platform `TEXT` language, even though the file parses through the XS `ParserDefinition`.
+
 ### For `tools/xs-language-server/`
 
 1. Edit Rust sources under `tools/xs-language-server/src/`
