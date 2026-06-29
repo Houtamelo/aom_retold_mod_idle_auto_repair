@@ -10,16 +10,149 @@
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tower_lsp::lsp_types::Url;
 
+mod wire_helpers {
+    use serde_json::Value;
+    use std::io::Read;
+
+    /// A parsed JSON-RPC LSP message on the wire.
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    pub enum LspMessage {
+        Request {
+            id: i64,
+            method: String,
+            params: Value,
+        },
+        Response {
+            id: i64,
+            result_or_error: Result<Value, Value>,
+        },
+        Notification {
+            method: String,
+            params: Value,
+        },
+    }
+
+    /// Read one Content-Length-framed JSON-RPC body from `reader`.
+    ///
+    /// Reads byte-by-byte so that callers can safely parse multiple messages
+    /// from a stream without over-buffering past frame boundaries.
+    pub fn read_framed_json_message<R: Read>(reader: &mut R) -> std::io::Result<Value> {
+        let mut byte = [0u8; 1];
+        let mut accumulated: Vec<u8> = Vec::new();
+
+        let header_end = loop {
+            let n = reader.read(&mut byte)?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "EOF before headers complete",
+                ));
+            }
+            accumulated.push(byte[0]);
+            if accumulated.len() >= 4 && &accumulated[accumulated.len() - 4..] == b"\r\n\r\n" {
+                break accumulated.len();
+            }
+        };
+
+        let header_str = std::str::from_utf8(&accumulated[..header_end - 4])
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let content_length: usize = header_str
+            .lines()
+            .find_map(|l| l.strip_prefix("Content-Length: "))
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing Content-Length")
+            })?;
+
+        let mut body = accumulated[header_end..].to_vec();
+        while body.len() < content_length {
+            let n = reader.read(&mut byte)?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "EOF in body",
+                ));
+            }
+            body.push(byte[0]);
+        }
+        body.truncate(content_length);
+
+        serde_json::from_slice(&body)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    /// Parse every complete JSON-RPC frame in `bytes` into typed messages.
+    ///
+    /// Invariant: input is a (possibly interleaved) sequence of
+    /// `Content-Length: N\r\n\r\n<N bytes>` frames. Malformed frames and stray
+    /// bytes between frames are skipped; one `LspMessage` is returned for each
+    /// successfully-parsed JSON body. This keeps the roundtrip harness lenient
+    /// toward transport noise.
+    pub fn parse_lsp_messages(bytes: &[u8]) -> Vec<LspMessage> {
+        let mut cursor = std::io::Cursor::new(bytes);
+        let mut out = Vec::new();
+        while let Ok(value) = read_framed_json_message(&mut cursor) {
+            if let Some(msg) = classify_message(value) {
+                out.push(msg);
+            }
+        }
+        out
+    }
+
+    fn classify_message(value: Value) -> Option<LspMessage> {
+        let id = value.get("id").and_then(|v| v.as_i64());
+        let method = value
+            .get("method")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let params = value.get("params").cloned().unwrap_or(Value::Null);
+        match (id, method) {
+            (Some(id), Some(method)) => Some(LspMessage::Request { id, method, params }),
+            (Some(id), None) => {
+                let result_or_error = if let Some(result) = value.get("result") {
+                    Ok(result.clone())
+                } else if let Some(error) = value.get("error") {
+                    Err(error.clone())
+                } else {
+                    Ok(Value::Null)
+                };
+                Some(LspMessage::Response {
+                    id,
+                    result_or_error,
+                })
+            }
+            (None, Some(method)) => Some(LspMessage::Notification { method, params }),
+            (None, None) => None,
+        }
+    }
+
+    pub fn find_response(messages: &[LspMessage], id: i64) -> Option<&LspMessage> {
+        messages
+            .iter()
+            .find(|m| matches!(m, LspMessage::Response { id: rid, .. } if *rid == id))
+    }
+
+    pub fn find_notifications<'a>(
+        messages: &'a [LspMessage],
+        method: &'a str,
+    ) -> impl Iterator<Item = &'a LspMessage> + 'a {
+        messages.iter().filter(
+            move |m| matches!(m, LspMessage::Notification { method: mthd, .. } if mthd == method),
+        )
+    }
+}
+
 // Reference LSP messages. Kept as constants so the framing and the body
 // can never drift apart at the test site.
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"capabilities":{},"trace":"off","rootUri":null,"workspaceFolders":null}}"#;
-const INITIALIZED: &str =
-    r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+const INITIALIZED: &str = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
 const DID_OPEN: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/test.xs","languageId":"xs","version":1,"text":"rule test\nminInterval 5\nactive\n{\n   aiEcho(\"hello\");\n}"}}}"#;
 const DID_CHANGE: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/test.xs","version":2},"contentChanges":[{"text":"rule test2\nactive\n{\n   aiEcho(\"changed\");\n}"}]}}"#;
 const DID_OPEN_BAD: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/bad.xs","languageId":"xs","version":1,"text":"rule brokenRule\nminInterval 5\nactive\n{\n   int x = ;\n   aiEcho(\"hello\n}\n\nvoid unclosed(int a\n{\n}\n"}}}"#;
@@ -82,54 +215,7 @@ fn frame(body: &str) -> String {
 }
 
 fn read_framed_message<R: Read>(reader: &mut R) -> std::io::Result<serde_json::Value> {
-    // Read one byte at a time so we don't advance the reader past data we
-    // haven't parsed yet. (With Cursor, `read(&mut [4096])` consumes up to
-    // 4096 bytes per call even if we only use a handful, which breaks
-    // multi-message parsing.)
-    let mut byte = [0u8; 1];
-    let mut accumulated: Vec<u8> = Vec::new();
-
-    let header_end = loop {
-        let n = reader.read(&mut byte)?;
-        if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "EOF before headers complete",
-            ));
-        }
-        accumulated.push(byte[0]);
-        if accumulated.len() >= 4
-            && &accumulated[accumulated.len() - 4..] == b"\r\n\r\n"
-        {
-            break accumulated.len();
-        }
-    };
-
-    let header_str = std::str::from_utf8(&accumulated[..header_end - 4])
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-    let content_length: usize = header_str
-        .lines()
-        .find_map(|l| l.strip_prefix("Content-Length: "))
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing Content-Length")
-        })?;
-
-    let mut body = accumulated[header_end..].to_vec();
-    while body.len() < content_length {
-        let n = reader.read(&mut byte)?;
-        if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "EOF in body",
-            ));
-        }
-        body.push(byte[0]);
-    }
-    body.truncate(content_length);
-
-    serde_json::from_slice(&body).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    wire_helpers::read_framed_json_message(reader)
 }
 
 /// Read messages until we get one whose JSON has an `"id"` field equal to the
@@ -182,8 +268,7 @@ fn run_baseline() -> bool {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(
-            std::fs::File::create("/tmp/xs_lsp_server_stderr.log")
-                .expect("create stderr log"),
+            std::fs::File::create("/tmp/xs_lsp_server_stderr.log").expect("create stderr log"),
         ))
         .spawn()
         .expect("spawn xs-language-server");
@@ -193,7 +278,29 @@ fn run_baseline() -> bool {
 
     // Write the full message sequence (including exit) so the server
     // processes everything and exits, flushing stdout.
-    for msg in &[INITIALIZE, INITIALIZED, DID_OPEN, DID_OPEN_BAD, DID_CHANGE_BAD_FIX, COMPLETION_AI, HOVER_AI, DEFINITION_AI, DID_OPEN_WORKSPACE, HOVER_WORKSPACE, DEFINITION_WORKSPACE, HOVER_CONSTANT, DOCUMENT_SYMBOL, DID_OPEN_REFS, REFERENCES, RENAME, PREPARE_RENAME, PREPARE_RENAME_ENGINE, DID_OPEN_TYPES, SHUTDOWN, EXIT] {
+    for msg in &[
+        INITIALIZE,
+        INITIALIZED,
+        DID_OPEN,
+        DID_OPEN_BAD,
+        DID_CHANGE_BAD_FIX,
+        COMPLETION_AI,
+        HOVER_AI,
+        DEFINITION_AI,
+        DID_OPEN_WORKSPACE,
+        HOVER_WORKSPACE,
+        DEFINITION_WORKSPACE,
+        HOVER_CONSTANT,
+        DOCUMENT_SYMBOL,
+        DID_OPEN_REFS,
+        REFERENCES,
+        RENAME,
+        PREPARE_RENAME,
+        PREPARE_RENAME_ENGINE,
+        DID_OPEN_TYPES,
+        SHUTDOWN,
+        EXIT,
+    ] {
         eprintln!("[test] writing {} bytes", frame(msg).len());
         stdin
             .write_all(frame(msg).as_bytes())
@@ -226,17 +333,25 @@ fn run_baseline() -> bool {
     let mut bad_clean_diag_raw: Option<String> = None;
 
     // Read everything from stdout, then parse.
-    stdout.read_to_end(&mut all_bytes).expect("read stdout to end");
+    stdout
+        .read_to_end(&mut all_bytes)
+        .expect("read stdout to end");
     eprintln!("[test] read {} bytes total from stdout", all_bytes.len());
-    eprintln!("[test] raw bytes: {:?}", String::from_utf8_lossy(&all_bytes));
+    eprintln!(
+        "[test] raw bytes: {:?}",
+        String::from_utf8_lossy(&all_bytes)
+    );
 
     // Parse each message and pick the ones we want.
     let mut cursor = std::io::Cursor::new(&all_bytes);
     loop {
         match read_framed_message(&mut cursor) {
             Ok(msg) => {
-                eprintln!("[test] parsed msg: id={:?}, method={:?}",
-                    msg.get("id"), msg.get("method"));
+                eprintln!(
+                    "[test] parsed msg: id={:?}, method={:?}",
+                    msg.get("id"),
+                    msg.get("method")
+                );
                 if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
                     if id == 1 && init_resp.is_none() {
                         init_resp = Some(msg);
@@ -289,13 +404,22 @@ fn run_baseline() -> bool {
             }
         }
     }
-    eprintln!("[test] init_resp: {}, shutdown_resp: {}, completion_resp: {}, hover_resp: {}, definition_resp: {}, hover_workspace: {}, definition_workspace: {}, hover_constant: {}, document_symbol: {}, references: {}, rename: {}, prepare_rename: {}, prepare_rename_engine: {}",
-        init_resp.is_some(), shutdown_resp.is_some(), completion_resp.is_some(),
-        hover_resp.is_some(), definition_resp.is_some(),
-        hover_workspace_resp.is_some(), definition_workspace_resp.is_some(),
-        hover_constant_resp.is_some(), document_symbol_resp.is_some(),
-        references_resp.is_some(), rename_resp.is_some(),
-        prepare_rename_resp.is_some(), prepare_rename_engine_resp.is_some());
+    eprintln!(
+        "[test] init_resp: {}, shutdown_resp: {}, completion_resp: {}, hover_resp: {}, definition_resp: {}, hover_workspace: {}, definition_workspace: {}, hover_constant: {}, document_symbol: {}, references: {}, rename: {}, prepare_rename: {}, prepare_rename_engine: {}",
+        init_resp.is_some(),
+        shutdown_resp.is_some(),
+        completion_resp.is_some(),
+        hover_resp.is_some(),
+        definition_resp.is_some(),
+        hover_workspace_resp.is_some(),
+        definition_workspace_resp.is_some(),
+        hover_constant_resp.is_some(),
+        document_symbol_resp.is_some(),
+        references_resp.is_some(),
+        rename_resp.is_some(),
+        prepare_rename_resp.is_some(),
+        prepare_rename_engine_resp.is_some()
+    );
 
     let init_resp = init_resp.expect("initialize response");
     eprintln!("[test] got initialize response");
@@ -309,7 +433,8 @@ fn run_baseline() -> bool {
     eprintln!("[test] got definition response");
     let hover_workspace_resp = hover_workspace_resp.expect("hover workspace response");
     eprintln!("[test] got hover workspace response");
-    let definition_workspace_resp = definition_workspace_resp.expect("definition workspace response");
+    let definition_workspace_resp =
+        definition_workspace_resp.expect("definition workspace response");
     eprintln!("[test] got definition workspace response");
     let hover_constant_resp = hover_constant_resp.expect("hover constant response");
     eprintln!("[test] got hover constant response");
@@ -321,7 +446,8 @@ fn run_baseline() -> bool {
     eprintln!("[test] got rename response");
     let prepare_rename_resp = prepare_rename_resp.expect("prepare rename response");
     eprintln!("[test] got prepare rename response");
-    let prepare_rename_engine_resp = prepare_rename_engine_resp.expect("prepare rename engine response");
+    let prepare_rename_engine_resp =
+        prepare_rename_engine_resp.expect("prepare rename engine response");
     eprintln!("[test] got prepare rename engine response");
 
     let stderr_text = std::fs::read_to_string("/tmp/xs_lsp_server_stderr.log")
@@ -337,7 +463,10 @@ fn run_baseline() -> bool {
     }
 
     let init_ok = init_resp.get("id").and_then(|i| i.as_i64()) == Some(1)
-        && init_resp.get("result").and_then(|r| r.get("capabilities")).is_some();
+        && init_resp
+            .get("result")
+            .and_then(|r| r.get("capabilities"))
+            .is_some();
     if init_ok {
         println!("PASS: initialize response received");
     } else {
@@ -356,14 +485,22 @@ fn run_baseline() -> bool {
         all_pass = false;
     }
 
-    // Look for at least one publishDiagnostics notification in the raw bytes.
-    // (We parsed only id-tagged messages above; notifications don't have ids
-    // so they were skipped. The raw bytes should still contain them.)
-    let raw = String::from_utf8_lossy(&all_bytes);
-    let has_clean_diag = raw.contains("\"file:///tmp/test.xs\"")
-        && raw.contains("textDocument/publishDiagnostics");
-    let has_bad_diag = raw.contains("\"file:///tmp/bad.xs\"")
-        && (raw.contains("Parse error") || raw.contains("Missing") || raw.contains("Unexpected"));
+    // Find publishDiagnostics notifications by parsing frames, not by scanning
+    // raw bytes for substrings that could appear in unrelated messages.
+    let messages = wire_helpers::parse_lsp_messages(&all_bytes);
+    let mut has_clean_diag = false;
+    let mut has_bad_diag = false;
+    for msg in wire_helpers::find_notifications(&messages, "textDocument/publishDiagnostics") {
+        if let wire_helpers::LspMessage::Notification { params, .. } = msg {
+            let uri = params.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+            let diags = params.get("diagnostics").and_then(|d| d.as_array());
+            match (uri, diags) {
+                ("file:///tmp/test.xs", Some(arr)) if arr.is_empty() => has_clean_diag = true,
+                ("file:///tmp/bad.xs", Some(arr)) if !arr.is_empty() => has_bad_diag = true,
+                _ => {}
+            }
+        }
+    }
 
     if has_clean_diag {
         println!("PASS: clean-file diagnostics published (expected empty)");
@@ -390,22 +527,44 @@ fn run_baseline() -> bool {
         println!("PASS: clean follow-up change publishes empty diagnostics for /tmp/bad.xs");
     } else {
         println!("FAIL: /tmp/bad.xs did not receive an empty diagnostic publish after being fixed");
-        println!("  last bad.xs diagnostic: {}", bad_clean_diag_raw.unwrap_or_default());
+        println!(
+            "  last bad.xs diagnostic: {}",
+            bad_clean_diag_raw.unwrap_or_default()
+        );
         all_pass = false;
     }
 
     // Completion: the request asked for items at line 4 col 13 in /tmp/test.xs,
     // which is after `aiEcho("hel` (the partial token at that position is "aiE"
     // since the file content's line 4 reads "   aiEcho(\"hello\");", col 13 is
-    // around the `c` in "aiEcho"). Look for the expected engine-API matches.
-    let raw = String::from_utf8_lossy(&all_bytes);
-    let completion_count = raw.matches("\"aiEcho\"").count()
-        + raw.matches("\"aiEchoCategory\"").count()
-        + raw.matches("\"aiEchoWarning\"").count();
+    // around the `c` in "aiEcho"). Count only entries in the completion
+    // response's `result` array so unrelated log-message substrings can't
+    // inflate the count (R5-F-01).
+    let completion_count = match wire_helpers::find_response(&messages, 3) {
+        Some(wire_helpers::LspMessage::Response {
+            result_or_error: Ok(result),
+            ..
+        }) => result
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter(|item| {
+                        item.get("label")
+                            .and_then(|l| l.as_str())
+                            .map(|s| s == "aiEcho" || s == "aiEchoCategory" || s == "aiEchoWarning")
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0),
+        _ => 0,
+    };
     if completion_count >= 3 {
         println!("PASS: completion returned aiEcho family items ({completion_count} occurrences)");
     } else {
-        println!("FAIL: completion did not return expected aiEcho* items (count={completion_count})");
+        println!(
+            "FAIL: completion did not return expected aiEcho* items (count={completion_count})"
+        );
         println!("  completion response: {}", completion_resp);
         all_pass = false;
     }
@@ -425,9 +584,13 @@ fn run_baseline() -> bool {
         || hover_raw.contains("float ")
         || hover_raw.contains("vector ");
     if has_hover_name && has_hover_signature && has_hover_type {
-        println!("PASS: hover returned aiEcho signature (Markdown with name + code fence + type token)");
+        println!(
+            "PASS: hover returned aiEcho signature (Markdown with name + code fence + type token)"
+        );
     } else {
-        println!("FAIL: hover did not return expected content (name={has_hover_name}, fence={has_hover_signature}, type={has_hover_type})");
+        println!(
+            "FAIL: hover did not return expected content (name={has_hover_name}, fence={has_hover_signature}, type={has_hover_type})"
+        );
         println!("  hover response: {}", hover_resp);
         all_pass = false;
     }
@@ -440,7 +603,9 @@ fn run_baseline() -> bool {
     if is_null && no_stub_uri {
         println!("PASS: definition returned null for engine-API symbol (aiEcho)");
     } else {
-        println!("FAIL: definition did not return null for engine-API symbol aiEcho (is_null={is_null}, no_stub={no_stub_uri})");
+        println!(
+            "FAIL: definition did not return null for engine-API symbol aiEcho (is_null={is_null}, no_stub={no_stub_uri})"
+        );
         println!("  definition response: {}", definition_resp);
         all_pass = false;
     }
@@ -455,7 +620,9 @@ fn run_baseline() -> bool {
     if has_workspace_name && has_workspace_kind && has_workspace_detail {
         println!("PASS: hover returned workspace function (helper with kind/detail)");
     } else {
-        println!("FAIL: hover workspace did not return expected content (name={has_workspace_name}, kind={has_workspace_kind}, detail={has_workspace_detail})");
+        println!(
+            "FAIL: hover workspace did not return expected content (name={has_workspace_name}, kind={has_workspace_kind}, detail={has_workspace_detail})"
+        );
         println!("  hover workspace response: {}", hover_workspace_resp);
         all_pass = false;
     }
@@ -466,13 +633,18 @@ fn run_baseline() -> bool {
     let has_real_file = def_workspace_raw.contains("file:///tmp/workspace.xs");
     let no_stub_uri = !def_workspace_raw.contains("xs-stub://");
     // The function is defined at line 7 col 5 (0-indexed line 7 = "int helper").
-    let has_correct_line = def_workspace_raw.contains("\"line\":7")
-        || def_workspace_raw.contains("\"line\": 7");
+    let has_correct_line =
+        def_workspace_raw.contains("\"line\":7") || def_workspace_raw.contains("\"line\": 7");
     if has_real_file && no_stub_uri && has_correct_line {
         println!("PASS: definition returned real file:line for workspace function");
     } else {
-        println!("FAIL: definition workspace did not return real location (file={has_real_file}, no_stub={no_stub_uri}, line={has_correct_line})");
-        println!("  definition workspace response: {}", definition_workspace_resp);
+        println!(
+            "FAIL: definition workspace did not return real location (file={has_real_file}, no_stub={no_stub_uri}, line={has_correct_line})"
+        );
+        println!(
+            "  definition workspace response: {}",
+            definition_workspace_resp
+        );
         all_pass = false;
     }
 
@@ -484,7 +656,9 @@ fn run_baseline() -> bool {
     if has_constant_name && has_constant_kind && has_constant_detail {
         println!("PASS: hover returned workspace constant (cMagic with kind/value)");
     } else {
-        println!("FAIL: hover constant did not return expected content (name={has_constant_name}, kind={has_constant_kind}, detail={has_constant_detail})");
+        println!(
+            "FAIL: hover constant did not return expected content (name={has_constant_name}, kind={has_constant_kind}, detail={has_constant_detail})"
+        );
         println!("  hover constant response: {}", hover_constant_resp);
         all_pass = false;
     }
@@ -496,9 +670,13 @@ fn run_baseline() -> bool {
     let sym_count_func = doc_sym_raw.matches("\"name\":\"helper\"").count();
     let sym_count_const = doc_sym_raw.matches("\"name\":\"cMagic\"").count();
     if sym_count_rule >= 1 && sym_count_func >= 1 && sym_count_const >= 1 {
-        println!("PASS: document symbol returned 3 symbols (rule={sym_count_rule}, function={sym_count_func}, constant={sym_count_const})");
+        println!(
+            "PASS: document symbol returned 3 symbols (rule={sym_count_rule}, function={sym_count_func}, constant={sym_count_const})"
+        );
     } else {
-        println!("FAIL: document symbol did not return all 3 expected symbols (rule={sym_count_rule}, func={sym_count_func}, const={sym_count_const})");
+        println!(
+            "FAIL: document symbol did not return all 3 expected symbols (rule={sym_count_rule}, func={sym_count_func}, const={sym_count_const})"
+        );
         println!("  document symbol response: {}", document_symbol_resp);
         all_pass = false;
     }
@@ -506,8 +684,12 @@ fn run_baseline() -> bool {
     // References: helper is declared once and called twice = 3 occurrences.
     // The response is an array of Locations, each with a `uri` field.
     let references_raw = references_resp.to_string();
-    let refs_uri_count = references_raw.matches("\"uri\":\"file:///tmp/refs.xs\"").count()
-        + references_raw.matches("\"uri\": \"file:///tmp/refs.xs\"").count();
+    let refs_uri_count = references_raw
+        .matches("\"uri\":\"file:///tmp/refs.xs\"")
+        .count()
+        + references_raw
+            .matches("\"uri\": \"file:///tmp/refs.xs\"")
+            .count();
     if refs_uri_count >= 3 {
         println!("PASS: references returned 3+ locations for helper (count={refs_uri_count})");
     } else {
@@ -522,9 +704,13 @@ fn run_baseline() -> bool {
     let rename_edits_count = rename_raw.matches("\"helperRenamed\"").count();
     let has_changes_field = rename_raw.contains("\"changes\"");
     if rename_edits_count >= 3 && has_changes_field {
-        println!("PASS: rename returned WorkspaceEdit with 3+ edits (count={rename_edits_count}, has_changes={has_changes_field})");
+        println!(
+            "PASS: rename returned WorkspaceEdit with 3+ edits (count={rename_edits_count}, has_changes={has_changes_field})"
+        );
     } else {
-        println!("FAIL: rename did not return expected WorkspaceEdit (count={rename_edits_count}, has_changes={has_changes_field})");
+        println!(
+            "FAIL: rename did not return expected WorkspaceEdit (count={rename_edits_count}, has_changes={has_changes_field})"
+        );
         println!("  rename response: {}", rename_resp);
         all_pass = false;
     }
@@ -541,7 +727,9 @@ fn run_baseline() -> bool {
     if has_start && is_not_null {
         println!("PASS: prepareRename returned Range for workspace symbol (line=7)");
     } else {
-        println!("FAIL: prepareRename did not return Range (has_start={has_start}, is_not_null={is_not_null})");
+        println!(
+            "FAIL: prepareRename did not return Range (has_start={has_start}, is_not_null={is_not_null})"
+        );
         println!("  prepare rename response: {}", prepare_rename_resp);
         all_pass = false;
     }
@@ -555,8 +743,13 @@ fn run_baseline() -> bool {
     if has_id_13 && has_null_result {
         println!("PASS: prepareRename returned null for engine-API symbol (aiEcho)");
     } else {
-        println!("FAIL: prepareRename did not return null for engine-API symbol (id13={has_id_13}, null={has_null_result})");
-        println!("  prepare rename engine response: {}", prepare_rename_engine_resp);
+        println!(
+            "FAIL: prepareRename did not return null for engine-API symbol (id13={has_id_13}, null={has_null_result})"
+        );
+        println!(
+            "  prepare rename engine response: {}",
+            prepare_rename_engine_resp
+        );
         all_pass = false;
     }
 
@@ -567,12 +760,12 @@ fn run_baseline() -> bool {
     //   * aiEcho(42)                 -- expected string, got int (type error)
     let types_diag_raw = types_diag_raw.clone().unwrap_or_default();
     let has_count_err = types_diag_raw.contains("expected 1 argument(s) to `aiEcho`");
-    let has_type_err = types_diag_raw
-        .contains("expected argument 1 of type `string` for `aiEcho`, got `int`");
+    let has_type_err =
+        types_diag_raw.contains("expected argument 1 of type `string` for `aiEcho`, got `int`");
     // The valid calls should NOT produce type errors. The "got `string`" case
     // would be a false positive, so verify it's absent.
-    let has_no_err_on_valid_calls = !types_diag_raw
-        .contains("expected argument 1 of type `string` for `aiEcho`, got `string`");
+    let has_no_err_on_valid_calls =
+        !types_diag_raw.contains("expected argument 1 of type `string` for `aiEcho`, got `string`");
     if has_count_err && has_type_err && has_no_err_on_valid_calls {
         println!("PASS: typecheck flagged wrong count + wrong type on /tmp/types.xs");
     } else {
@@ -634,11 +827,14 @@ fn run_workspace_tests() -> bool {
     // Copy the committed doxygen archive into the synthetic game folder.
     let doxy_src = resolve_test_game_path().join("doxygen_retail.7z");
     std::fs::create_dir_all(&game_root).expect("create game root");
-    std::fs::copy(&doxy_src, game_root.join("doxygen_retail.7z"))
-        .expect("copy doxygen archive");
+    std::fs::copy(&doxy_src, game_root.join("doxygen_retail.7z")).expect("copy doxygen archive");
 
     // Vanilla game files.
-    let vanilla_core = game_root.join("game").join("ai").join("core").join("core.xs");
+    let vanilla_core = game_root
+        .join("game")
+        .join("ai")
+        .join("core")
+        .join("core.xs");
     std::fs::create_dir_all(vanilla_core.parent().unwrap()).unwrap();
     std::fs::write(&vanilla_core, "void vanillaCore() {}\n").unwrap();
 
@@ -842,7 +1038,8 @@ fn run_workspace_tests() -> bool {
     }
 
     // The server should have requested dynamic watched-file registration.
-    if raw.contains("client/registerCapability") && raw.contains("workspace/didChangeWatchedFiles") {
+    if raw.contains("client/registerCapability") && raw.contains("workspace/didChangeWatchedFiles")
+    {
         println!("PASS (workspace): server registered didChangeWatchedFiles watcher");
     } else {
         println!("FAIL (workspace): missing client/registerCapability for watched files");
@@ -850,9 +1047,7 @@ fn run_workspace_tests() -> bool {
     }
 
     // An unowned file should trigger the engine-API-only warning.
-    if raw.contains("window/showMessage")
-        && raw.contains("File not part of any registered mod")
-    {
+    if raw.contains("window/showMessage") && raw.contains("File not part of any registered mod") {
         println!("PASS (workspace): unowned file warning emitted");
     } else {
         println!("FAIL (workspace): missing unowned-file warning");
@@ -860,9 +1055,7 @@ fn run_workspace_tests() -> bool {
     }
 
     // A file inside mod_a should receive diagnostics.
-    if raw.contains(&with_uri(&mod_a_main_uri))
-        && raw.contains("textDocument/publishDiagnostics")
-    {
+    if raw.contains(&with_uri(&mod_a_main_uri)) && raw.contains("textDocument/publishDiagnostics") {
         println!("PASS (workspace): diagnostics published for mod_a file");
     } else {
         println!("FAIL (workspace): missing diagnostics for mod_a file");
@@ -876,14 +1069,16 @@ fn run_workspace_tests() -> bool {
     if symbol_raw.contains("modCore") && !symbol_raw.contains("vanillaCore") {
         println!("PASS (workspace): workspace symbol scoped to mod_a shows overlay, not vanilla");
     } else {
-        println!("FAIL (workspace): workspace symbol did not respect overlay (resp={})", symbol_raw);
+        println!(
+            "FAIL (workspace): workspace symbol did not respect overlay (resp={})",
+            symbol_raw
+        );
         all_pass = false;
     }
 
     // After adding mod_b and opening its file, there should be diagnostics for
     // it and no additional unowned-file warnings for it.
-    if raw.contains(&with_uri(&mod_b_file_uri)) && raw.contains("textDocument/publishDiagnostics")
-    {
+    if raw.contains(&with_uri(&mod_b_file_uri)) && raw.contains("textDocument/publishDiagnostics") {
         println!("PASS (workspace): mod_b file diagnosed after didChangeWorkspaceFolders add");
     } else {
         println!("FAIL (workspace): mod_b file not diagnosed after add");
@@ -896,11 +1091,16 @@ fn run_workspace_tests() -> bool {
     if symbol_raw_b.contains("modBFoo") {
         println!("PASS (workspace): workspace symbol scoped to mod_b finds modBFoo");
     } else {
-        println!("FAIL (workspace): workspace symbol did not find mod_b symbol (resp={})", symbol_raw_b);
+        println!(
+            "FAIL (workspace): workspace symbol did not find mod_b symbol (resp={})",
+            symbol_raw_b
+        );
         all_pass = false;
     }
 
-    let has_panic = stderr_text.lines().any(|l| l.contains("panic") || l.contains("FATAL"));
+    let has_panic = stderr_text
+        .lines()
+        .any(|l| l.contains("panic") || l.contains("FATAL"));
     if has_panic {
         println!("FAIL (workspace): stderr contains panic/FATAL");
         for line in stderr_text.lines() {
@@ -929,42 +1129,60 @@ fn run_semantic_tests() -> bool {
     let fixtures = [
         (
             "forward_decl_ok",
-            vec![("forward_decl_ok.xs", include_str!("../semantic_fixtures/forward_decl_ok.xs"))],
+            vec![(
+                "forward_decl_ok.xs",
+                include_str!("../semantic_fixtures/forward_decl_ok.xs"),
+            )],
             vec!["forward_decl_ok.xs"],
             Vec::<&str>::new(),
             vec!["before declaration"],
         ),
         (
             "forward_decl_missing",
-            vec![("forward_decl_missing.xs", include_str!("../semantic_fixtures/forward_decl_missing.xs"))],
+            vec![(
+                "forward_decl_missing.xs",
+                include_str!("../semantic_fixtures/forward_decl_missing.xs"),
+            )],
             vec!["forward_decl_missing.xs"],
             vec!["before declaration"],
             Vec::<&str>::new(),
         ),
         (
             "mutable_ok",
-            vec![("mutable_ok.xs", include_str!("../semantic_fixtures/mutable_ok.xs"))],
+            vec![(
+                "mutable_ok.xs",
+                include_str!("../semantic_fixtures/mutable_ok.xs"),
+            )],
             vec!["mutable_ok.xs"],
             Vec::<&str>::new(),
             vec!["different signature"],
         ),
         (
             "mutable_different_sig",
-            vec![("mutable_different_sig.xs", include_str!("../semantic_fixtures/mutable_different_sig.xs"))],
+            vec![(
+                "mutable_different_sig.xs",
+                include_str!("../semantic_fixtures/mutable_different_sig.xs"),
+            )],
             vec!["mutable_different_sig.xs"],
             vec!["different signature"],
             Vec::<&str>::new(),
         ),
         (
             "int_to_float_widening",
-            vec![("int_to_float_widening.xs", include_str!("../semantic_fixtures/int_to_float_widening.xs"))],
+            vec![(
+                "int_to_float_widening.xs",
+                include_str!("../semantic_fixtures/int_to_float_widening.xs"),
+            )],
             vec!["int_to_float_widening.xs"],
             Vec::<&str>::new(),
             vec!["expected argument"],
         ),
         (
             "float_to_int_loss",
-            vec![("float_to_int_loss.xs", include_str!("../semantic_fixtures/float_to_int_loss.xs"))],
+            vec![(
+                "float_to_int_loss.xs",
+                include_str!("../semantic_fixtures/float_to_int_loss.xs"),
+            )],
             vec!["float_to_int_loss.xs"],
             vec!["narrowing conversion"],
             Vec::<&str>::new(),
@@ -972,8 +1190,14 @@ fn run_semantic_tests() -> bool {
         (
             "extern_collision",
             vec![
-                ("extern_collision_a.xs", include_str!("../semantic_fixtures/extern_collision_a.xs")),
-                ("extern_collision_b.xs", include_str!("../semantic_fixtures/extern_collision_b.xs")),
+                (
+                    "extern_collision_a.xs",
+                    include_str!("../semantic_fixtures/extern_collision_a.xs"),
+                ),
+                (
+                    "extern_collision_b.xs",
+                    include_str!("../semantic_fixtures/extern_collision_b.xs"),
+                ),
             ],
             vec!["extern_collision_b.xs"],
             vec!["extern collision"],
@@ -1067,8 +1291,7 @@ fn run_semantic_fixture(
     stdin.flush().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let file_content: std::collections::HashMap<&str, &str> =
-        files.iter().copied().collect();
+    let file_content: std::collections::HashMap<&str, &str> = files.iter().copied().collect();
 
     for (rel, uri) in &file_uris {
         let content = file_content.get(rel.as_str()).unwrap();
@@ -1116,9 +1339,13 @@ fn run_semantic_fixture(
     loop {
         match read_framed_message(&mut cursor) {
             Ok(msg) => {
-                if msg.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics") {
+                if msg.get("method").and_then(|m| m.as_str())
+                    == Some("textDocument/publishDiagnostics")
+                {
                     if let Some(params) = msg.get("params") {
-                        if let Some(diagnostics) = params.get("diagnostics").and_then(|d| d.as_array()) {
+                        if let Some(diagnostics) =
+                            params.get("diagnostics").and_then(|d| d.as_array())
+                        {
                             for d in diagnostics {
                                 if let Some(message) = d.get("message").and_then(|m| m.as_str()) {
                                     all_messages.push(message.to_string());
@@ -1144,9 +1371,15 @@ fn run_semantic_fixture(
     let joined = all_messages.join("\n");
     for exp in expected {
         if joined.contains(exp) {
-            println!("PASS (semantic {}): found expected diagnostic '{}'", name, exp);
+            println!(
+                "PASS (semantic {}): found expected diagnostic '{}'",
+                name, exp
+            );
         } else {
-            println!("FAIL (semantic {}): missing expected diagnostic '{}'", name, exp);
+            println!(
+                "FAIL (semantic {}): missing expected diagnostic '{}'",
+                name, exp
+            );
             println!("  diagnostics: {:?}", all_messages);
             pass = false;
         }
@@ -1154,7 +1387,10 @@ fn run_semantic_fixture(
 
     for forb in forbidden {
         if !joined.contains(forb) {
-            println!("PASS (semantic {}): no spurious '{}' diagnostic", name, forb);
+            println!(
+                "PASS (semantic {}): no spurious '{}' diagnostic",
+                name, forb
+            );
         } else {
             println!("FAIL (semantic {}): unexpected '{}' diagnostic", name, forb);
             println!("  diagnostics: {:?}", all_messages);
@@ -1170,7 +1406,9 @@ fn run_semantic_fixture(
         println!("--- end stderr ---");
     }
 
-    let has_panic = stderr_text.lines().any(|l| l.contains("panic") || l.contains("FATAL"));
+    let has_panic = stderr_text
+        .lines()
+        .any(|l| l.contains("panic") || l.contains("FATAL"));
     if has_panic {
         println!("FAIL (semantic {}): stderr contains panic/FATAL", name);
         pass = false;
@@ -1326,9 +1564,7 @@ fn run_include_request_scenario(
                     == Some("textDocument/publishDiagnostics")
                 {
                     if let Some(params) = msg.get("params") {
-                        if params.get("uri").and_then(|u| u.as_str())
-                            == Some(main_uri.as_str())
-                        {
+                        if params.get("uri").and_then(|u| u.as_str()) == Some(main_uri.as_str()) {
                             if let Some(arr) = params.get("diagnostics").and_then(|d| d.as_array())
                             {
                                 for d in arr {
@@ -1347,7 +1583,9 @@ fn run_include_request_scenario(
 
     cleanup_include_mod(&game_root, &mod_root);
 
-    let has_panic = stderr_text.lines().any(|l| l.contains("panic") || l.contains("FATAL"));
+    let has_panic = stderr_text
+        .lines()
+        .any(|l| l.contains("panic") || l.contains("FATAL"));
     let check_ok = response
         .as_ref()
         .map(|resp| check(resp, &util_uri))
@@ -1357,7 +1595,10 @@ fn run_include_request_scenario(
     if pass {
         println!("PASS (include {}): response matched expected content", name);
     } else {
-        println!("FAIL (include {}): response did not match expected content", name);
+        println!(
+            "FAIL (include {}): response did not match expected content",
+            name
+        );
         if let Some(resp) = response {
             println!("  response: {}", resp);
         } else {
@@ -1580,16 +1821,8 @@ fn run_engine_references_test() -> bool {
     let main_path = mod_dir.join("main.xs");
     let util_path = mod_dir.join("util.xs");
     std::fs::create_dir_all(&mod_dir).unwrap();
-    std::fs::write(
-        &main_path,
-        "void useAiEcho()\n{\n   aiEcho(\"main\");\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        &util_path,
-        "void alsoUse()\n{\n   aiEcho(\"util\");\n}\n",
-    )
-    .unwrap();
+    std::fs::write(&main_path, "void useAiEcho()\n{\n   aiEcho(\"main\");\n}\n").unwrap();
+    std::fs::write(&util_path, "void alsoUse()\n{\n   aiEcho(\"util\");\n}\n").unwrap();
 
     let game_root = std::fs::canonicalize(&game_root).unwrap();
     let mod_root = std::fs::canonicalize(&mod_root).unwrap();
@@ -1656,10 +1889,46 @@ fn run_engine_references_test() -> bool {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
+    // Start a reader thread that records the instant the id=2001 response
+    // first appears in stdout. This is the true request-to-response wall-clock
+    // window and excludes the pre-write setup, the post-response shutdown/exit
+    // roundtrip, and child.wait() cleanup (R5-F-02).
+    let response_seen = std::sync::Arc::new(std::sync::Mutex::new(None::<Instant>));
+    let response_seen_reader = std::sync::Arc::clone(&response_seen);
+    let reader_handle = std::thread::spawn(move || {
+        let mut all_bytes = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    all_bytes.extend_from_slice(&buf[..n]);
+                    if response_seen_reader.lock().unwrap().is_none() {
+                        let messages = wire_helpers::parse_lsp_messages(&all_bytes);
+                        if wire_helpers::find_response(&messages, 2001).is_some() {
+                            *response_seen_reader.lock().unwrap() = Some(Instant::now());
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        all_bytes
+    });
+
     let start = Instant::now();
     stdin.write_all(frame(&references).as_bytes()).unwrap();
     stdin.flush().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Wait (with a short timeout) until the reader thread has observed the
+    // id=2001 response. This keeps the measured interval bracketed to the
+    // true request-to-response window and avoids a hardcoded sleep between
+    // the references request and shutdown.
+    let response_deadline = Instant::now() + Duration::from_millis(500);
+    while response_seen.lock().unwrap().is_none() && Instant::now() < response_deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
     stdin.write_all(frame(&shutdown).as_bytes()).unwrap();
     stdin.write_all(frame(&exit).as_bytes()).unwrap();
     stdin.flush().unwrap();
@@ -1667,18 +1936,25 @@ fn run_engine_references_test() -> bool {
 
     let status = child.wait().expect("wait on engine-references child");
     let mut stderr_text = String::new();
-    child.stderr.take().expect("stderr").read_to_string(&mut stderr_text).unwrap();
+    child
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut stderr_text)
+        .unwrap();
 
-    let mut all_bytes = Vec::new();
-    stdout.read_to_end(&mut all_bytes).unwrap();
-    let mut cursor = std::io::Cursor::new(&all_bytes);
-    let references_resp = read_response_with_id(&mut cursor, 2001).ok();
-    let elapsed = start.elapsed();
+    let all_bytes = reader_handle.join().expect("stdout reader thread");
+    let response_instant = response_seen.lock().unwrap().take();
+    let elapsed = response_instant
+        .map(|t| t.duration_since(start))
+        .unwrap_or_else(|| start.elapsed());
 
     let _ = std::fs::remove_dir_all(&game_root);
     let _ = std::fs::remove_dir_all(&mod_root);
 
-    let has_panic = stderr_text.lines().any(|l| l.contains("panic") || l.contains("FATAL"));
+    let has_panic = stderr_text
+        .lines()
+        .any(|l| l.contains("panic") || l.contains("FATAL"));
     if has_panic {
         println!("FAIL (engine references): stderr contains panic/FATAL");
         for line in stderr_text.lines() {
@@ -1691,6 +1967,8 @@ fn run_engine_references_test() -> bool {
         return false;
     }
 
+    let mut cursor = std::io::Cursor::new(&all_bytes);
+    let references_resp = read_response_with_id(&mut cursor, 2001).ok();
     let Some(resp) = references_resp else {
         println!("FAIL (engine references): no references response received");
         return false;
@@ -1700,7 +1978,7 @@ fn run_engine_references_test() -> bool {
     let uri_count = raw.matches("\"uri\":").count() + raw.matches("\"uri\": ").count();
     if uri_count >= 2 && elapsed.as_millis() <= 500 {
         println!(
-            "PASS (engine references): returned {} aiEcho location(s) in {} ms",
+            "PASS (engine references): responded {} aiEcho location(s) in {} ms (request to response)",
             uri_count,
             elapsed.as_millis()
         );
