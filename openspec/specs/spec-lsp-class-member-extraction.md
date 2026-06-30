@@ -1,6 +1,6 @@
 # spec-lsp-class-member-extraction
 
-> **Status**: Draft — `expand-color-scheme-classes-constants-rules` (Bucket C remainder).
+> **Status**: Active — promoted from `openspec/changes/expand-color-scheme-classes-constants-rules/` (commits `9cc7344` + `e512f10`, 2026-06-30).
 
 ## Purpose
 

@@ -97,6 +97,11 @@ The `semantic_tokens::classify_type_identifier` function SHALL look up `_type_id
 - Recoloring the existing `TYPE_UNMODDED_CLASS` / `TYPE_MODDED_CLASS` fallback keys.
 - Engine-side `extern` classification for classes.
 
+## See also
+
+- [`spec-lsp-class-member-extraction.md`](spec-lsp-class-member-extraction.md) — class field and method extraction requirements.
+- [`spec-lsp-class-member-semantic-tokens.md`](spec-lsp-class-member-semantic-tokens.md) — member semantic-token modifier and plugin color categories.
+
 ## Verification approach
 
 - Strict-TDD Rust tests in `tools/xs-language-server/tests/class_extraction_repro.rs` covering S1–S3 and S5.
