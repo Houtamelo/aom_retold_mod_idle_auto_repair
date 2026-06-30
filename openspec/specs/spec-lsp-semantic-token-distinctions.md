@@ -1,4 +1,6 @@
-# Spec: LSP Semantic Token Distinctions
+# spec-lsp-semantic-token-distinctions
+
+> **Status**: Active — promoted from `openspec/changes/finish-semantic-token-distinctions/` (commit `dfa829d`, 2026-06-30).
 
 ## Purpose
 
@@ -11,7 +13,7 @@ The current LSP legend advertises only `function`, `variable`, and `type` token 
 - `SymbolKind::Constant` references are classified as `SemanticTokenType::VARIABLE`, making them visually identical to mutable variables.
 - `SymbolKind::Rule` references are skipped entirely (`return None`) because the legend contains no matching token type.
 - `extern` variables carry `Symbol::is_extern == true` and `Visibility::Extern`, but the classifier emits no `extern` modifier, so they render like ordinary top-level variables.
-- On the plugin side, `XsSemanticTokensConverter` exists but is never called. `XsLspServerDescriptor` does not override `LspServerDescriptor.lspCustomization`, and no `XsSemanticTokensSupport` subclass exists, so every semantic-token category — existing and new — is dead code from the editor's point of view.
+- On the plugin side, `XsSemanticTokensConverter` exists but is never called. `XsLspServerDescriptor` does not override platform semantic-token customization, and no `XsSemanticTokensSupport` subclass exists, so every semantic-token category — existing and new — is dead code from the editor's point of view.
 
 ## Requirements
 
@@ -52,15 +54,15 @@ The LSP `classify_modifiers` function SHALL emit the `extern` modifier for varia
 - GIVEN an `extern int gFoo;` declared in `<AOMR>/game/foo.xs`, WHEN a reference `gFoo` is parsed, THEN the LSP SHALL emit `SemanticTokenType::VARIABLE` with modifiers `[extern, unmodded]`.
 - GIVEN an `extern int gMyModdedFoo;` declared in `mod/spire_ai/game/foo.xs`, WHEN a reference is parsed, THEN the LSP SHALL emit `SemanticTokenType::VARIABLE` with modifiers `[extern, modded]`.
 
-### R7 — Override `lspCustomization`
+### R7 — Wire platform semantic-token customizer
 
-The plugin's `XsLspServerDescriptor` SHALL override `lspCustomization` to return a customized `LspCustomization` instance that supplies an XS-specific semantic-token customizer.
+The plugin's `XsLspServerDescriptor` SHALL expose an XS-specific semantic-token customizer so the platform invokes the plugin converter.
 
-- GIVEN an `XsLspServerDescriptor` instance, WHEN `lspCustomization` is queried, THEN it SHALL return a non-null customization whose semantic-token customizer is an instance of `XsSemanticTokensSupport`.
+- GIVEN an `XsLspServerDescriptor` instance, WHEN its semantic-token support property is queried, THEN it SHALL return a non-null customizer that is an instance of `XsSemanticTokensSupport`.
 
 ### R8 — Implement `XsSemanticTokensSupport`
 
-The plugin SHALL provide a new `XsSemanticTokensSupport` class that extends `LspSemanticTokensSupport` and overrides the platform mapping method (for example, `getTextAttributesKey(tokenType: String, modifiers: List<String>, file: PsiFile): TextAttributesKey?`). The override SHALL delegate the `(tokenType, modifiers)` pair to `XsSemanticTokensConverter`.
+The plugin SHALL provide a new `XsSemanticTokensSupport` class that extends the platform's semantic-token support class and overrides the mapping method that converts `(tokenType, modifiers)` into a `TextAttributesKey`. The override SHALL delegate the pair to `XsSemanticTokensConverter`.
 
 - GIVEN a semantic-token customizer is installed, WHEN the editor receives a token with type `constant`, THEN the customizer SHALL return the `CONSTANT` `TextAttributesKey`.
 
@@ -158,9 +160,9 @@ The plugin's `XsSemanticTokensConverter` SHALL add mappings for the four new `(t
 
 ## Verification approach
 
-- Strict-TDD Rust tests in `tools/xs-language-server/tests/semantic_tokens_repro.rs` covering S1–S4.
+- Strict-TDD Rust tests in `tools/xs-language-server/tests/semantic_token_distinctions_repro.rs` covering S1–S4.
 - Plugin converter tests in `tools/intellij-xs-plugin/src/test/kotlin/com/aomr/xs/lsp/XsSemanticTokensConverterTest.kt` covering the new mappings in R12.
-- A plugin test asserting that `XsLspServerDescriptor.lspCustomization` returns a non-default semantic-token customizer (R7).
+- A plugin test asserting that `XsLspServerDescriptor` exposes an XS-specific semantic-token customizer (R7).
 - `XsColorSettingsPageTest` extended to assert the descriptors from R11 are present (S5).
 - `./gradlew buildPlugin` confirms the artifact is produced.
 - Manual Rider smoke test confirming that constant, rule, and extern-variable references are colored as specified in S6–S8.

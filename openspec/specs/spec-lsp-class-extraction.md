@@ -1,4 +1,6 @@
-# Spec: LSP Class Extraction
+# spec-lsp-class-extraction
+
+> **Status**: Active — promoted from `openspec/changes/finish-semantic-token-distinctions/` (commit `dfa829d`, 2026-06-30).
 
 ## Purpose
 
