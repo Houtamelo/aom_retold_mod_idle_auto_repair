@@ -5,7 +5,7 @@
 | Reporter      | user (manual smoke test in a real mod project)                     |
 | Date          | 2026-06-29                                                         |
 | Plugin tested | `0.2.1` (`dist/intellij-xs-plugin-0.2.1.zip`)                      |
-| Status        | Issue 1 **resolved** by `fix-plugin-goto-definition-ctrl-click-keybind`; Issue 2 **resolved** by `fix-lsp-false-positive-forward-decl`; Issue 3 **resolved** by `expand-color-scheme-categories`; Issue 4 still open |
+| Status        | Issue 1 **resolved** by `fix-plugin-goto-definition-ctrl-click-keybind`; Issue 2 **resolved** by `fix-lsp-false-positive-forward-decl`; Issue 3 **resolved** by `expand-color-scheme-categories`; Issue 4 **resolved** by `openspec/changes/archive/2026-06-29-fix-goto-definition-on-include-statements/` |
 | Resolution    | Plugin `0.2.3` registers `XsGotoDeclarationHandler` forwarding Ctrl+Click / `Ctrl+B` to the XS LSP server |
 
 ## Context
@@ -291,7 +291,7 @@ real-world plugin use.
 ## Issue 4 — Go-to-definition on include statements
 
 ### Status
-Open. Affects navigation between files.
+Resolved 2026-06-29 by `openspec/changes/archive/2026-06-29-fix-goto-definition-on-include-statements/`. Include-path go-to-definition now resolves through the LSP's `Workspace` pipeline and is forwarded unchanged by the existing `XsGotoDeclarationHandler`.
 
 ### Steps to reproduce
 1. Open any `.xs` file that contains an `include` directive at the

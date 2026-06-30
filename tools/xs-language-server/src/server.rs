@@ -646,6 +646,39 @@ impl LanguageServer for XsLanguageServer {
             docs.get(uri).unwrap_or("").to_string()
         };
 
+        // -----------------------------------------------------------------
+        // Phase 0: include-directive path token (runs before identifier
+        // resolution; a miss falls through to the existing logic below)
+        // -----------------------------------------------------------------
+        if let Some(current_file) = uri.to_file_path().ok() {
+            if let Some(include_target) =
+                parser::detect_include_path_at_position(&current_file, &text, pos.line, pos.character)
+            {
+                let (ws_clone, project) = {
+                    let ws = self.workspace.lock().await;
+                    let entry = ws.lookup_mod(uri);
+                    let project = match entry {
+                        Some(e) => ws.build_virtual_project(e),
+                        None => workspace::VirtualProject::default(),
+                    };
+                    (ws.clone(), project)
+                };
+
+                if let Some(resolved) = ws_clone
+                    .resolve_include_for_file(&project, &current_file, &include_target)
+                {
+                    let def_uri = Url::from_file_path(&resolved)
+                        .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
+                    let range = Range::new(Position::new(0, 0), Position::new(0, 0));
+                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: def_uri,
+                        range,
+                    })));
+                }
+                return Ok(None);
+            }
+        }
+
         let Some(ident) = word::identifier_at_cursor(&text, pos.line, pos.character) else {
             debug!("definition: no identifier at {:?}", pos);
             return Ok(None);

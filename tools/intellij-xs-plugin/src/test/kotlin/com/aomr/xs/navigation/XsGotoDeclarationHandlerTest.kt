@@ -65,6 +65,25 @@ class XsGotoDeclarationHandlerTest : BasePlatformTestCase() {
         assertEquals("external.xs", result!![0].containingFile.name)
     }
 
+    fun testIncludeStringLiteralDelegatesToResolver() {
+        val psiFile = myFixture.configureByText("a.xs", "include \"b.xs\";\n")
+        val includeStringOffset = psiFile.text.indexOf('"') + 2
+        val sourceElement = psiFile.findElementAt(includeStringOffset)!!
+
+        val externalFile = myFixture.configureByText("b.xs", "void helper() {}\n")
+        val externalTarget = externalFile.findElementAt(externalFile.text.indexOf("helper"))!!
+
+        val handler = XsGotoDeclarationHandler(TestResolver(listOf(externalTarget)))
+        val result = handler.getGotoDeclarationTargets(
+            sourceElement,
+            sourceElement.textOffset,
+            myFixture.editor
+        )
+
+        assertSize(1, result ?: emptyArray())
+        assertEquals("b.xs", result!![0].containingFile.name)
+    }
+
     private class TestResolver(private val results: List<PsiElement>) : XsDefinitionResolver {
         override fun resolve(server: LspServer?, file: VirtualFile, offset: Int) = results
     }

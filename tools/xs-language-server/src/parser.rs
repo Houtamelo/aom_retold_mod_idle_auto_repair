@@ -4,6 +4,8 @@
 //! startup cost — kept here so call sites can `parse(src)` without
 //! touching the tree-sitter API directly.
 
+use std::path::Path;
+
 use tower_lsp::lsp_types::{Position, Range};
 use tree_sitter::{Language, Parser, Tree};
 use tree_sitter_language::LanguageFn;
@@ -38,6 +40,62 @@ pub fn extract_include_directives(tree: &Tree, source: &str) -> Vec<(String, Ran
         out.push((target.to_string(), range));
     }
     out
+}
+
+/// If the cursor lies inside the path token of an `include_directive`,
+/// return the unquoted include target. Otherwise return `None`.
+///
+/// `file` is accepted for diagnostic/logging symmetry but is not used by
+/// the current implementation.
+pub fn detect_include_path_at_position(
+    _file: &Path,
+    source: &str,
+    line: u32,
+    col: u32,
+) -> Option<String> {
+    let tree = parse(source)?;
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+
+    for child in root.children(&mut cursor) {
+        if child.kind() != "include_directive" {
+            continue;
+        }
+        if !range_contains(child, line, col) {
+            continue;
+        }
+        let Some(path_node) = child.child_by_field_name("path") else {
+            continue;
+        };
+        if path_node.kind() != "string_literal" {
+            continue;
+        }
+        if !range_contains(path_node, line, col) {
+            // Cursor is on the `include` keyword or the trailing `;` but
+            // not inside the quoted path — fall through to identifier logic.
+            return None;
+        }
+        let text = &source[path_node.byte_range()];
+        let target = text
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(text);
+        return Some(target.to_string());
+    }
+
+    None
+}
+
+fn range_contains(node: tree_sitter::Node<'_>, line: u32, col: u32) -> bool {
+    let start = node.start_position();
+    let end = node.end_position();
+
+    let after_start = line > start.row as u32
+        || (line == start.row as u32 && col >= start.column as u32);
+    let before_end = line < end.row as u32
+        || (line == end.row as u32 && col < end.column as u32);
+
+    after_start && before_end
 }
 
 fn node_range(node: tree_sitter::Node<'_>) -> Range {
@@ -153,8 +211,7 @@ mod tests {
             .collect();
         assert_eq!(param_decls.len(), 1);
         assert_eq!(
-            named_child(param_decls[0], "identifier")
-                .map(|n| &source[n.byte_range()]),
+            named_child(param_decls[0], "identifier").map(|n| &source[n.byte_range()]),
             Some("x")
         );
     }

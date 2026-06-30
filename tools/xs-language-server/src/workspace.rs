@@ -100,7 +100,9 @@ pub enum ResolveError {
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ResolveError::UnknownIncludeRoot => write!(f, "include target has no known include root"),
+            ResolveError::UnknownIncludeRoot => {
+                write!(f, "include target has no known include root")
+            }
             ResolveError::NotFound { target, root } => write!(
                 f,
                 "include target {:?} not found under {:?} root",
@@ -131,7 +133,11 @@ impl std::fmt::Display for WorkspaceError {
         match self {
             WorkspaceError::NotFileUri => write!(f, "workspace folder URI is not a file URI"),
             WorkspaceError::MissingGameDirectory(p) => {
-                write!(f, "mod root does not contain a game/ directory: {}", p.display())
+                write!(
+                    f,
+                    "mod root does not contain a game/ directory: {}",
+                    p.display()
+                )
             }
         }
     }
@@ -180,8 +186,7 @@ impl Workspace {
 
     /// Remove a previously registered mod workspace folder.
     pub fn unregister_mod(&mut self, mod_uri: &Url) {
-        self.mods
-            .retain(|m| m.mod_uri.as_str() != mod_uri.as_str());
+        self.mods.retain(|m| m.mod_uri.as_str() != mod_uri.as_str());
     }
 
     /// All currently registered mods.
@@ -203,7 +208,11 @@ impl Workspace {
     pub fn build_virtual_project(&self, mod_entry: &ModEntry) -> VirtualProject {
         let mut file_overrides = HashMap::new();
         if mod_entry.overlay_path.is_dir() {
-            collect_overlay_files(&mod_entry.overlay_path, &mod_entry.overlay_path, &mut file_overrides);
+            collect_overlay_files(
+                &mod_entry.overlay_path,
+                &mod_entry.overlay_path,
+                &mut file_overrides,
+            );
         }
         VirtualProject { file_overrides }
     }
@@ -244,7 +253,11 @@ impl Workspace {
         include_target: &str,
     ) -> Option<PathBuf> {
         let root = detect_include_root(from_rel)?;
-        let rel = format!("{}{}", root.rel_prefix(), normalize_include_target(include_target));
+        let rel = format!(
+            "{}{}",
+            root.rel_prefix(),
+            normalize_include_target(include_target)
+        );
         self.resolve_file(project, &rel)
     }
 
@@ -261,10 +274,12 @@ impl Workspace {
         let root = detect_include_root(from_rel).ok_or(ResolveError::UnknownIncludeRoot)?;
         let target = normalize_include_target(include_target);
         let rel = format!("{}{}", root.rel_prefix(), target);
-        let to_path = self.resolve_file(project, &rel).ok_or_else(|| ResolveError::NotFound {
-            target: include_target.to_string(),
-            root,
-        })?;
+        let to_path = self
+            .resolve_file(project, &rel)
+            .ok_or_else(|| ResolveError::NotFound {
+                target: include_target.to_string(),
+                root,
+            })?;
         let edge = IncludeEdge {
             from: from_path.to_path_buf(),
             to: to_path.clone(),
@@ -291,6 +306,34 @@ impl Workspace {
     pub fn game_path(&self) -> &Path {
         &self.game_path
     }
+
+    /// Resolve `include_target` from an absolute source file path.
+    ///
+    /// Computes the file's relative path under the mod overlay (if it is an
+    /// override) or the vanilla `game/` folder, then delegates to
+    /// [`Self::resolve_include`]. Returns `None` if the file is outside both
+    /// contexts or the target cannot be resolved.
+    pub fn resolve_include_for_file(
+        &self,
+        project: &VirtualProject,
+        from_file: &Path,
+        include_target: &str,
+    ) -> Option<PathBuf> {
+        let from_rel = self.relative_path_for_file(project, from_file);
+        self.resolve_include(project, &from_rel, include_target)
+    }
+
+    /// Reverse-map an absolute file path to the relative path used for
+    /// include-root detection. Mirrors `merged_view::relative_path_for`.
+    fn relative_path_for_file(&self, project: &VirtualProject, abs_path: &Path) -> String {
+        project
+            .file_overrides
+            .iter()
+            .find(|(_, p)| *p == abs_path)
+            .map(|(rel, _)| rel.clone())
+            .or_else(|| self.game_relative_path(abs_path))
+            .unwrap_or_else(|| abs_path.to_string_lossy().into_owned())
+    }
 }
 
 /// Normalize an include target so backslashes from Windows-style paths are
@@ -312,11 +355,7 @@ pub fn detect_include_root(rel_path: &str) -> Option<IncludeRoot> {
         .copied()
 }
 
-fn collect_overlay_files(
-    overlay_root: &Path,
-    current: &Path,
-    out: &mut HashMap<String, PathBuf>,
-) {
+fn collect_overlay_files(overlay_root: &Path, current: &Path, out: &mut HashMap<String, PathBuf>) {
     let Ok(entries) = std::fs::read_dir(current) else {
         return;
     };
@@ -457,8 +496,14 @@ mod tests {
 
     #[test]
     fn detect_include_root_recognises_ai() {
-        assert_eq!(detect_include_root("ai/human_assist/foo.xs"), Some(IncludeRoot::Ai));
-        assert_eq!(detect_include_root("ai/core/core.xs"), Some(IncludeRoot::Ai));
+        assert_eq!(
+            detect_include_root("ai/human_assist/foo.xs"),
+            Some(IncludeRoot::Ai)
+        );
+        assert_eq!(
+            detect_include_root("ai/core/core.xs"),
+            Some(IncludeRoot::Ai)
+        );
     }
 
     #[test]
@@ -487,7 +532,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut ws = Workspace::new(tmp.path().to_path_buf());
         let uri = Url::parse("http://example.com/mod").unwrap();
-        assert_eq!(ws.register_mod(uri).unwrap_err(), WorkspaceError::NotFileUri);
+        assert_eq!(
+            ws.register_mod(uri).unwrap_err(),
+            WorkspaceError::NotFileUri
+        );
     }
 
     #[test]
@@ -508,7 +556,10 @@ mod tests {
         let owner = ws.lookup_mod(&file).expect("owned");
         assert_eq!(
             owner.mod_path,
-            root.join("outer").join("inner").canonicalize().unwrap_or_else(|_| root.join("outer").join("inner"))
+            root.join("outer")
+                .join("inner")
+                .canonicalize()
+                .unwrap_or_else(|_| root.join("outer").join("inner"))
         );
     }
 
@@ -525,17 +576,27 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let game_root = tmp.path().join("game");
         let mod_root = tmp.path().join("mod_a");
-        touch(&mod_root.join("game").join("ai").join("human_assist").join("human_assist.xs")).unwrap();
+        touch(
+            &mod_root
+                .join("game")
+                .join("ai")
+                .join("human_assist")
+                .join("human_assist.xs"),
+        )
+        .unwrap();
 
         let mut ws = Workspace::new(tmp.path().to_path_buf());
-        ws.register_mod(Url::from_file_path(&mod_root).unwrap()).unwrap();
+        ws.register_mod(Url::from_file_path(&mod_root).unwrap())
+            .unwrap();
 
         let entry = ws.mods().first().unwrap();
         let project = ws.build_virtual_project(entry);
 
-        assert!(project
-            .file_overrides
-            .contains_key("ai/human_assist/human_assist.xs"));
+        assert!(
+            project
+                .file_overrides
+                .contains_key("ai/human_assist/human_assist.xs")
+        );
     }
 
     #[test]
@@ -543,7 +604,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let vanilla = root.join("game").join("ai").join("core").join("core.xs");
-        let overlay = root.join("mod_a").join("game").join("ai").join("core").join("core.xs");
+        let overlay = root
+            .join("mod_a")
+            .join("game")
+            .join("ai")
+            .join("core")
+            .join("core.xs");
         write(&vanilla, "void vanilla() {}").unwrap();
         write(&overlay, "void overlay() {}").unwrap();
 
@@ -564,7 +630,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let vanilla = root.join("game").join("ai").join("core").join("core.xs");
-        let overlay = root.join("mod_a").join("game").join("ai").join("core").join("core.xs");
+        let overlay = root
+            .join("mod_a")
+            .join("game")
+            .join("ai")
+            .join("core")
+            .join("core.xs");
         write(&vanilla, "void vanillaCore() {}").unwrap();
         write(&overlay, "void modCore() {}").unwrap();
 
@@ -689,7 +760,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let includer_rel = "ai/human_assist/a.xs";
-        let includer = root.join("game").join("ai").join("human_assist").join("a.xs");
+        let includer = root
+            .join("game")
+            .join("ai")
+            .join("human_assist")
+            .join("a.xs");
         let target = root.join("game").join("ai").join("b.xs");
         write(&includer, "include \"b.xs\";\n").unwrap();
         write(&target, "void helper() {}").unwrap();
@@ -730,13 +805,7 @@ mod tests {
         let project = ws.build_virtual_project(ws.mods().first().unwrap());
 
         let (resolved, edge) = ws
-            .resolve_include_edge(
-                &project,
-                "ai/human_assist/a.xs",
-                "b.xs",
-                &includer,
-                0,
-            )
+            .resolve_include_edge(&project, "ai/human_assist/a.xs", "b.xs", &includer, 0)
             .unwrap();
         assert_eq!(resolved, overlay);
         assert_eq!(edge.to, overlay);
@@ -767,7 +836,11 @@ mod tests {
         touch(&game_root.join("ai/human_assist.xs")).unwrap();
 
         // Binary artefacts that ship with AoM:R — these were the crash trigger.
-        std::fs::write(game_root.join("art/ArtAtlantean.bar"), b"\x00\x01\x02BINARY").unwrap();
+        std::fs::write(
+            game_root.join("art/ArtAtlantean.bar"),
+            b"\x00\x01\x02BINARY",
+        )
+        .unwrap();
         std::fs::write(game_root.join("ui/UI.bar"), b"\x00\x01\x02BINARY").unwrap();
 
         // Other non-XS files that aren't `.bar` but also shouldn't be parsed.
@@ -803,11 +876,16 @@ mod tests {
 
         let mut out = std::collections::HashMap::new();
         collect_overlay_files(&overlay_root, &overlay_root, &mut out);
-        let rels: std::collections::HashSet<&str> =
-            out.keys().map(String::as_str).collect();
+        let rels: std::collections::HashSet<&str> = out.keys().map(String::as_str).collect();
         assert!(rels.contains("ai/auto_repair.xs"));
-        assert!(!rels.contains("ai/custom.bar"), "binary .bar must not be collected");
-        assert!(!rels.contains("icon.png"), "non-XS files must not be collected");
+        assert!(
+            !rels.contains("ai/custom.bar"),
+            "binary .bar must not be collected"
+        );
+        assert!(
+            !rels.contains("icon.png"),
+            "non-XS files must not be collected"
+        );
     }
 
     #[test]
