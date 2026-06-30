@@ -9,8 +9,8 @@ use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info, warn};
 
 use crate::{
-    completion, diagnostics, engine_api, merged_view, parser, references, semantic, symbols, word,
-    workspace,
+    completion, diagnostics, engine_api, merged_view, parser, references, semantic,
+    semantic_tokens, symbols, word, workspace,
 };
 
 /// Holds the parsed-but-not-yet-processed text of every document the client
@@ -350,6 +350,7 @@ impl LanguageServer for XsLanguageServer {
                         work_done_progress_options: Default::default(),
                     },
                 )),
+                semantic_tokens_provider: Some(semantic_tokens::server_capabilities()),
                 ..Default::default()
             },
             ..Default::default()
@@ -742,6 +743,44 @@ impl LanguageServer for XsLanguageServer {
         Ok(Some(DocumentSymbolResponse::Nested(items)))
     }
 
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let text = { self.documents.lock().await.get(&uri).unwrap_or("").to_string() };
+        let current_file = uri.to_file_path().ok();
+        let merged = match current_file {
+            Some(_) => self.get_or_build_merged_view(&uri, &text).await,
+            None => None,
+        };
+        let own_table = {
+            let tables = self.symbol_tables.lock().await;
+            tables.get(&uri).cloned().unwrap_or_default()
+        };
+        let (project, ws) = {
+            let ws = self.workspace.lock().await;
+            let project = ws
+                .lookup_mod(&uri)
+                .map(|e| ws.build_virtual_project(e))
+                .unwrap_or_default();
+            (project, ws.clone())
+        };
+        let tokens = semantic_tokens::compute_tokens(
+            &text,
+            current_file.as_deref(),
+            &own_table,
+            merged.as_ref(),
+            &self.engine,
+            &ws,
+            &project,
+        );
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: semantic_tokens::encode(&tokens),
+        })))
+    }
+
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
@@ -1073,7 +1112,7 @@ impl XsLanguageServer {
     /// with hover/definition until the user fixes the parse error.
     async fn rebuild_symbol_table(&self, uri: &Url, text: &str) {
         if let Some(tree) = parser::parse(text) {
-            let table = symbols::build_symbol_table(&tree, text);
+            let table = symbols::build_full_symbol_table(&tree, text);
             debug!(
                 "rebuild_symbol_table: {} -> {} symbol(s)",
                 uri,

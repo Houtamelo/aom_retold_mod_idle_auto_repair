@@ -13,6 +13,7 @@ pub mod engine_api;
 pub mod parser;
 pub mod references;
 pub mod semantic;
+pub mod semantic_tokens;
 pub mod server;
 pub mod symbols;
 pub mod typecheck;

@@ -136,6 +136,7 @@ fn make_rule_symbol(name: &str) -> Symbol {
         params: Vec::new(),
         is_extern: false,
         is_mutable: false,
+        is_static: false,
         is_forward: false,
         visibility: Visibility::Public,
         full_range: Range::new(Position::new(0, 0), Position::new(0, 0)),

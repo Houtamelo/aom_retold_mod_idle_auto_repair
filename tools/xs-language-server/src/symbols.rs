@@ -92,6 +92,9 @@ pub struct Symbol {
     /// `mutable` modifier on a function.
     #[serde(default)]
     pub is_mutable: bool,
+    /// `static` storage-class specifier.
+    #[serde(default)]
+    pub is_static: bool,
     /// Forward-only declaration (function header without body).
     #[serde(default)]
     pub is_forward: bool,
@@ -156,6 +159,76 @@ pub fn build_symbol_table(tree: &tree_sitter::Tree, source: &str) -> SymbolTable
         }
     }
     table
+}
+
+/// Build a symbol table that includes local variable declarations inside
+/// function and block bodies, in addition to top-level symbols.
+pub fn build_full_symbol_table(tree: &tree_sitter::Tree, source: &str) -> SymbolTable {
+    let mut table = build_symbol_table(tree, source);
+    extract_local_declarations(tree.root_node(), source, &mut table.symbols);
+    table
+}
+
+fn extract_local_declarations(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    out: &mut Vec<Symbol>,
+) {
+    if node.kind() == "compound_statement" {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "declaration" {
+                extract_local_declaration(child, source, out);
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        extract_local_declarations(child, source, out);
+    }
+}
+
+fn extract_local_declaration(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<Symbol>) {
+    let init = match find_named_child(node, "init_declarator") {
+        Some(n) => n,
+        None => return,
+    };
+    let name_node = match find_named_child(init, "identifier") {
+        Some(n) => n,
+        None => return,
+    };
+
+    let name = node_text(name_node, source).to_string();
+    let ty = find_named_child(node, "primitive_type")
+        .or_else(|| find_named_child(node, "array_type"))
+        .map(|n| node_text(n, source).to_string())
+        .unwrap_or_default();
+    let modifiers = extract_modifiers(node);
+    let visibility = if modifiers.is_extern {
+        Visibility::Extern
+    } else {
+        Visibility::Local
+    };
+    let full_range = node_range(node);
+    let selection_range = node_range(name_node);
+    let init_text = node_text(init, source).to_string();
+    let detail = format!("{} {}", ty, init_text);
+
+    out.push(Symbol {
+        name,
+        kind: SymbolKind::Variable,
+        ty,
+        params: Vec::new(),
+        is_extern: modifiers.is_extern,
+        is_mutable: modifiers.is_mutable,
+        is_static: modifiers.is_static,
+        is_forward: false,
+        visibility,
+        full_range,
+        selection_range,
+        detail,
+    });
 }
 
 /// Functions that register a rule by name at runtime.
@@ -243,6 +316,7 @@ fn extract_rule(node: tree_sitter::Node<'_>, _source: &str, out: &mut Vec<Symbol
         params: Vec::new(),
         is_extern: false,
         is_mutable: false,
+        is_static: false,
         is_forward: false,
         visibility: Visibility::Public,
         full_range,
@@ -284,6 +358,7 @@ fn extract_function(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<Sym
         params,
         is_extern: modifiers.is_extern,
         is_mutable: modifiers.is_mutable,
+        is_static: modifiers.is_static,
         is_forward: false,
         visibility: function_visibility(&modifiers),
         full_range,
@@ -339,6 +414,7 @@ fn extract_declaration(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<
         params: Vec::new(),
         is_extern: modifiers.is_extern,
         is_mutable: modifiers.is_mutable,
+        is_static: modifiers.is_static,
         is_forward: false,
         visibility,
         full_range,
@@ -381,6 +457,7 @@ fn extract_forward_declaration(
         params,
         is_extern: modifiers.is_extern,
         is_mutable: modifiers.is_mutable,
+        is_static: modifiers.is_static,
         is_forward: true,
         visibility: function_visibility(&modifiers),
         full_range,
@@ -429,6 +506,7 @@ fn extract_error_function_definition(
         params,
         is_extern: modifiers.is_extern,
         is_mutable: modifiers.is_mutable,
+        is_static: modifiers.is_static,
         is_forward: false,
         visibility: function_visibility(&modifiers),
         full_range,
@@ -483,6 +561,7 @@ fn extract_error_forward_declaration(
         params,
         is_extern: modifiers.is_extern,
         is_mutable: modifiers.is_mutable,
+        is_static: modifiers.is_static,
         is_forward: true,
         visibility: function_visibility(&modifiers),
         full_range,

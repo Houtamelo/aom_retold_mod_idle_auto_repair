@@ -163,6 +163,7 @@ mod tests {
             params: vec![],
             is_extern: false,
             is_mutable: false,
+            is_static: false,
             is_forward: false,
             visibility: crate::symbols::Visibility::Public,
             full_range: decl,
