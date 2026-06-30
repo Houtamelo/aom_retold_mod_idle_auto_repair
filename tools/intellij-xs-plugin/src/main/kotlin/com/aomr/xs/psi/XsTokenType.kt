@@ -19,5 +19,8 @@ object XsTokenTypes {
     @JvmField val CHAR_LITERAL = IElementType("XS_CHAR_LITERAL", XsLanguage.INSTANCE)
     @JvmField val IDENTIFIER = IElementType("XS_IDENTIFIER", XsLanguage.INSTANCE)
     @JvmField val COMMA = IElementType("XS_COMMA", XsLanguage.INSTANCE)
+    @JvmField val DOT = IElementType("XS_DOT", XsLanguage.INSTANCE)
+    @JvmField val SEMI_COLON = IElementType("XS_SEMI_COLON", XsLanguage.INSTANCE)
+    @JvmField val OPERATION_SIGN = IElementType("XS_OPERATION_SIGN", XsLanguage.INSTANCE)
     @JvmField val XS_OTHER = IElementType("XS_OTHER", XsLanguage.INSTANCE)
 }

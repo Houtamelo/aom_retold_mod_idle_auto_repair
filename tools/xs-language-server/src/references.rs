@@ -33,11 +33,7 @@ pub fn node_text<'a>(node: tree_sitter::Node<'a>, source: &'a str) -> &'a str {
 /// The identifier kind in the XS grammar is just `"identifier"`. We don't
 /// care which kind of identifier it is (declaration vs. reference) — the
 /// caller filters declaration matches via `filter_declaration`.
-pub fn find_identifier_uses(
-    tree: &tree_sitter::Tree,
-    source: &str,
-    name: &str,
-) -> Vec<Range> {
+pub fn find_identifier_uses(tree: &tree_sitter::Tree, source: &str, name: &str) -> Vec<Range> {
     let mut out = Vec::new();
     walk(tree.root_node(), source, name, &mut out);
     out
@@ -77,11 +73,7 @@ pub fn filter_declaration(
 /// Find the identifier node under `(line, character)` and return its range.
 /// Used by `prepare_rename` — if the cursor is on whitespace or punctuation
 /// (no enclosing identifier), return `None`.
-pub fn identifier_range_at(
-    tree: &tree_sitter::Tree,
-    line: u32,
-    character: u32,
-) -> Option<Range> {
+pub fn identifier_range_at(tree: &tree_sitter::Tree, line: u32, character: u32) -> Option<Range> {
     let point = tree_sitter::Point::new(line as usize, character as usize);
     let mut current = tree.root_node().descendant_for_point_range(point, point)?;
     loop {
@@ -134,7 +126,12 @@ mod tests {
         let tree = parse(src);
         let ranges = find_identifier_uses(&tree, src, "helper");
         // 1 declaration + 2 callsites = 3.
-        assert_eq!(ranges.len(), 3, "expected 3 `helper` occurrences, got {}", ranges.len());
+        assert_eq!(
+            ranges.len(),
+            3,
+            "expected 3 `helper` occurrences, got {}",
+            ranges.len()
+        );
     }
 
     #[test]
@@ -174,7 +171,10 @@ mod tests {
         });
         let out = filter_declaration(ranges, &table, "helper", false);
         assert_eq!(out.len(), 2);
-        assert!(!out.contains(&decl), "declaration range should be filtered out");
+        assert!(
+            !out.contains(&decl),
+            "declaration range should be filtered out"
+        );
     }
 
     #[test]

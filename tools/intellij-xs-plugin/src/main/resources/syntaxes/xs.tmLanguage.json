@@ -13,7 +13,7 @@
       "include": "#switch_statement"
     },
     {
-      "match": "\\b(break|continue|else|for|if|return|while|do)\\b",
+      "match": "\\b(include|break|continue|else|for|if|return|while|do)\\b",
       "name": "keyword.control.c"
     },
     {

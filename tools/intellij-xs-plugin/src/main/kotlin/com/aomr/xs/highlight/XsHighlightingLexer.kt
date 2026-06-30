@@ -26,7 +26,8 @@ class XsHighlightingLexer : DelegateLexer(XsLexerAdapter()) {
             "void", "int", "bool", "float", "string", "vector",
             "if", "else", "while", "for", "return", "mutable", "extern",
             "const", "rule", "class", "ref", "default", "switch", "case",
-            "break", "continue", "true", "false"
+            "break", "continue", "true", "false",
+            "include"
         )
 
         private val NUMBER_REGEX = Regex("[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?")

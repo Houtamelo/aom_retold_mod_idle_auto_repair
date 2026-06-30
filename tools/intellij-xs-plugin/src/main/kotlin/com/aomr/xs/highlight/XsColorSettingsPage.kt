@@ -51,7 +51,7 @@ class XsColorSettingsPage : ColorSettingsPage {
             AttributesDescriptor("Identifier", XsTextAttributesKeys.XS_IDENTIFIER),
             AttributesDescriptor("Default", XsTextAttributesKeys.XS_DEFAULT),
             // Inherited General / Language Defaults categories
-            AttributesDescriptor("Code//Identifier under caret", XsTextAttributes.IDENTIFIER_UNDER_CARET),
+            AttributesDescriptor("Code//Identifier under caret (uses global General — per-language override is not supported in Rider)", XsTextAttributes.IDENTIFIER_UNDER_CARET),
             AttributesDescriptor("Code//Matched brace", XsTextAttributes.MATCHED_BRACE),
             AttributesDescriptor("Code//Unmatched brace", XsTextAttributes.UNMATCHED_BRACE),
             AttributesDescriptor("Errors and Warnings//Unknown symbol", XsTextAttributes.UNKNOWN_SYMBOL),

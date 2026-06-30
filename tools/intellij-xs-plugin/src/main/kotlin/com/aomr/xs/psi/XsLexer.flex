@@ -30,6 +30,10 @@ IDENTIFIER=[A-Za-z_][A-Za-z_0-9]*
     "["               { return XsTokenTypes.LBRACKET; }
     "]"               { return XsTokenTypes.RBRACKET; }
     ","               { return XsTokenTypes.COMMA; }
+    "."               { return XsTokenTypes.DOT; }
+    ";"               { return XsTokenTypes.SEMI_COLON; }
+    "=" | "+" | "-" | "*" | "/" | "%" | "<" | ">" | "!" | "~" | "&" | "|" | "^" { return XsTokenTypes.OPERATION_SIGN; }
+    [0-9]+("."[0-9]+)?([eE][+-]?[0-9]+)? { return XsTokenTypes.XS_OTHER; }
     "\""              { yybegin(IN_STRING); return XsTokenTypes.STRING_QUOTE; }
     "'"               { yybegin(IN_CHAR); return XsTokenTypes.CHAR_QUOTE; }
     {IDENTIFIER}      { return XsTokenTypes.IDENTIFIER; }

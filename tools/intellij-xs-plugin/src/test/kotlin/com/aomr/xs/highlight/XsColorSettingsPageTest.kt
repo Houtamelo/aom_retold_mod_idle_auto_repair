@@ -66,4 +66,16 @@ class XsColorSettingsPageTest {
         assertFalse("Demo text must not be blank", demo.isNullOrBlank())
         assertTrue("Demo text must contain a keyword", demo!!.contains("void"))
     }
+
+    @Test
+    fun test_identifier_under_caret_descriptor_documents_global_setting() {
+        val page = XsColorSettingsPage()
+        val descriptors = page.attributeDescriptors
+        val descriptor = descriptors.find { it.displayName.contains("Identifier under caret") }
+            ?: throw AssertionError("Identifier under caret descriptor not found")
+        assertTrue(
+            "Descriptor label must document the global limitation",
+            descriptor.displayName.contains("uses global General", ignoreCase = true)
+        )
+    }
 }

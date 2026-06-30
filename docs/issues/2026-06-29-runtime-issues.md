@@ -397,3 +397,228 @@ R5-F-01/02/03, and R1-F-01/02/03.
 - `AGENTS.md` — "Forward declarations are required" rule (relevant to Issue 2)
 - `tools/xs-language-server/` — LSP server source (Issues 2 and 4)
 - `tools/intellij-xs-plugin/` — IntelliJ plugin source (Issues 1, 3, 4)
+
+---
+
+## Rider smoke test findings (2026-06-30)
+
+After Issues 1–4 were fixed and the plugin was built at
+`dist/intellij-xs-plugin-0.4.0.zip`, the user installed it in Rider and
+ran a manual smoke test. The following findings emerged. All four of
+the original issues are confirmed fixed (Issues 1, 2, 4 verified
+directly; Issue 3 only **partially** — see "Issue 3 sub-findings"
+below).
+
+### Issue 3 sub-findings (Rider smoke test)
+
+The Option α implementation of Issue #3 (rename "xs" → "XS" + 12
+inherited Rider categories) shipped in commit `a370e78`. Bucket C
+(Engine/Modded/UnModded function/variable/constant/type, Local,
+Static, extern, Built-in type, Class) was deferred to a follow-up
+change named `expand-color-scheme-semantic-tokens`. The smoke test
+also surfaced three additional bugs in the Option α implementation
+that should be addressed in the same follow-up:
+
+**Issue 3a — `include` is not being rendered as a keyword.**
+- **Status**: Resolved 2026-06-30 by `openspec/changes/archive/2026-06-29-fix-color-scheme-quick-wins/`.
+  `include` is now added to both the TextMate grammar keyword regex
+  (`xs.tmLanguage.json`) and the native highlighter's keyword set
+  (`XsHighlightingLexer.kt`).
+- Reproducer: open any `.xs` file. Place caret on `include`.
+- Expected: the word `include` is colored as a keyword.
+- Actual: `include` is colored as `Default` (regular text).
+- Root cause: the TextMate grammar (`syntaxes/xs.tmLanguage.json`) does
+  not scope `include` as a `keyword.control.include` (or similar)
+  scope. The existing keyword list probably doesn't include it.
+- Affected file: `tools/intellij-xs-plugin/src/main/resources/syntaxes/xs.tmLanguage.json`
+- Severity: low (visual nit, but should be obvious to users since
+  `include` is one of the most common XS keywords).
+
+**Issue 3b — Braces and operators are using the `Default` color, not
+their respective colors.**
+- Reproducer: open any `.xs` file. The braces (`{}`), brackets (`[]`),
+  parens (`()`), comma, dot, etc. are all rendered in the color
+  assigned to `Default`, not in the colors the user picked for the
+  Braces and Operators subcategory.
+- Expected: braces use the Braces color the user picked; brackets
+  use the Brackets color; etc.
+- Actual: all use `Default`.
+- Root cause: the Option α implementation only **declared** the 12
+  `TextAttributesKey`s in `XsTextAttributes.kt` and registered them
+  in `XsColorSettingsPage.kt`, but did **not** wire the
+  `XsSyntaxHighlighter` (or the TextMate semantic-mapping
+  configuration) to actually map lexer tokens to those keys. So
+  the colors are visible in settings but not applied at runtime.
+- Affected files:
+  - `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/highlight/XsSyntaxHighlighter.kt`
+  - `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/highlight/XsHighlighterFactory.kt` (if separate)
+  - Possibly `tools/intellij-xs-plugin/src/main/resources/syntaxes/xs.tmLanguage.json` (semantic mappings)
+- Severity: medium (the whole point of the color settings is to
+  actually see the colors in the editor).
+- **Status**: Resolved 2026-06-30 by `openspec/changes/archive/2026-06-29-fix-color-scheme-quick-wins/`.
+  `XsSyntaxHighlighter.kt` now maps each of the 8 inherited tokens
+  (BRACES, BRACKETS, COMMA, DOT, OPERATION_SIGN, OVERLOADED_OPERATOR,
+  PARENTHESES, SEMI_COLON) to its corresponding `XsTextAttributes`
+  key. Three new token types (DOT, SEMI_COLON, OPERATION_SIGN) added
+  to `XsTokenType.kt` with matching lexer rules in `XsLexer.flex`.
+
+**Issue 3c — Identifier under caret is not working.**
+- Reproducer: open any `.xs` file. Place caret inside any identifier
+  (e.g. on a function name, a variable name). No background-color
+  change occurs.
+- Expected: the word under the caret gets a background-color
+  emphasis (per the user's color choice in the settings).
+- Actual: no change.
+- Status: `Matched & Unmatched braces` work properly; `Keyword`,
+  `Number`, `String`, `Comment` all work properly; only
+  `Identifier under caret` is broken.
+- Root cause: unclear. The Option α implementation declared
+  `XS_IDENTIFIER_UNDER_CARET` with fallback
+  `CodeInsightColors.IDENTIFIER_UNDER_CARET_ATTRIBUTES`. Possible
+  reasons this doesn't work:
+  1. Rider's "Identifier under caret" is sourced from the global
+     color scheme, not the per-language one; the per-language
+     override is ignored.
+  2. The fallback constant name is wrong (maybe it should be
+     `CodeInsightColors.IDENTIFIER_UNDER_CARET_ATTRIBUTES` or
+     `EditorColors.IDENTIFIER_UNDER_CARET_ATTRIBUTES` — verify in
+     2024.2 platform sources).
+  3. The platform's IdentifierUnderCaretPass requires explicit
+     registration beyond just declaring the TextAttributesKey.
+- Affected file: `tools/intellij-xs-plugin/src/main/kotlin/com/aomr/xs/highlight/XsTextAttributes.kt`
+  (the fallback key).
+- Severity: low (cosmetic; not a blocker for any real workflow).
+- **Investigate during the follow-up change** (do not assume the
+  Option α fallback is correct).
+- **Status**: Resolved 2026-06-30 by `openspec/changes/archive/2026-06-29-fix-color-scheme-quick-wins/`.
+  Investigation confirmed the per-language override is not supported
+  in Rider; the workaround is to customize under the **Color Scheme →
+  General** scheme. The `XsColorSettingsPage` descriptor for the
+  Identifier-under-caret category was updated to include
+  "(uses global General — per-language override is not supported in
+  Rider)" so users see this limitation when they customize the
+  category. The fallback constant `EditorColors.IDENTIFIER_UNDER_CARET_ATTRIBUTES`
+  is correct.
+
+### Cross-reference against the audit
+
+A quick overlap check before action:
+
+| Sub-issue | Overlap with the audit                                                                 | Notes                                                                                |
+| --------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| 3a (include keyword) | None confirmed                                                              | Grammar-scope fix; the audit was static-only                                          |
+| 3b (braces/operators) | Possibly related to Category E in `docs/post-lsp-migration-issues.md` (no syntax highlighting) | Different bug — Categories are declared but not bound; that doc's E was a stub PSI fix |
+| 3c (identifier under caret) | None confirmed                                                      | Rider-specific behavior; possibly not fixable from the plugin                          |
+
+### Recommended follow-up change
+
+- **Name**: `expand-color-scheme-semantic-tokens`
+- **Status**: split into three smaller changes (2026-06-30):
+  - `fix-color-scheme-quick-wins` (3a/3b/3c): committed
+  - `add-lsp-semantic-tokens` (Bucket C LSP): pending
+  - `add-plugin-semantic-tokens` (Bucket C Plugin): pending
+- **Scope**:
+  - The original Bucket C from Issue #3: add LSP `textDocument/semanticTokens` capability; emit semantic-token kinds + origin modifier (engine / modded / unmodded); extract local variables and classes in the LSP symbol table; add a plugin-side semantic-token-to-TextAttributesKey converter; declare and bind the 14+ new categories (Engine/Modded/UnModded function, Local/Static/extern variable, Engine/Modded/UnModded constant, Built-in type, UnModded/Modded class).
+  - 3a: extend the TextMate grammar to scope `include` as a keyword.
+  - 3b: bind the `XsSyntaxHighlighter` to the 12 inherited TextAttributesKeys so braces/operators actually use their colors.
+  - 3c: investigate the Rider Identifier-under-caret behavior; if the per-language override is supported, ensure the fallback key is correct; if not, document the limitation and surface a clear message in the color settings.
+- **Risk**: medium-high (LSP semantic tokens + local-var/class extraction are non-trivial).
+- **Effort**: ~1-2 weeks.
+- **pluginVersion bump**: this adds **new LSP features** + **new settings UI** + **new grammar scope** → MINOR bump (per AGENTS.md table). 0.4.0 → 0.5.0.
+
+## Known limitations (deferred to future specs)
+
+### Cross-file forward-declaration ordering
+
+**Status**: known limitation of the Issue #2 fix (`0491693`).
+
+**Scenario**:
+```
+// file main.xs (the root, included by the game engine)
+include "A.xs"
+include "B.xs"
+
+// file A.xs
+void X() { ... }
+
+// file B.xs
+X();  // call site
+```
+
+The game engine accepts this because `A` is included before `B`, so
+`X` is defined (in `A`) before being used (in `B`).
+
+**The Issue #2 fix only handles the "single file" case.** Specifically:
+- Forward declarations within a single file: works (basic line-order check).
+- Function defined in `main.xs`, used in an included file: works (the
+  call site's `effective_line` is computed against the includer
+  file's include line, and the definition's `effective_line` is the
+  line in `main.xs` where it's defined).
+- Function defined in an included file, used in `main.xs`: works
+  (the Issue #2 fix set the definition's `effective_line` to the
+  current-file include line).
+
+**What does NOT work** (and is not handled by the Issue #2 fix):
+- Function defined in an included file `A`, used in another included
+  file `B`, where both `A` and `B` are included from `main.xs`. The
+  current LSP doesn't know that `A` is included before `B`, so it
+  can't tell that `A`'s definitions come "before" `B`'s uses from
+  the perspective of `main.xs`.
+
+**Why this is hard to fix properly**:
+- The LSP would need to compute, for every pair of files, the
+  "include order" of those files relative to any common includer.
+- This is a global property of the include graph, not a local
+  property of the open file.
+- It's also recursive: `A` itself might be included from
+  multiple places, and each inclusion point has its own ordering.
+- The engine's exact textual-paste include semantics (does
+  transitive include count? does cyclic include matter? what
+  about include-on-the-same-line with another statement?) are not
+  documented in this repo.
+
+**Workaround for the user**:
+- For cross-file forward declarations, add an explicit forward
+  declaration in `B.xs` before the use site, or in `main.xs` before
+  the `include "B.xs"` directive:
+  ```xs
+  // main.xs
+  void X();  // forward declaration
+  include "A.xs"
+  include "B.xs"
+  ```
+  or:
+  ```xs
+  // B.xs
+  extern void X();  // forward declaration
+  X();
+  ```
+- This works because XS supports forward declarations (per
+  `AGENTS.md` "Forward declarations are required" rule), and the
+  forward declaration tells the LSP that `X` is "available" at this
+  point in the include graph.
+
+**Recommended future spec**:
+- A dedicated SDD change (suggested name
+  `fix-lsp-cross-file-forward-decl-ordering`) that:
+  - Builds the full include graph for the open file's workspace.
+  - Computes, for every symbol, an "ordering" property that
+    reflects when the symbol becomes available to every other file
+    in the graph.
+  - Updates the forward-declaration diagnostic to use this
+    cross-file ordering.
+- Effort: ~1-2 weeks; requires careful thought about cyclic
+  includes, transitive includes, and engine include semantics.
+- Risk: medium-high; the ordering property may have surprising
+  edge cases.
+
+### Brace / operator / identifier-under-caret coloring gaps
+
+Documented above in "Issue 3 sub-findings". To be addressed in
+`expand-color-scheme-semantic-tokens`.
+
+### Semantic-token-driven categories (Bucket C)
+
+Documented above in "Issue 3 sub-findings" + the original
+`openspec/changes/archive/2026-06-29-expand-color-scheme-categories/`
+proposal. To be addressed in `expand-color-scheme-semantic-tokens`.
