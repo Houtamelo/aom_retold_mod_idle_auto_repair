@@ -1,5 +1,6 @@
 package com.aomr.xs.highlight
 
+import com.aomr.xs.psi.XsTokenTypes
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -45,7 +46,9 @@ class XsSyntaxHighlighterFactoryTest {
         while (lexer.tokenType != null) {
             tokenCount++
             val keys = highlighter.getTokenHighlights(lexer.tokenType)
-            assertTrue("Every token must map to at least one TextAttributesKey", keys.isNotEmpty())
+            if (lexer.tokenType != XsTokenTypes.IDENTIFIER) {
+                assertTrue("Every non-identifier token must map to at least one TextAttributesKey", keys.isNotEmpty())
+            }
             seenKeys.addAll(keys)
             lexer.advance()
         }
@@ -58,15 +61,18 @@ class XsSyntaxHighlighterFactoryTest {
     }
 
     @Test
-    fun identifiersReceiveDistinctKeyFromKeywords() {
+    fun identifiersReceiveNoDefaultHighlight() {
         val factory = XsSyntaxHighlighterFactory()
         val highlighter = factory.getSyntaxHighlighter(null, null)
         val lexer = highlighter.highlightingLexer
         lexer.start("myVar")
 
         assertNotNull("Lexer must produce a token for identifier", lexer.tokenType)
-        val keys = highlighter.getTokenHighlights(lexer.tokenType).toSet()
-        assertTrue("Identifiers must be highlighted", keys.contains(XsTextAttributesKeys.XS_IDENTIFIER))
+        val keys = highlighter.getTokenHighlights(lexer.tokenType)
+        assertTrue(
+            "IDENTIFIER must not contribute a default color; let semantic tokens win",
+            keys.isEmpty()
+        )
         assertEquals("Identifier token must not be highlighted as keyword", false, keys.contains(XsTextAttributesKeys.XS_KEYWORD))
     }
 }

@@ -16,7 +16,7 @@ class XsSyntaxHighlighter : SyntaxHighlighterBase() {
             XsTokenTypes.LINE_COMMENT, XsTokenTypes.BLOCK_COMMENT -> arrayOf(XsTextAttributesKeys.XS_COMMENT)
             XsTokenTypes.STRING_LITERAL, XsTokenTypes.CHAR_LITERAL,
             XsTokenTypes.STRING_QUOTE, XsTokenTypes.CHAR_QUOTE -> arrayOf(XsTextAttributesKeys.XS_STRING)
-            XsTokenTypes.IDENTIFIER -> arrayOf(XsTextAttributesKeys.XS_IDENTIFIER)
+            XsTokenTypes.IDENTIFIER -> EMPTY_KEYS
             XsTokenTypes.WHITE_SPACE -> arrayOf(XsTextAttributesKeys.XS_DEFAULT)
             XsTokenTypes.LBRACE, XsTokenTypes.RBRACE -> arrayOf(XsTextAttributes.BRACES)
             XsTokenTypes.LBRACKET, XsTokenTypes.RBRACKET -> arrayOf(XsTextAttributes.BRACKETS)

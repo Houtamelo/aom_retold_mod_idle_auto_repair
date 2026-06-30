@@ -71,8 +71,14 @@ object XsTextAttributes {
     /** `static` storage-class variable. */
     val VARIABLE_STATIC = createTextAttributesKey("XS_VARIABLE_STATIC", DefaultLanguageHighlighterColors.STATIC_FIELD)
 
-    /** Built-in primitive type (`bool`, `int`, `float`, `string`, `vector`). */
-    val TYPE_BUILTIN = createTextAttributesKey("XS_TYPE_BUILTIN", DefaultLanguageHighlighterColors.KEYWORD)
+    /**
+     * Built-in primitive type (`bool`, `int`, `float`, `string`, `vector`).
+     *
+     * Inherits from [DefaultLanguageHighlighterColors.IDENTIFIER] (not KEYWORD)
+     * so the semantic-token layer paints `int`/`string`/... with a type-looking
+     * color instead of the keyword color.
+     */
+    val TYPE_BUILTIN = createTextAttributesKey("XS_TYPE_BUILTIN", DefaultLanguageHighlighterColors.IDENTIFIER)
 
     /** Class declared in a vanilla `<AOMR>/game/` file (not overridden). */
     val TYPE_UNMODDED_CLASS = createTextAttributesKey("XS_TYPE_UNMODDED_CLASS", DefaultLanguageHighlighterColors.IDENTIFIER)

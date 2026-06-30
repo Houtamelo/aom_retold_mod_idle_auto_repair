@@ -42,7 +42,6 @@ class XsTextMateHighlightingTest {
         assertHasScope(repository, "comments", "comment.block.c")
         assertHasScope(repository, "strings", "string.quoted.double.c")
         assertHasScope(repository, "numbers", "constant.numeric.decimal.c")
-        assertHasScope(repository, "storage_types", "storage.type.built-in.primitive.c")
     }
 
     private fun assertHasScope(repository: JsonObject, key: String, expectedScope: String) {

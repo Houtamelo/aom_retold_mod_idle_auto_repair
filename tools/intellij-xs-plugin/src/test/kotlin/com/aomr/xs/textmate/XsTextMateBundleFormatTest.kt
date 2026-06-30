@@ -1,6 +1,7 @@
 package com.aomr.xs.textmate
 
 import com.aomr.xs.XsLanguage
+import com.google.gson.JsonElement
 import com.google.gson.JsonParser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -210,6 +211,44 @@ class XsTextMateBundleFormatTest {
             "XS grammar should use scope 'source.xs' so the IDE can route .xs files",
             "source.xs", scopeName
         )
+    }
+
+    @Test
+    fun grammarHasNoStorageTypesRuleForPrimitiveTypes() {
+        val bundle = XsTextMateBundleProvider().getBundles().first()
+        val grammar = bundle.path.resolve("syntaxes/xs.tmLanguage.json")
+        val obj = parseJson(grammar)
+
+        // The old `storage_types` repository block matched int/float/bool/void/string/vector/class
+        // and tagged them with storage.type.built-in.primitive.c, which pre-empted the
+        // semantic-token layer. Ensure no such pattern remains anywhere in the grammar.
+        val primitivePattern = Regex("""(?i)(?<!\w)(int|float|bool|void|string|vector|class)(?!\w)""")
+        val violations = collectViolations(obj, primitivePattern)
+        assertTrue(
+            "No pattern should match primitive type keywords and tag them with " +
+                "storage.type.built-in.primitive.c; violations: $violations",
+            violations.isEmpty()
+        )
+    }
+
+    private fun collectViolations(element: JsonElement, primitivePattern: Regex): List<String> {
+        val results = mutableListOf<String>()
+        if (element.isJsonObject) {
+            val obj = element.asJsonObject
+            val name = obj.get("name")?.takeIf { it.isJsonPrimitive }?.asString
+            val match = obj.get("match")?.takeIf { it.isJsonPrimitive }?.asString
+            if (name == "storage.type.built-in.primitive.c" && match != null && primitivePattern.containsMatchIn(match)) {
+                results.add(match)
+            }
+            for (key in obj.keySet()) {
+                results.addAll(collectViolations(obj.get(key), primitivePattern))
+            }
+        } else if (element.isJsonArray) {
+            for (item in element.asJsonArray) {
+                results.addAll(collectViolations(item, primitivePattern))
+            }
+        }
+        return results
     }
 
     // -- helpers --

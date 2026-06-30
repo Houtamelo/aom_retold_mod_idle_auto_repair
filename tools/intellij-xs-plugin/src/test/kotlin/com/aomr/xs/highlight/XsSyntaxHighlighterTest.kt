@@ -63,4 +63,12 @@ class XsSyntaxHighlighterTest {
     fun test_semicolon_maps_to_xs_semicolon() {
         assertTrue("; should map to SEMI_COLON", highlightsFor(";").contains(XsTextAttributes.SEMI_COLON))
     }
+
+    @Test
+    fun test_identifier_returns_no_text_attributes() {
+        assertTrue(
+            "IDENTIFIER must not contribute a default color; let semantic tokens win",
+            highlightsFor("foo").isEmpty()
+        )
+    }
 }

@@ -1,7 +1,9 @@
 package com.aomr.xs.highlight
 
+import com.intellij.openapi.editor.DefaultLanguageHighlighterColors
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -76,6 +78,17 @@ class XsColorSettingsPageTest {
         assertTrue(
             "Descriptor label must document the global limitation",
             descriptor.displayName.contains("uses global General", ignoreCase = true)
+        )
+    }
+
+    @Test
+    fun type_builtin_not_inherits_from_keyword() {
+        val key = XsTextAttributes.TYPE_BUILTIN
+        assertNotEquals(
+            "TYPE_BUILTIN must not inherit from KEYWORD so semantic tokens for " +
+                "int/string/bool/float/vector render as a non-keyword type color",
+            DefaultLanguageHighlighterColors.KEYWORD,
+            key.fallbackAttributeKey
         )
     }
 }

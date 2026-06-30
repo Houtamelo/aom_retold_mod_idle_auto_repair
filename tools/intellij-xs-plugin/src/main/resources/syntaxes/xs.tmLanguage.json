@@ -17,9 +17,6 @@
       "name": "keyword.control.c"
     },
     {
-      "include": "#storage_types"
-    },
-    {
       "match": "\\b(const|extern|static|mutable|ref)\\b",
       "name": "storage.modifier.c"
     },
@@ -735,9 +732,6 @@
           "include": "#comments"
         },
         {
-          "include": "#storage_types"
-        },
-        {
           "include": "#method_access"
         },
         {
@@ -796,9 +790,6 @@
       "patterns": [
         {
           "include": "#comments"
-        },
-        {
-          "include": "#storage_types"
         },
         {
           "include": "#operators"
@@ -1363,14 +1354,7 @@
         }
       }
     },
-    "storage_types": {
-      "patterns": [
-        {
-          "match": "(?-mix:(?<!\\w)(?:float|void|bool|int|string|vector|class)(?!\\w))",
-          "name": "storage.type.built-in.primitive.c"
-        }
-      ]
-    },
+
     "string_escaped_char": {
       "patterns": [
         {
