@@ -6,13 +6,13 @@
 //!
 //! ```text
 //!     v2/<sha256-of-doxygen_retail.7z>.json          engine API (syscalls + aiplans)
-//!     game_parse/v2/<mtime>-<sha256>.json            per-file parse tree + symbols
+//!     game_parse/v3/<mtime>-<sha256>.json            per-file parse tree + symbols
 //! ```
 //!
-//! The `v2/` prefix for engine data is the current schema-version marker.
-//! It was bumped from `v1/` when the legacy JSON backfill was removed, so
-//! existing `v1/` caches are left in place and the server writes/reads only
-//! `v2/` files. Future incompatible schema changes can write to `v3/` etc.
+//! The `v2/` prefix for engine data and `game_parse/v3/` for per-file parse
+//! caches are the current schema-version markers. Per-file parse caches were
+//! bumped from `v2/` to `v3/` when class member symbols were added to the
+//! `SymbolTable`; existing `game_parse/v2/` caches are ignored and rebuilt.
 
 use std::fs;
 use std::io::Write;
@@ -45,9 +45,9 @@ pub fn engine_cache_dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("v2")
 }
 
-/// `game_parse/v2/` subdirectory for per-file parse caches.
+/// `game_parse/v3/` subdirectory for per-file parse caches.
 pub fn parse_cache_dir(cache_dir: &Path) -> PathBuf {
-    cache_dir.join("game_parse").join("v2")
+    cache_dir.join("game_parse").join("v3")
 }
 
 /// Create all cache subdirectories if they do not already exist.

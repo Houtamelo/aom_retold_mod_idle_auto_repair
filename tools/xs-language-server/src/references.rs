@@ -161,6 +161,7 @@ mod tests {
             kind: crate::symbols::SymbolKind::Function,
             ty: "int".to_string(),
             params: vec![],
+            class_owner: None,
             is_extern: false,
             is_mutable: false,
             is_static: false,

@@ -21,13 +21,15 @@ use std::collections::HashSet;
 use tower_lsp::lsp_types::{Position, Range};
 
 /// What kind of XS construct a symbol represents.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SymbolKind {
     Rule,
     Function,
     Variable,
     Constant,
     Class,
+    ClassField,
+    ClassMethod,
 }
 
 impl SymbolKind {
@@ -39,6 +41,8 @@ impl SymbolKind {
             SymbolKind::Variable => "variable",
             SymbolKind::Constant => "constant",
             SymbolKind::Class => "class",
+            SymbolKind::ClassField => "field",
+            SymbolKind::ClassMethod => "method",
         }
     }
 }
@@ -88,6 +92,9 @@ pub struct Symbol {
     pub ty: String,
     /// Function params; empty for non-functions.
     pub params: Vec<Param>,
+    /// For class fields and methods, the name of the enclosing class.
+    #[serde(default)]
+    pub class_owner: Option<String>,
     /// `extern` storage class on a function/variable declaration.
     #[serde(default)]
     pub is_extern: bool,
@@ -223,6 +230,7 @@ fn extract_local_declaration(node: tree_sitter::Node<'_>, source: &str, out: &mu
         kind: SymbolKind::Variable,
         ty,
         params: Vec::new(),
+        class_owner: None,
         is_extern: modifiers.is_extern,
         is_mutable: modifiers.is_mutable,
         is_static: modifiers.is_static,
@@ -314,15 +322,87 @@ fn extract_class(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<Symbol
     let full_range = node_range(node);
     let selection_range = node_range(name_node);
     out.push(Symbol {
-        name,
+        name: name.clone(),
         kind: SymbolKind::Class,
         ty: String::new(),
         params: Vec::new(),
+        class_owner: None,
         is_extern: false,
         is_mutable: false,
         is_static: false,
         is_forward: false,
         visibility: Visibility::Public,
+        full_range,
+        selection_range,
+        detail,
+    });
+
+    let Some(body) = node.child_by_field_name("body") else { return };
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        if child.kind() == "field_declaration" {
+            extract_class_member(child, source, &name, out);
+        }
+    }
+}
+
+fn extract_class_member(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    class_name: &str,
+    out: &mut Vec<Symbol>,
+) {
+    // In the XS grammar `field_declaration` does not wrap its declarator in
+    // a named field; the declarator is a direct named child.
+    let declarator = match find_named_child(node, "function_declarator") {
+        Some(d) => d,
+        None => match find_named_child(node, "identifier") {
+            Some(id) => id,
+            None => return,
+        },
+    };
+
+    let (name, kind, params) = if declarator.kind() == "function_declarator" {
+        let Some(name_node) = find_named_child(declarator, "identifier") else {
+            return;
+        };
+        let params = find_named_child(declarator, "parameter_list")
+            .map(|n| extract_params(n, source))
+            .unwrap_or_default();
+        (node_text(name_node, source).to_string(), SymbolKind::ClassMethod, params)
+    } else {
+        (node_text(declarator, source).to_string(), SymbolKind::ClassField, Vec::new())
+    };
+
+    let ty = find_named_child(node, "primitive_type")
+        .or_else(|| find_named_child(node, "array_type"))
+        .map(|n| node_text(n, source).to_string())
+        .unwrap_or_default();
+
+    let name_node = if declarator.kind() == "function_declarator" {
+        find_named_child(declarator, "identifier")
+    } else {
+        Some(declarator)
+    };
+    let full_range = node_range(node);
+    let selection_range = name_node.map(node_range).unwrap_or_else(|| node_range(node));
+    let detail = if kind == SymbolKind::ClassMethod {
+        format_function_detail(&ty, &name, &params)
+    } else {
+        format!("{} {}", ty, name)
+    };
+
+    out.push(Symbol {
+        name,
+        kind,
+        ty,
+        params,
+        class_owner: Some(class_name.to_string()),
+        is_extern: false,
+        is_mutable: false,
+        is_static: false,
+        is_forward: false,
+        visibility: Visibility::Local,
         full_range,
         selection_range,
         detail,
@@ -342,6 +422,7 @@ fn extract_rule(node: tree_sitter::Node<'_>, _source: &str, out: &mut Vec<Symbol
         kind: SymbolKind::Rule,
         ty: String::new(),
         params: Vec::new(),
+        class_owner: None,
         is_extern: false,
         is_mutable: false,
         is_static: false,
@@ -384,6 +465,7 @@ fn extract_function(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<Sym
         kind: SymbolKind::Function,
         ty,
         params,
+        class_owner: None,
         is_extern: modifiers.is_extern,
         is_mutable: modifiers.is_mutable,
         is_static: modifiers.is_static,
@@ -440,6 +522,7 @@ fn extract_declaration(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<
         },
         ty,
         params: Vec::new(),
+        class_owner: None,
         is_extern: modifiers.is_extern,
         is_mutable: modifiers.is_mutable,
         is_static: modifiers.is_static,
@@ -483,6 +566,7 @@ fn extract_forward_declaration(
         kind: SymbolKind::Function,
         ty,
         params,
+        class_owner: None,
         is_extern: modifiers.is_extern,
         is_mutable: modifiers.is_mutable,
         is_static: modifiers.is_static,
@@ -532,6 +616,7 @@ fn extract_error_function_definition(
         kind: SymbolKind::Function,
         ty,
         params,
+        class_owner: None,
         is_extern: modifiers.is_extern,
         is_mutable: modifiers.is_mutable,
         is_static: modifiers.is_static,
@@ -587,6 +672,7 @@ fn extract_error_forward_declaration(
         kind: SymbolKind::Function,
         ty,
         params,
+        class_owner: None,
         is_extern: modifiers.is_extern,
         is_mutable: modifiers.is_mutable,
         is_static: modifiers.is_static,

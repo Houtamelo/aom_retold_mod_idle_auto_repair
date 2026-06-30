@@ -113,6 +113,8 @@ fn symbol_to_completion_item(sym: &Symbol) -> CompletionItem {
         SymbolKind::Variable => CompletionItemKind::VARIABLE,
         SymbolKind::Constant => CompletionItemKind::CONSTANT,
         SymbolKind::Class => CompletionItemKind::CLASS,
+        SymbolKind::ClassField => CompletionItemKind::FIELD,
+        SymbolKind::ClassMethod => CompletionItemKind::METHOD,
     };
     CompletionItem {
         label: sym.name.clone(),

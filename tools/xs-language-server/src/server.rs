@@ -738,8 +738,8 @@ impl LanguageServer for XsLanguageServer {
         let Some(table) = tables.get(uri) else {
             return Ok(None);
         };
-        let items: Vec<DocumentSymbol> = table.symbols.iter().map(symbol_to_lsp).collect();
-        debug!("document_symbol: {} symbol(s) for {}", items.len(), uri);
+        let items = build_document_symbol_tree(table);
+        debug!("document_symbol: {} top-level symbol(s) for {}", items.len(), uri);
         Ok(Some(DocumentSymbolResponse::Nested(items)))
     }
 
@@ -766,6 +766,14 @@ impl LanguageServer for XsLanguageServer {
                 .unwrap_or_default();
             (project, ws.clone())
         };
+        let cache_dir = crate::cache::state_cache_dir();
+        let member_index = semantic_tokens::MemberIndex::build(
+            &own_table,
+            &ws,
+            &project,
+            &cache_dir,
+            current_file.as_deref(),
+        );
         let tokens = semantic_tokens::compute_tokens(
             &text,
             current_file.as_deref(),
@@ -774,6 +782,7 @@ impl LanguageServer for XsLanguageServer {
             &self.engine,
             &ws,
             &project,
+            &member_index,
         );
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
@@ -1311,19 +1320,60 @@ fn format_hover_merged_symbol(ms: &merged_view::MergedSymbol) -> String {
     md
 }
 
-/// Convert a workspace symbol to the LSP `DocumentSymbol` shape.
-fn symbol_to_lsp(s: &symbols::Symbol) -> DocumentSymbol {
-    let kind = match s.kind {
+/// Map an XS `SymbolKind` to the LSP `SymbolKind` used by document and
+/// workspace symbol responses.
+fn lsp_symbol_kind(kind: symbols::SymbolKind) -> SymbolKind {
+    match kind {
         symbols::SymbolKind::Rule => SymbolKind::FUNCTION, // XS has no RULE kind in LSP
         symbols::SymbolKind::Function => SymbolKind::FUNCTION,
         symbols::SymbolKind::Variable => SymbolKind::VARIABLE,
         symbols::SymbolKind::Constant => SymbolKind::CONSTANT,
         symbols::SymbolKind::Class => SymbolKind::CLASS,
-    };
+        symbols::SymbolKind::ClassField => SymbolKind::FIELD,
+        symbols::SymbolKind::ClassMethod => SymbolKind::METHOD,
+    }
+}
+
+/// Build a tree of `DocumentSymbol`s where class members are nested under
+/// their owning class.
+fn build_document_symbol_tree(table: &symbols::SymbolTable) -> Vec<DocumentSymbol> {
+    let mut items = Vec::new();
+    let mut pending_members: Vec<&symbols::Symbol> = Vec::new();
+
+    for sym in &table.symbols {
+        if sym.class_owner.is_some() {
+            pending_members.push(sym);
+            continue;
+        }
+
+        let mut children = Vec::new();
+        if sym.kind == symbols::SymbolKind::Class {
+            let class_name = &sym.name;
+            children.extend(pending_members.drain(..).filter(|m| {
+                m.class_owner.as_deref() == Some(class_name)
+            }).map(symbol_to_lsp_child));
+        }
+
+        items.push(DocumentSymbol {
+            name: sym.name.clone(),
+            detail: Some(sym.detail.clone()),
+            kind: lsp_symbol_kind(sym.kind),
+            tags: None,
+            deprecated: None,
+            range: sym.full_range,
+            selection_range: sym.selection_range,
+            children: if children.is_empty() { None } else { Some(children) },
+        });
+    }
+
+    items
+}
+
+fn symbol_to_lsp_child(s: &symbols::Symbol) -> DocumentSymbol {
     DocumentSymbol {
         name: s.name.clone(),
         detail: Some(s.detail.clone()),
-        kind,
+        kind: lsp_symbol_kind(s.kind),
         tags: None,
         deprecated: None,
         range: s.full_range,
@@ -1335,22 +1385,15 @@ fn symbol_to_lsp(s: &symbols::Symbol) -> DocumentSymbol {
 /// Convert a workspace symbol to the LSP `SymbolInformation` shape for
 /// `workspace/symbol` responses.
 fn symbol_to_workspace_symbol(s: &symbols::Symbol, uri: &Url, _rel: &str) -> SymbolInformation {
-    let kind = match s.kind {
-        symbols::SymbolKind::Rule => SymbolKind::FUNCTION,
-        symbols::SymbolKind::Function => SymbolKind::FUNCTION,
-        symbols::SymbolKind::Variable => SymbolKind::VARIABLE,
-        symbols::SymbolKind::Constant => SymbolKind::CONSTANT,
-        symbols::SymbolKind::Class => SymbolKind::CLASS,
-    };
     SymbolInformation {
         name: s.name.clone(),
-        kind,
+        kind: lsp_symbol_kind(s.kind),
         tags: None,
         deprecated: None,
         location: Location {
             uri: uri.clone(),
             range: s.selection_range,
         },
-        container_name: None,
+        container_name: s.class_owner.clone(),
     }
 }

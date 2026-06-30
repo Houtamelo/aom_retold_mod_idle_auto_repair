@@ -134,6 +134,7 @@ fn make_rule_symbol(name: &str) -> Symbol {
         kind: SymbolKind::Rule,
         ty: String::new(),
         params: Vec::new(),
+        class_owner: None,
         is_extern: false,
         is_mutable: false,
         is_static: false,

@@ -26,11 +26,11 @@ The symbol-table builder SHALL walk top-level `class_specifier` AST nodes and pr
 
 - GIVEN `class MyClass { ... }` in `mod/spire_ai/game/foo.xs`, WHEN `build_symbol_table` runs, THEN it SHALL emit a `Class` symbol named `MyClass` with valid ranges and the same provenance as any top-level declaration in that file.
 
-### R3 — Exclude class member extraction
+### R3 — Class member extraction
 
-Class member extraction (fields, methods, nested types, or anything inside `field_declaration_list`) SHALL be explicitly EXCLUDED from this change. Members that are already extracted via `field_declaration` / `function_declaration` walkers elsewhere are unaffected.
+Class members (fields, methods) SHALL also be extracted from inside `class_specifier` bodies and represented as first-class symbols. See `spec-lsp-class-member-extraction.md` for the full member-extraction requirements.
 
-- GIVEN a class with five fields and three methods, WHEN the symbol table is built, THEN the table SHALL contain exactly one `Class` symbol for the class name and SHALL NOT contain new symbols derived from the `class_specifier` walker.
+- GIVEN a class `MyClass` with a field `value` and a method `doWork`, WHEN the symbol table is built, THEN it SHALL contain a `ClassField` named `value` and a `ClassMethod` named `doWork`, both with `class_owner: Some("MyClass")`.
 
 ### R4 — Additive `SymbolKind::Class`
 
@@ -77,10 +77,22 @@ The `semantic_tokens::classify_type_identifier` function SHALL look up `_type_id
 - WHEN the LSP starts,
 - THEN it SHALL either load the cache gracefully (ignoring class entries) or rebuild from source, with no fatal error.
 
+### S6 — Class members are extracted alongside class names
+
+- GIVEN a class `MyClass` with field `value` and method `doWork`,
+- WHEN the symbol table is built,
+- THEN it SHALL emit one `Class` symbol for `MyClass`, one `ClassField` for `value`, and one `ClassMethod` for `doWork`.
+
+### S7 — Class members appear in outline and workspace symbols
+
+- GIVEN class `Unit` with method `takeDamage`,
+- WHEN a `DocumentSymbol` or `workspace/symbol` request is received,
+- THEN `takeDamage` SHALL appear as a child of `Unit` and SHALL be searchable by name.
+
 ## Out of scope
 
-- Class member extraction (fields, methods, constructors).
-- Semantic-token emission for class members.
+- Constructors and dedicated `new` expression analysis.
+- Semantic-token emission for class members (covered by `spec-lsp-class-member-semantic-tokens.md`).
 - Cross-file forward-declaration ordering.
 - Recoloring the existing `TYPE_UNMODDED_CLASS` / `TYPE_MODDED_CLASS` fallback keys.
 - Engine-side `extern` classification for classes.

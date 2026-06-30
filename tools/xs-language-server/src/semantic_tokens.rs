@@ -4,6 +4,7 @@
 //! and type references classified by origin (`engine`, `modded`, `unmodded`)
 //! and, for variables, by storage class (`local`, `static`).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use tower_lsp::lsp_types::{
@@ -11,6 +12,7 @@ use tower_lsp::lsp_types::{
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensServerCapabilities,
 };
 
+use crate::cache;
 use crate::engine_api;
 use crate::merged_view::MergedView;
 use crate::symbols::{self, Symbol, SymbolKind, Visibility};
@@ -31,6 +33,7 @@ const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[
     SemanticTokenModifier::new("local"),
     SemanticTokenModifier::new("static"),
     SemanticTokenModifier::new("extern"),
+    SemanticTokenModifier::new("member"),
 ];
 
 /// A single semantic token in source-order, before LSP delta encoding.
@@ -61,7 +64,9 @@ pub fn server_capabilities() -> SemanticTokensServerCapabilities {
 /// `current_file` is the absolute path of the file being analysed, used to
 /// classify the origin of symbols defined in it. `own_table` is the per-file
 /// symbol table (including local variable declarations). `merged` is the
-/// include-paste merged view, if one was built.
+/// include-paste merged view, if one was built. `member_index` maps member
+/// names to their strongest workspace origin for `obj.field`/`Class.method`
+/// references.
 pub fn compute_tokens(
     source: &str,
     current_file: Option<&Path>,
@@ -70,6 +75,7 @@ pub fn compute_tokens(
     engine: &engine_api::SharedEngineApi,
     workspace: &Workspace,
     project: &VirtualProject,
+    member_index: &MemberIndex,
 ) -> Vec<Token> {
     let Some(tree) = crate::parser::parse(source) else {
         return Vec::new();
@@ -87,6 +93,7 @@ pub fn compute_tokens(
         engine,
         workspace,
         project,
+        member_index,
         &mut tokens,
     );
 
@@ -105,6 +112,7 @@ fn walk_for_tokens(
     engine: &engine_api::SharedEngineApi,
     workspace: &Workspace,
     project: &VirtualProject,
+    member_index: &MemberIndex,
     tokens: &mut Vec<Token>,
 ) {
     match node.kind() {
@@ -119,6 +127,11 @@ fn walk_for_tokens(
                 workspace,
                 project,
             ) {
+                tokens.push(token);
+            }
+        }
+        "field_identifier" => {
+            if let Some(token) = classify_member_identifier(node, source, member_index) {
                 tokens.push(token);
             }
         }
@@ -159,6 +172,7 @@ fn walk_for_tokens(
                 engine,
                 workspace,
                 project,
+                member_index,
                 tokens,
             );
             if !cursor.goto_next_sibling() {
@@ -223,8 +237,8 @@ fn classify_identifier(
         .map(|p| classify_origin(p, workspace, project))
         .unwrap_or(Origin::Engine);
     let token_type = match symbol.kind {
-        SymbolKind::Function => SemanticTokenType::FUNCTION,
-        SymbolKind::Variable => SemanticTokenType::VARIABLE,
+        SymbolKind::Function | SymbolKind::ClassMethod => SemanticTokenType::FUNCTION,
+        SymbolKind::Variable | SymbolKind::ClassField => SemanticTokenType::VARIABLE,
         SymbolKind::Constant => SemanticTokenType::new("constant"),
         SymbolKind::Rule => SemanticTokenType::new("rule"),
         SymbolKind::Class => SemanticTokenType::TYPE,
@@ -275,7 +289,7 @@ fn classify_type_identifier(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Origin {
+pub enum Origin {
     Engine,
     Modded,
     Unmodded,
@@ -301,7 +315,9 @@ fn origin_modifier(origin: Origin) -> SemanticTokenModifier {
 
 fn classify_modifiers(symbol: &Symbol, origin: Origin) -> Vec<SemanticTokenModifier> {
     let mut modifiers = vec![origin_modifier(origin)];
-    if symbol.kind == SymbolKind::Variable || symbol.kind == SymbolKind::Constant {
+    if symbol.class_owner.is_some() {
+        modifiers.push(SemanticTokenModifier::new("member"));
+    } else if symbol.kind == SymbolKind::Variable || symbol.kind == SymbolKind::Constant {
         if symbol.is_static {
             modifiers.push(SemanticTokenModifier::new("static"));
         } else if symbol.visibility == Visibility::Local {
@@ -312,6 +328,126 @@ fn classify_modifiers(symbol: &Symbol, origin: Origin) -> Vec<SemanticTokenModif
         modifiers.push(SemanticTokenModifier::new("extern"));
     }
     modifiers
+}
+
+/// Index of class-member names to their strongest workspace origin.
+///
+/// Used to color `obj.field` and `Class.method()` references without
+/// requiring type inference: if any class in the workspace declares the
+/// member, we use that member's origin. Modded origins are preferred over
+/// unmodded over engine.
+pub struct MemberIndex {
+    origins: HashMap<String, Origin>,
+}
+
+impl MemberIndex {
+    /// Build a member index from the current file and every visible file in
+    /// the project. `current_file` is skipped when scanning workspace files
+    /// because `own_table` already reflects the buffer text.
+    pub fn build(
+        own_table: &symbols::SymbolTable,
+        workspace: &Workspace,
+        project: &VirtualProject,
+        cache_dir: &Path,
+        current_file: Option<&Path>,
+    ) -> Self {
+        let mut origins = HashMap::new();
+
+        let promote = |origins: &mut HashMap<String, Origin>, name: String, origin: Origin| {
+            let strength = |o: Origin| match o {
+                Origin::Engine => 0,
+                Origin::Unmodded => 1,
+                Origin::Modded => 2,
+            };
+            origins
+                .entry(name)
+                .and_modify(|existing| {
+                    if strength(origin) > strength(*existing) {
+                        *existing = origin;
+                    }
+                })
+                .or_insert(origin);
+        };
+
+        if let Some(path) = current_file {
+            for sym in &own_table.symbols {
+                if is_class_member(sym) {
+                    promote(&mut origins, sym.name.clone(), classify_origin(path, workspace, project));
+                }
+            }
+        }
+
+        for (rel, path) in project.visible_files(workspace) {
+            if current_file == Some(path.as_path()) {
+                continue;
+            }
+            let table = match cache::load_or_parse_symbols(&path, &rel, cache_dir) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::debug!(
+                        "member index: could not load symbols for {}: {}",
+                        path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            for sym in &table.symbols {
+                if is_class_member(sym) {
+                    promote(&mut origins, sym.name.clone(), classify_origin(&path, workspace, project));
+                }
+            }
+        }
+
+        Self { origins }
+    }
+
+    /// Return the strongest origin for a member name, if any.
+    pub fn origin(&self, name: &str) -> Option<Origin> {
+        self.origins.get(name).copied()
+    }
+}
+
+fn is_class_member(sym: &Symbol) -> bool {
+    sym.class_owner.is_some()
+        && (sym.kind == SymbolKind::ClassField || sym.kind == SymbolKind::ClassMethod)
+}
+
+fn classify_member_identifier(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    member_index: &MemberIndex,
+) -> Option<Token> {
+    let name = node_text(node, source);
+    if name.is_empty() {
+        return None;
+    }
+    let origin = member_index.origin(name)?;
+
+    let field_expr = node.parent()?;
+    if field_expr.kind() != "field_expression" {
+        return None;
+    }
+    let is_call = field_expr
+        .parent()
+        .filter(|call| call.kind() == "call_expression")
+        .and_then(|call| call.child_by_field_name("function"))
+        .map(|func| func.id() == field_expr.id())
+        .unwrap_or(false);
+
+    let token_type = if is_call {
+        SemanticTokenType::FUNCTION
+    } else {
+        SemanticTokenType::VARIABLE
+    };
+
+    Some(Token {
+        line: node.start_position().row as u32,
+        char: node.start_position().column as u32,
+        len: (node.end_byte() - node.start_byte()) as u32,
+        token_type,
+        modifiers: vec![origin_modifier(origin), SemanticTokenModifier::new("member")],
+    })
 }
 
 /// Encode a slice of tokens into the LSP `SemanticTokens.data` format.

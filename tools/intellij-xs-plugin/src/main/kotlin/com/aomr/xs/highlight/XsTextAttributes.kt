@@ -93,4 +93,24 @@ object XsTextAttributes {
 
     /** `extern` variable declared in a mod's overlay. */
     val VARIABLE_EXTERN_MODDED = createTextAttributesKey("XS_VARIABLE_EXTERN_MODDED", DefaultLanguageHighlighterColors.GLOBAL_VARIABLE)
+
+    // -------- Member semantic-token categories (Bucket C remainder, plugin 0.8.0) --------
+
+    /** Member function defined in the engine API. */
+    val METHOD_ENGINE = createTextAttributesKey("XS_METHOD_ENGINE", DefaultLanguageHighlighterColors.STATIC_METHOD)
+
+    /** Member function defined in a vanilla `<AOMR>/game/` file (not overridden). */
+    val METHOD_UNMODDED = createTextAttributesKey("XS_METHOD_UNMODDED", DefaultLanguageHighlighterColors.STATIC_METHOD)
+
+    /** Member function defined in a mod's `game/` overlay file. */
+    val METHOD_MODDED = createTextAttributesKey("XS_METHOD_MODDED", DefaultLanguageHighlighterColors.STATIC_METHOD)
+
+    /** Member field declared in the engine API. */
+    val FIELD_ENGINE = createTextAttributesKey("XS_FIELD_ENGINE", DefaultLanguageHighlighterColors.INSTANCE_FIELD)
+
+    /** Member field declared in a vanilla `<AOMR>/game/` file (not overridden). */
+    val FIELD_UNMODDED = createTextAttributesKey("XS_FIELD_UNMODDED", DefaultLanguageHighlighterColors.INSTANCE_FIELD)
+
+    /** Member field declared in a mod's `game/` overlay file. */
+    val FIELD_MODDED = createTextAttributesKey("XS_FIELD_MODDED", DefaultLanguageHighlighterColors.INSTANCE_FIELD)
 }

@@ -24,7 +24,24 @@ fn compute_for(
 ) -> Vec<semantic_tokens::Token> {
     let tree = parser::parse(source).expect("parse");
     let own_table = symbols::build_full_symbol_table(&tree, source);
-    semantic_tokens::compute_tokens(source, current_file, &own_table, None, engine, ws, project)
+    let cache_dir = TempDir::new().unwrap();
+    let member_index = semantic_tokens::MemberIndex::build(
+        &own_table,
+        ws,
+        project,
+        cache_dir.path(),
+        current_file,
+    );
+    semantic_tokens::compute_tokens(
+        source,
+        current_file,
+        &own_table,
+        None,
+        engine,
+        ws,
+        project,
+        &member_index,
+    )
 }
 
 fn no_engine_api() -> engine_api::SharedEngineApi {

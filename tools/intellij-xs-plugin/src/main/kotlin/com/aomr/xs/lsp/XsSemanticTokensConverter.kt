@@ -37,6 +37,7 @@ object XsSemanticTokensConverter {
     const val MODIFIER_UNMODDED = "unmodded"
     const val MODIFIER_STATIC = "static"
     const val MODIFIER_EXTERN = "extern"
+    const val MODIFIER_MEMBER = "member"
 
     /**
      * Translate an LSP semantic-token classification to an XS color-scheme key.
@@ -53,15 +54,22 @@ object XsSemanticTokensConverter {
         val engine = modifiers.contains(MODIFIER_ENGINE)
         val isStatic = modifiers.contains(MODIFIER_STATIC)
         val isExtern = modifiers.contains(MODIFIER_EXTERN)
+        val isMember = modifiers.contains(MODIFIER_MEMBER)
 
         return when (tokenType) {
             TOKEN_TYPE_FUNCTION -> when {
+                isMember && engine -> XsTextAttributes.METHOD_ENGINE
+                isMember && modded -> XsTextAttributes.METHOD_MODDED
+                isMember && unmodded -> XsTextAttributes.METHOD_UNMODDED
                 engine -> XsTextAttributes.FUNCTION_ENGINE
                 modded -> XsTextAttributes.FUNCTION_MODDED
                 unmodded -> XsTextAttributes.FUNCTION_UNMODDED
                 else -> XsTextAttributes.FUNCTION_UNMODDED
             }
             TOKEN_TYPE_VARIABLE -> when {
+                isMember && engine -> XsTextAttributes.FIELD_ENGINE
+                isMember && modded -> XsTextAttributes.FIELD_MODDED
+                isMember && unmodded -> XsTextAttributes.FIELD_UNMODDED
                 isExtern && unmodded -> XsTextAttributes.VARIABLE_EXTERN_UNMODDED
                 isExtern && modded -> XsTextAttributes.VARIABLE_EXTERN_MODDED
                 isStatic -> XsTextAttributes.VARIABLE_STATIC

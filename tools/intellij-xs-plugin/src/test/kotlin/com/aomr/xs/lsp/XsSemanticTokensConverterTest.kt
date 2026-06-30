@@ -167,4 +167,88 @@ class XsSemanticTokensConverterTest {
             )
         )
     }
+
+    @Test
+    fun engineMemberMethodMapsToMethodEngine() {
+        assertEquals(
+            XsTextAttributes.METHOD_ENGINE,
+            XsSemanticTokensConverter.convert(
+                XsSemanticTokensConverter.TOKEN_TYPE_FUNCTION,
+                setOf(
+                    XsSemanticTokensConverter.MODIFIER_MEMBER,
+                    XsSemanticTokensConverter.MODIFIER_ENGINE
+                )
+            )
+        )
+    }
+
+    @Test
+    fun unmoddedMemberMethodMapsToMethodUnmodded() {
+        assertEquals(
+            XsTextAttributes.METHOD_UNMODDED,
+            XsSemanticTokensConverter.convert(
+                XsSemanticTokensConverter.TOKEN_TYPE_FUNCTION,
+                setOf(
+                    XsSemanticTokensConverter.MODIFIER_MEMBER,
+                    XsSemanticTokensConverter.MODIFIER_UNMODDED
+                )
+            )
+        )
+    }
+
+    @Test
+    fun moddedMemberMethodMapsToMethodModded() {
+        assertEquals(
+            XsTextAttributes.METHOD_MODDED,
+            XsSemanticTokensConverter.convert(
+                XsSemanticTokensConverter.TOKEN_TYPE_FUNCTION,
+                setOf(
+                    XsSemanticTokensConverter.MODIFIER_MEMBER,
+                    XsSemanticTokensConverter.MODIFIER_MODDED
+                )
+            )
+        )
+    }
+
+    @Test
+    fun engineMemberFieldMapsToFieldEngine() {
+        assertEquals(
+            XsTextAttributes.FIELD_ENGINE,
+            XsSemanticTokensConverter.convert(
+                XsSemanticTokensConverter.TOKEN_TYPE_VARIABLE,
+                setOf(
+                    XsSemanticTokensConverter.MODIFIER_MEMBER,
+                    XsSemanticTokensConverter.MODIFIER_ENGINE
+                )
+            )
+        )
+    }
+
+    @Test
+    fun unmoddedMemberFieldMapsToFieldUnmodded() {
+        assertEquals(
+            XsTextAttributes.FIELD_UNMODDED,
+            XsSemanticTokensConverter.convert(
+                XsSemanticTokensConverter.TOKEN_TYPE_VARIABLE,
+                setOf(
+                    XsSemanticTokensConverter.MODIFIER_MEMBER,
+                    XsSemanticTokensConverter.MODIFIER_UNMODDED
+                )
+            )
+        )
+    }
+
+    @Test
+    fun moddedMemberFieldMapsToFieldModded() {
+        assertEquals(
+            XsTextAttributes.FIELD_MODDED,
+            XsSemanticTokensConverter.convert(
+                XsSemanticTokensConverter.TOKEN_TYPE_VARIABLE,
+                setOf(
+                    XsSemanticTokensConverter.MODIFIER_MEMBER,
+                    XsSemanticTokensConverter.MODIFIER_MODDED
+                )
+            )
+        )
+    }
 }
