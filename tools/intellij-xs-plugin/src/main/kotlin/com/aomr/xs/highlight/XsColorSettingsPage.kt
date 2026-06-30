@@ -62,7 +62,16 @@ class XsColorSettingsPage : ColorSettingsPage {
             AttributesDescriptor("Braces and Operators//Operation sign", XsTextAttributes.OPERATION_SIGN),
             AttributesDescriptor("Braces and Operators//Overloaded operator", XsTextAttributes.OVERLOADED_OPERATOR),
             AttributesDescriptor("Braces and Operators//Parentheses", XsTextAttributes.PARENTHESES),
-            AttributesDescriptor("Braces and Operators//Semi-colon", XsTextAttributes.SEMI_COLON)
+            AttributesDescriptor("Braces and Operators//Semi-colon", XsTextAttributes.SEMI_COLON),
+            // Semantic-token-driven categories (Bucket C, plugin 0.6.0)
+            AttributesDescriptor("Identifier//Function//Engine function", XsTextAttributes.FUNCTION_ENGINE),
+            AttributesDescriptor("Identifier//Function//UnModded function", XsTextAttributes.FUNCTION_UNMODDED),
+            AttributesDescriptor("Identifier//Function//Modded function", XsTextAttributes.FUNCTION_MODDED),
+            AttributesDescriptor("Identifier//Variable//Local variable", XsTextAttributes.VARIABLE_LOCAL),
+            AttributesDescriptor("Identifier//Variable//Static variable", XsTextAttributes.VARIABLE_STATIC),
+            AttributesDescriptor("Identifier//Type//Built-in type", XsTextAttributes.TYPE_BUILTIN),
+            AttributesDescriptor("Identifier//Type//UnModded class", XsTextAttributes.TYPE_UNMODDED_CLASS),
+            AttributesDescriptor("Identifier//Type//Modded class", XsTextAttributes.TYPE_MODDED_CLASS)
         )
 
         /**

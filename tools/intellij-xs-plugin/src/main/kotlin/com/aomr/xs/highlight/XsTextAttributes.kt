@@ -53,4 +53,30 @@ object XsTextAttributes {
 
     /** Semicolon `;`; inherits platform **Braces and Operators → Semi-colon**. */
     val SEMI_COLON = createTextAttributesKey("XS_SEMI_COLON", DefaultLanguageHighlighterColors.SEMICOLON)
+
+    // -------- Semantic-token-driven categories (Bucket C, plugin 0.6.0) --------
+
+    /** Function defined in the engine API; inherits platform **Function declaration**. */
+    val FUNCTION_ENGINE = createTextAttributesKey("XS_FUNCTION_ENGINE", DefaultLanguageHighlighterColors.FUNCTION_DECLARATION)
+
+    /** Function defined in a vanilla `<AOMR>/game/` file (not overridden in the mod). */
+    val FUNCTION_UNMODDED = createTextAttributesKey("XS_FUNCTION_UNMODDED", DefaultLanguageHighlighterColors.FUNCTION_DECLARATION)
+
+    /** Function defined in a mod's `game/` overlay file. */
+    val FUNCTION_MODDED = createTextAttributesKey("XS_FUNCTION_MODDED", DefaultLanguageHighlighterColors.FUNCTION_DECLARATION)
+
+    /** Local variable declared inside a function body or block. */
+    val VARIABLE_LOCAL = createTextAttributesKey("XS_VARIABLE_LOCAL", DefaultLanguageHighlighterColors.LOCAL_VARIABLE)
+
+    /** `static` storage-class variable. */
+    val VARIABLE_STATIC = createTextAttributesKey("XS_VARIABLE_STATIC", DefaultLanguageHighlighterColors.STATIC_FIELD)
+
+    /** Built-in primitive type (`bool`, `int`, `float`, `string`, `vector`). */
+    val TYPE_BUILTIN = createTextAttributesKey("XS_TYPE_BUILTIN", DefaultLanguageHighlighterColors.KEYWORD)
+
+    /** Class declared in a vanilla `<AOMR>/game/` file (not overridden). */
+    val TYPE_UNMODDED_CLASS = createTextAttributesKey("XS_TYPE_UNMODDED_CLASS", DefaultLanguageHighlighterColors.IDENTIFIER)
+
+    /** Class declared in a mod's `game/` overlay file. */
+    val TYPE_MODDED_CLASS = createTextAttributesKey("XS_TYPE_MODDED_CLASS", DefaultLanguageHighlighterColors.IDENTIFIER)
 }

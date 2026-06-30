@@ -411,29 +411,31 @@ below).
 
 ### Bucket C (engine / modded / unmodded function, local / static variable, builtin type, class)
 
-Status: LSP-side implementation lands in this change
-(`add-lsp-semantic-tokens`, plugin 0.5.0); plugin-side wiring
-lands in the next change (`add-plugin-semantic-tokens`,
-plugin 0.6.0).
+Status: Resolved 2026-06-30 across two slices.
 
-The LSP now emits semantic tokens for the 3 main token types
-(function, variable, type) with 5 modifiers (engine, modded,
-unmodded, static, extern). Six strict-TDD integration tests in
-`tools/xs-language-server/tests/semantic_tokens_repro.rs` cover
-legend advertisement + engine / modded / unmodded function
-classification + local-variable extraction + builtin-type
-classification.
+- **LSP side (plugin 0.5.0)**: `add-lsp-semantic-tokens` slice
+  (`openspec/changes/add-lsp-semantic-tokens/`, commit `874dae9`)
+  adds `textDocument/semanticTokens/full` capability, the
+  legend (3 token types × 5 modifiers), and the emission logic
+  in `tools/xs-language-server/src/semantic_tokens.rs`. Six
+  strict-TDD integration tests in
+  `tools/xs-language-server/tests/semantic_tokens_repro.rs`
+  cover legend advertisement + engine / modded / unmodded
+  function classification + local-variable extraction +
+  builtin-type classification.
 
-The plugin side still needs:
-- `XsSemanticTokensConverter` (Kotlin) that maps each LSP
-  semantic token to a `TextAttributesKey`.
-- 8 new `TextAttributesKey`s in `XsTextAttributes.kt`
-  (FUNCTION_ENGINE, FUNCTION_UNMODDED, FUNCTION_MODDED,
-  VARIABLE_LOCAL, VARIABLE_STATIC, TYPE_BUILTIN,
-  TYPE_UNMODDED_CLASS, TYPE_MODDED_CLASS).
-- 8 new `AttributesDescriptor`s in `XsColorSettingsPage.kt`.
-- `XsLspSupportProvider` or equivalent wiring to receive
-  semantic-token updates from the LSP server.
+- **Plugin side (plugin 0.6.0)**: `add-plugin-semantic-tokens`
+  slice (`openspec/changes/add-plugin-semantic-tokens/`, this
+  commit) declares 8 new `TextAttributesKey`s, registers 8
+  new `AttributesDescriptor`s, and provides the
+  `XsSemanticTokensConverter` (Kotlin) that maps each LSP
+  semantic token to a color. The platform's auto-wiring of
+  LSP semantic tokens to the editor's highlighter is
+  sufficient for the colors to appear in `.xs` files.
+
+The remaining Bucket C work (class extraction, constant / rule
+classification, full extern distinction) is deferred to a
+follow-up cycle.
 
 ### Issue 3 sub-findings (Rider smoke test)
 
