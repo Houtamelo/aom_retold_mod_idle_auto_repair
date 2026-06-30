@@ -5,8 +5,8 @@
 //! `~/.aomr_lsp/`):
 //!
 //! ```text
-//! v2/<sha256-of-doxygen_retail.7z>.json          engine API (syscalls + aiplans)
-//! game_parse/v1/<mtime>-<sha256>.json            per-file parse tree + symbols
+//!     v2/<sha256-of-doxygen_retail.7z>.json          engine API (syscalls + aiplans)
+//!     game_parse/v2/<mtime>-<sha256>.json            per-file parse tree + symbols
 //! ```
 //!
 //! The `v2/` prefix for engine data is the current schema-version marker.
@@ -45,9 +45,9 @@ pub fn engine_cache_dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("v2")
 }
 
-/// `game_parse/v1/` subdirectory for per-file parse caches.
+/// `game_parse/v2/` subdirectory for per-file parse caches.
 pub fn parse_cache_dir(cache_dir: &Path) -> PathBuf {
-    cache_dir.join("game_parse").join("v1")
+    cache_dir.join("game_parse").join("v2")
 }
 
 /// Create all cache subdirectories if they do not already exist.
@@ -61,8 +61,7 @@ pub fn ensure_cache_dirs(cache_dir: &Path) -> Result<()> {
 
 /// Compute the lowercase hex SHA-256 of the file at `path`.
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path)
-        .with_context(|| format!("reading file for SHA-256: {path:?}"))?;
+    let bytes = fs::read(path).with_context(|| format!("reading file for SHA-256: {path:?}"))?;
     Ok(sha256_bytes(&bytes))
 }
 
@@ -119,10 +118,13 @@ pub fn parse_file_key(path: &Path) -> Result<(String, String, u128)> {
     let mtime = meta
         .modified()
         .with_context(|| format!("reading mtime for parse cache key: {path:?}"))?;
-    let bytes = fs::read(path)
-        .with_context(|| format!("reading file for parse cache key: {path:?}"))?;
+    let bytes =
+        fs::read(path).with_context(|| format!("reading file for parse cache key: {path:?}"))?;
     let hash = sha256_bytes(&bytes);
-    let millis = mtime.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let millis = mtime
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     let key = format!("{millis}-{hash}");
     Ok((key, hash, millis))
 }
@@ -261,8 +263,7 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let dir = path
         .parent()
         .with_context(|| format!("cache path has no parent: {path:?}"))?;
-    fs::create_dir_all(dir)
-        .with_context(|| format!("creating cache directory {dir:?}"))?;
+    fs::create_dir_all(dir).with_context(|| format!("creating cache directory {dir:?}"))?;
 
     let tmp = path.with_extension("tmp");
     {
@@ -273,9 +274,8 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         file.sync_data().ok();
     }
 
-    fs::rename(&tmp, path).with_context(|| {
-        format!("renaming temporary cache file {tmp:?} -> {path:?}")
-    })?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("renaming temporary cache file {tmp:?} -> {path:?}"))?;
     Ok(())
 }
 
@@ -288,8 +288,7 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = fs::read(path)
-        .with_context(|| format!("reading cached JSON {path:?}"))?;
+    let bytes = fs::read(path).with_context(|| format!("reading cached JSON {path:?}"))?;
     match serde_json::from_slice(&bytes) {
         Ok(value) => Ok(Some(value)),
         Err(e) => Err(anyhow::anyhow!(
@@ -303,11 +302,7 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 ///
 /// `archive_hash` should be the SHA-256 of the source `doxygen_retail.7z`
 /// archive; callers typically compute it with [`sha256_file`].
-pub fn load_or_write_engine<T, F>(
-    cache_dir: &Path,
-    archive_hash: &str,
-    fallback: F,
-) -> Result<T>
+pub fn load_or_write_engine<T, F>(cache_dir: &Path, archive_hash: &str, fallback: F) -> Result<T>
 where
     T: DeserializeOwned + Serialize,
     F: FnOnce() -> Result<T>,
@@ -324,8 +319,7 @@ where
         )
     })?;
 
-    write_json(&path, &value)
-        .with_context(|| format!("writing engine cache file {path:?}"))?;
+    write_json(&path, &value).with_context(|| format!("writing engine cache file {path:?}"))?;
     Ok(value)
 }
 
@@ -367,7 +361,9 @@ mod tests {
 
         assert!(read_json::<Value>(&path).unwrap().is_none());
         write_json(&path, &value).unwrap();
-        let loaded = read_json::<Value>(&path).unwrap().expect("cache hit after write");
+        let loaded = read_json::<Value>(&path)
+            .unwrap()
+            .expect("cache hit after write");
         assert_eq!(loaded, value);
     }
 
@@ -455,10 +451,24 @@ mod tests {
         fs::write(&file, "void myCore() {}\n").unwrap();
 
         load_or_parse_symbols(&file, "ai/core/core.xs", &cache_dir).unwrap();
-        assert!(!parse_cache_dir(&cache_dir).read_dir().unwrap().flatten().next().is_none());
+        assert!(
+            !parse_cache_dir(&cache_dir)
+                .read_dir()
+                .unwrap()
+                .flatten()
+                .next()
+                .is_none()
+        );
 
         invalidate_parse_cache("ai/core/core.xs", &cache_dir).unwrap();
-        assert!(parse_cache_dir(&cache_dir).read_dir().unwrap().flatten().next().is_none());
+        assert!(
+            parse_cache_dir(&cache_dir)
+                .read_dir()
+                .unwrap()
+                .flatten()
+                .next()
+                .is_none()
+        );
     }
 
     #[test]

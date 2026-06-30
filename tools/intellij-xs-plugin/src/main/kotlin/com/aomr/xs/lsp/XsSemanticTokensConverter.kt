@@ -28,6 +28,8 @@ object XsSemanticTokensConverter {
     const val TOKEN_TYPE_FUNCTION = "function"
     const val TOKEN_TYPE_VARIABLE = "variable"
     const val TOKEN_TYPE_TYPE = "type"
+    const val TOKEN_TYPE_CONSTANT = "constant"
+    const val TOKEN_TYPE_RULE = "rule"
 
     /** Modifier identifiers; mirror the LSP server's legend order. */
     const val MODIFIER_ENGINE = "engine"
@@ -50,6 +52,7 @@ object XsSemanticTokensConverter {
         val unmodded = modifiers.contains(MODIFIER_UNMODDED)
         val engine = modifiers.contains(MODIFIER_ENGINE)
         val isStatic = modifiers.contains(MODIFIER_STATIC)
+        val isExtern = modifiers.contains(MODIFIER_EXTERN)
 
         return when (tokenType) {
             TOKEN_TYPE_FUNCTION -> when {
@@ -59,6 +62,8 @@ object XsSemanticTokensConverter {
                 else -> XsTextAttributes.FUNCTION_UNMODDED
             }
             TOKEN_TYPE_VARIABLE -> when {
+                isExtern && unmodded -> XsTextAttributes.VARIABLE_EXTERN_UNMODDED
+                isExtern && modded -> XsTextAttributes.VARIABLE_EXTERN_MODDED
                 isStatic -> XsTextAttributes.VARIABLE_STATIC
                 else -> XsTextAttributes.VARIABLE_LOCAL
             }
@@ -68,6 +73,8 @@ object XsSemanticTokensConverter {
                 unmodded -> XsTextAttributes.TYPE_UNMODDED_CLASS
                 else -> XsTextAttributes.TYPE_UNMODDED_CLASS
             }
+            TOKEN_TYPE_CONSTANT -> XsTextAttributes.CONSTANT
+            TOKEN_TYPE_RULE -> XsTextAttributes.RULE
             else -> com.aomr.xs.highlight.XsTextAttributesKeys.XS_DEFAULT
         }
     }

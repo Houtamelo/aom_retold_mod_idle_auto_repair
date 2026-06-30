@@ -117,4 +117,54 @@ class XsSemanticTokensConverterTest {
             )
         )
     }
+
+    @Test
+    fun constantMapsToConstant() {
+        assertEquals(
+            XsTextAttributes.CONSTANT,
+            XsSemanticTokensConverter.convert(
+                XsSemanticTokensConverter.TOKEN_TYPE_CONSTANT,
+                setOf(XsSemanticTokensConverter.MODIFIER_MODDED)
+            )
+        )
+    }
+
+    @Test
+    fun ruleMapsToRule() {
+        assertEquals(
+            XsTextAttributes.RULE,
+            XsSemanticTokensConverter.convert(
+                XsSemanticTokensConverter.TOKEN_TYPE_RULE,
+                setOf(XsSemanticTokensConverter.MODIFIER_UNMODDED)
+            )
+        )
+    }
+
+    @Test
+    fun externVariableUnmoddedMapsToVariableExternUnmodded() {
+        assertEquals(
+            XsTextAttributes.VARIABLE_EXTERN_UNMODDED,
+            XsSemanticTokensConverter.convert(
+                XsSemanticTokensConverter.TOKEN_TYPE_VARIABLE,
+                setOf(
+                    XsSemanticTokensConverter.MODIFIER_EXTERN,
+                    XsSemanticTokensConverter.MODIFIER_UNMODDED
+                )
+            )
+        )
+    }
+
+    @Test
+    fun externVariableModdedMapsToVariableExternModded() {
+        assertEquals(
+            XsTextAttributes.VARIABLE_EXTERN_MODDED,
+            XsSemanticTokensConverter.convert(
+                XsSemanticTokensConverter.TOKEN_TYPE_VARIABLE,
+                setOf(
+                    XsSemanticTokensConverter.MODIFIER_EXTERN,
+                    XsSemanticTokensConverter.MODIFIER_MODDED
+                )
+            )
+        )
+    }
 }

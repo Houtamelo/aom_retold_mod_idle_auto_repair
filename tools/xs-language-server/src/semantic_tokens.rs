@@ -20,6 +20,8 @@ const TOKEN_TYPES: &[SemanticTokenType] = &[
     SemanticTokenType::FUNCTION,
     SemanticTokenType::VARIABLE,
     SemanticTokenType::TYPE,
+    SemanticTokenType::new("constant"),
+    SemanticTokenType::new("rule"),
 ];
 
 const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[
@@ -28,6 +30,7 @@ const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[
     SemanticTokenModifier::new("unmodded"),
     SemanticTokenModifier::new("local"),
     SemanticTokenModifier::new("static"),
+    SemanticTokenModifier::new("extern"),
 ];
 
 /// A single semantic token in source-order, before LSP delta encoding.
@@ -119,7 +122,7 @@ fn walk_for_tokens(
                 tokens.push(token);
             }
         }
-        "_type_identifier" => {
+        "_type_identifier" | "type_identifier" => {
             if let Some(token) = classify_type_identifier(
                 node,
                 source,
@@ -221,8 +224,10 @@ fn classify_identifier(
         .unwrap_or(Origin::Engine);
     let token_type = match symbol.kind {
         SymbolKind::Function => SemanticTokenType::FUNCTION,
-        SymbolKind::Variable | SymbolKind::Constant => SemanticTokenType::VARIABLE,
-        SymbolKind::Rule => return None,
+        SymbolKind::Variable => SemanticTokenType::VARIABLE,
+        SymbolKind::Constant => SemanticTokenType::new("constant"),
+        SymbolKind::Rule => SemanticTokenType::new("rule"),
+        SymbolKind::Class => SemanticTokenType::TYPE,
     };
 
     Some(Token {
@@ -302,6 +307,9 @@ fn classify_modifiers(symbol: &Symbol, origin: Origin) -> Vec<SemanticTokenModif
         } else if symbol.visibility == Visibility::Local {
             modifiers.push(SemanticTokenModifier::new("local"));
         }
+    }
+    if symbol.kind == SymbolKind::Variable && symbol.is_extern {
+        modifiers.push(SemanticTokenModifier::new("extern"));
     }
     modifiers
 }

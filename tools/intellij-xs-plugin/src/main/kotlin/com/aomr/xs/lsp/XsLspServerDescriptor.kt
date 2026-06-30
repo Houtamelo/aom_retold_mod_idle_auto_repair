@@ -8,6 +8,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.platform.lsp.api.LspServerDescriptor
+import com.intellij.platform.lsp.api.customization.LspSemanticTokensSupport
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
@@ -33,6 +34,8 @@ class XsLspServerDescriptor(
 ) {
 
     override fun isSupportedFile(file: VirtualFile): Boolean = file.extension == "xs"
+
+    override val lspSemanticTokensSupport: LspSemanticTokensSupport = XsSemanticTokensSupport()
 
     override fun createCommandLine(): GeneralCommandLine {
         // Resolve the binary fresh at startup. The bundled/resource extraction

@@ -27,6 +27,7 @@ pub enum SymbolKind {
     Function,
     Variable,
     Constant,
+    Class,
 }
 
 impl SymbolKind {
@@ -37,6 +38,7 @@ impl SymbolKind {
             SymbolKind::Function => "function",
             SymbolKind::Variable => "variable",
             SymbolKind::Constant => "constant",
+            SymbolKind::Class => "class",
         }
     }
 }
@@ -145,6 +147,7 @@ pub fn build_symbol_table(tree: &tree_sitter::Tree, source: &str) -> SymbolTable
         match child.kind() {
             "rule_definition" => extract_rule(child, source, &mut table.symbols),
             "function_definition" => extract_function(child, source, &mut table.symbols),
+            "class_specifier" => extract_class(child, source, &mut table.symbols),
             "declaration" => extract_declaration(child, source, &mut table.symbols),
             // The XS grammar currently parses function forward declarations
             // (`void bar(int x = -1);`) as an ERROR node containing the type,
@@ -299,6 +302,31 @@ fn try_register_rule(call: tree_sitter::Node<'_>, source: &str, out: &mut HashSe
             }
         }
     }
+}
+
+fn extract_class(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<Symbol>) {
+    let name_node = match node.child_by_field_name("name") {
+        Some(n) => n,
+        None => return,
+    };
+    let name = node_text(name_node, source).to_string();
+    let detail = format!("class {}", name);
+    let full_range = node_range(node);
+    let selection_range = node_range(name_node);
+    out.push(Symbol {
+        name,
+        kind: SymbolKind::Class,
+        ty: String::new(),
+        params: Vec::new(),
+        is_extern: false,
+        is_mutable: false,
+        is_static: false,
+        is_forward: false,
+        visibility: Visibility::Public,
+        full_range,
+        selection_range,
+        detail,
+    });
 }
 
 fn extract_rule(node: tree_sitter::Node<'_>, _source: &str, out: &mut Vec<Symbol>) {

@@ -71,7 +71,12 @@ class XsColorSettingsPage : ColorSettingsPage {
             AttributesDescriptor("Identifier//Variable//Static variable", XsTextAttributes.VARIABLE_STATIC),
             AttributesDescriptor("Identifier//Type//Built-in type", XsTextAttributes.TYPE_BUILTIN),
             AttributesDescriptor("Identifier//Type//UnModded class", XsTextAttributes.TYPE_UNMODDED_CLASS),
-            AttributesDescriptor("Identifier//Type//Modded class", XsTextAttributes.TYPE_MODDED_CLASS)
+            AttributesDescriptor("Identifier//Type//Modded class", XsTextAttributes.TYPE_MODDED_CLASS),
+            // Additional semantic-token categories (Bucket C finish, plugin 0.7.0)
+            AttributesDescriptor("Identifier//Variable//Constant", XsTextAttributes.CONSTANT),
+            AttributesDescriptor("Identifier//Function//Rule", XsTextAttributes.RULE),
+            AttributesDescriptor("Identifier//Variable//Extern UnModded", XsTextAttributes.VARIABLE_EXTERN_UNMODDED),
+            AttributesDescriptor("Identifier//Variable//Extern Modded", XsTextAttributes.VARIABLE_EXTERN_MODDED)
         )
 
         /**

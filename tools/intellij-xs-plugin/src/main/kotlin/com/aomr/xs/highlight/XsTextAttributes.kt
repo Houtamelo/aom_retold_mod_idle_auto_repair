@@ -79,4 +79,18 @@ object XsTextAttributes {
 
     /** Class declared in a mod's `game/` overlay file. */
     val TYPE_MODDED_CLASS = createTextAttributesKey("XS_TYPE_MODDED_CLASS", DefaultLanguageHighlighterColors.IDENTIFIER)
+
+    // -------- Additional semantic-token-driven categories (Bucket C finish, plugin 0.7.0) --------
+
+    /** Constant (`const`) reference. */
+    val CONSTANT = createTextAttributesKey("XS_CONSTANT", DefaultLanguageHighlighterColors.CONSTANT)
+
+    /** Rule reference. */
+    val RULE = createTextAttributesKey("XS_RULE", DefaultLanguageHighlighterColors.FUNCTION_DECLARATION)
+
+    /** `extern` variable declared in vanilla (unmodded) code. */
+    val VARIABLE_EXTERN_UNMODDED = createTextAttributesKey("XS_VARIABLE_EXTERN_UNMODDED", DefaultLanguageHighlighterColors.GLOBAL_VARIABLE)
+
+    /** `extern` variable declared in a mod's overlay. */
+    val VARIABLE_EXTERN_MODDED = createTextAttributesKey("XS_VARIABLE_EXTERN_MODDED", DefaultLanguageHighlighterColors.GLOBAL_VARIABLE)
 }

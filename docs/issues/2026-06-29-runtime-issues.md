@@ -434,8 +434,8 @@ Status: Resolved 2026-06-30 across two slices.
   sufficient for the colors to appear in `.xs` files.
 
 The remaining Bucket C work (class extraction, constant / rule
-classification, full extern distinction) is deferred to a
-follow-up cycle.
+classification, full extern distinction) is **resolved 2026-06-30** by
+`openspec/changes/finish-semantic-token-distinctions/` (plugin `0.7.0`).
 
 ### Issue 3 sub-findings (Rider smoke test)
 

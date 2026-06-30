@@ -622,7 +622,7 @@ fn add_included_symbols(
 fn include_visible(sym: &Symbol) -> bool {
     match sym.kind {
         SymbolKind::Variable | SymbolKind::Constant => sym.visibility == Visibility::Extern,
-        SymbolKind::Function | SymbolKind::Rule => sym.visibility != Visibility::Local,
+        SymbolKind::Function | SymbolKind::Rule | SymbolKind::Class => sym.visibility != Visibility::Local,
     }
 }
 

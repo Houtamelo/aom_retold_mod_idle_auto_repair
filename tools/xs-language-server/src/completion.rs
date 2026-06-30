@@ -84,10 +84,7 @@ pub fn complete(
 ) -> Vec<CompletionItem> {
     let pos = params.text_document_position.position;
     let prefix = prefix_at_cursor(text, pos.line, pos.character);
-    let mut items: Vec<CompletionItem> = api
-        .matching_syscalls(&prefix)
-        .map(syscall_item)
-        .collect();
+    let mut items: Vec<CompletionItem> = api.matching_syscalls(&prefix).map(syscall_item).collect();
     items.extend(api.matching_aiplans(&prefix).map(aiplan_item));
 
     if let Some(mv) = merged {
@@ -115,6 +112,7 @@ fn symbol_to_completion_item(sym: &Symbol) -> CompletionItem {
         SymbolKind::Function => CompletionItemKind::FUNCTION,
         SymbolKind::Variable => CompletionItemKind::VARIABLE,
         SymbolKind::Constant => CompletionItemKind::CONSTANT,
+        SymbolKind::Class => CompletionItemKind::CLASS,
     };
     CompletionItem {
         label: sym.name.clone(),
@@ -160,7 +158,11 @@ mod tests {
     }
 
     /// Build a `MergedView` for a fixture file under a temporary `game/` root.
-    fn build_merged_view(current_rel: &str, current_src: &str, extra: &[(&str, &str)]) -> MergedView {
+    fn build_merged_view(
+        current_rel: &str,
+        current_src: &str,
+        extra: &[(&str, &str)],
+    ) -> MergedView {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let current = root.join("game").join(current_rel);
@@ -218,7 +220,10 @@ mod tests {
         );
         let items = complete(&api(), Some(&merged), "", &params_at(1, 0));
         let labels = labels(&items);
-        assert!(labels.contains(&"gShared"), "extern variable should be visible");
+        assert!(
+            labels.contains(&"gShared"),
+            "extern variable should be visible"
+        );
         assert!(
             !labels.contains(&"gHidden"),
             "static variable from include should be hidden"

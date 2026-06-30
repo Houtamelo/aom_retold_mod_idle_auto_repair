@@ -71,4 +71,13 @@ class XsLspServerDescriptorTest {
         val commandLine = descriptor.createCommandLine()
         assertFalse("stderr must remain a separate stream for the LSP JSON-RPC channel", commandLine.isRedirectErrorStream)
     }
+
+    @Test
+    fun semanticTokensSupportIsXsSpecific() {
+        val descriptor = createDescriptor()
+        assertTrue(
+            "descriptor should expose an XsSemanticTokensSupport customizer",
+            descriptor.lspSemanticTokensSupport is XsSemanticTokensSupport
+        )
+    }
 }

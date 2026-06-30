@@ -1318,6 +1318,7 @@ fn symbol_to_lsp(s: &symbols::Symbol) -> DocumentSymbol {
         symbols::SymbolKind::Function => SymbolKind::FUNCTION,
         symbols::SymbolKind::Variable => SymbolKind::VARIABLE,
         symbols::SymbolKind::Constant => SymbolKind::CONSTANT,
+        symbols::SymbolKind::Class => SymbolKind::CLASS,
     };
     DocumentSymbol {
         name: s.name.clone(),
@@ -1339,6 +1340,7 @@ fn symbol_to_workspace_symbol(s: &symbols::Symbol, uri: &Url, _rel: &str) -> Sym
         symbols::SymbolKind::Function => SymbolKind::FUNCTION,
         symbols::SymbolKind::Variable => SymbolKind::VARIABLE,
         symbols::SymbolKind::Constant => SymbolKind::CONSTANT,
+        symbols::SymbolKind::Class => SymbolKind::CLASS,
     };
     SymbolInformation {
         name: s.name.clone(),
