@@ -1337,22 +1337,38 @@ fn lsp_symbol_kind(kind: symbols::SymbolKind) -> SymbolKind {
 /// Build a tree of `DocumentSymbol`s where class members are nested under
 /// their owning class.
 fn build_document_symbol_tree(table: &symbols::SymbolTable) -> Vec<DocumentSymbol> {
-    let mut items = Vec::new();
-    let mut pending_members: Vec<&symbols::Symbol> = Vec::new();
+    // First pass: group members by their owning class. We don't rely on
+    // insertion order in `table.symbols` because `extract_class` emits the
+    // class symbol before its members, so draining a `pending_members` list
+    // at the moment we encounter a class would always see an empty buffer.
+    let mut class_members: std::collections::HashMap<String, Vec<&symbols::Symbol>> =
+        std::collections::HashMap::new();
+    for sym in &table.symbols {
+        if let Some(owner) = sym.class_owner.as_deref() {
+            class_members
+                .entry(owner.to_string())
+                .or_default()
+                .push(sym);
+        }
+    }
 
+    // Second pass: emit a DocumentSymbol for every non-member symbol, and
+    // attach the pre-collected members under their owning class.
+    let mut items = Vec::new();
     for sym in &table.symbols {
         if sym.class_owner.is_some() {
-            pending_members.push(sym);
+            // Will be emitted under its owning class below.
             continue;
         }
 
-        let mut children = Vec::new();
-        if sym.kind == symbols::SymbolKind::Class {
-            let class_name = &sym.name;
-            children.extend(pending_members.drain(..).filter(|m| {
-                m.class_owner.as_deref() == Some(class_name)
-            }).map(symbol_to_lsp_child));
-        }
+        let children = if sym.kind == symbols::SymbolKind::Class {
+            class_members
+                .remove(&sym.name)
+                .map(|mems| mems.into_iter().map(symbol_to_lsp_child).collect::<Vec<_>>())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         items.push(DocumentSymbol {
             name: sym.name.clone(),
@@ -1395,5 +1411,69 @@ fn symbol_to_workspace_symbol(s: &symbols::Symbol, uri: &Url, _rel: &str) -> Sym
             range: s.selection_range,
         },
         container_name: s.class_owner.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the `extract_class`-emits-class-before-members bug:
+    /// `build_document_symbol_tree` was draining a `pending_members` buffer
+    /// the moment it saw a `Class` symbol, but the class symbol is pushed
+    /// first by `extract_class`, so the buffer was always empty.
+    #[test]
+    fn class_members_nest_under_their_class_in_document_symbol_tree() {
+        let class_only = symbols::Symbol {
+            name: "Foo".to_string(),
+            kind: symbols::SymbolKind::Class,
+            ty: String::new(),
+            params: Vec::new(),
+            class_owner: None,
+            is_extern: false,
+            is_mutable: false,
+            is_static: false,
+            is_forward: false,
+            visibility: symbols::Visibility::Public,
+            full_range: tower_lsp::lsp_types::Range::default(),
+            selection_range: tower_lsp::lsp_types::Range::default(),
+            detail: "class Foo".to_string(),
+        };
+        let mut field = class_only.clone();
+        field.name = "health".to_string();
+        field.kind = symbols::SymbolKind::ClassField;
+        field.class_owner = Some("Foo".to_string());
+        field.detail = "field health".to_string();
+        let mut method = class_only.clone();
+        method.name = "takeDamage".to_string();
+        method.kind = symbols::SymbolKind::ClassMethod;
+        method.class_owner = Some("Foo".to_string());
+        method.detail = "method takeDamage".to_string();
+
+        // Members appear AFTER the class (matches `extract_class` ordering).
+        let table = symbols::SymbolTable {
+            symbols: vec![class_only, field, method],
+        };
+
+        let items = build_document_symbol_tree(&table);
+
+        assert_eq!(items.len(), 1, "class should appear once at top level");
+        let foo = &items[0];
+        assert_eq!(foo.name, "Foo");
+        let children = foo
+            .children
+            .as_ref()
+            .expect("class should now have children attached");
+        let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.contains(&"health"),
+            "field 'health' should be nested under class; got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"takeDamage"),
+            "method 'takeDamage' should be nested under class; got {:?}",
+            names
+        );
     }
 }
