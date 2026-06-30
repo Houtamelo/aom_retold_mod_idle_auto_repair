@@ -89,6 +89,10 @@ where
     }
 }
 
+// `AiplansFile` is the deserialization shape for the aiplans JSON dump. It is
+// currently parsed into `EngineApi::aiplans` and then dropped; keeping the
+// struct documents the schema and is retained for future use.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct AiplansFile {
     pub constants: Vec<AiplanConstant>,

@@ -7,6 +7,8 @@ use tower_lsp::lsp_types::Url;
 
 use xs_language_server::{engine_api, parser, semantic_tokens, symbols, workspace};
 
+// Convenience helper for tests that only need workspace symbols.
+#[allow(dead_code)]
 fn no_engine_api() -> engine_api::SharedEngineApi {
     Arc::new(engine_api::EngineApi {
         syscalls: vec![],

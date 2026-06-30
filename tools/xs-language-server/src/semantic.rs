@@ -631,7 +631,7 @@ pub fn check_forward_declarations(
 pub fn check_mutable_redefinitions(project: &VirtualProject) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
 
-    for (_path, file) in &project.files {
+    for file in project.files.values() {
         let funcs: Vec<&Symbol> = file
             .table
             .symbols

@@ -257,7 +257,6 @@ impl MergedViewCacheKey {
 /// rest of the file. The previous `MergeError` enum is intentionally gone so
 /// callers cannot accidentally reintroduce fail-fast behaviour by `?`-ing
 /// the builder's result.
-
 impl MergedView {
     /// Build the merged view for `file` from its (already-parsed) source text.
     ///
@@ -478,6 +477,9 @@ impl MergedView {
     }
 }
 
+// Internal recursive helper; parameter count is driven by the include-graph
+// traversal context and is not worth splitting for a purely stylistic lint.
+#[allow(clippy::too_many_arguments)]
 fn walk_includes(
     file: &Path,
     source: &str,

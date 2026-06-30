@@ -27,7 +27,7 @@ pub fn identifier_at_cursor(text: &str, line: u32, character: u32) -> Option<Str
     let on_ident = line_str[col..]
         .chars()
         .next()
-        .map_or(false, |c| c.is_ascii_alphanumeric() || c == '_');
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
     if !on_ident {
         return None;
     }

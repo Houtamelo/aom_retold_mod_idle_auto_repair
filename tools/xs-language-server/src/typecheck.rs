@@ -110,7 +110,7 @@ fn check_one_call(
         return;
     }
 
-    let callee_source = target.source();
+    let _callee_source = target.source();
     let name = target.name();
     let params = target.params();
     let required_count = required_param_count(&params);
@@ -371,6 +371,9 @@ fn number_literal_type(node: tree_sitter::Node<'_>, source: &str) -> String {
 /// in disguise). Use [`narrowing_warning_message`] to decide whether a
 /// narrowing conversion warrants a WARNING; if it returns `None`, the
 /// conversion is silent.
+// Kept for future per-call-source divergence (engine API vs workspace call).
+// Not wired into the current diagnostic path, so it is currently unused.
+#[allow(dead_code)]
 fn arg_types_compatible(expected: &str, actual: &str, _source: CalleeSource) -> bool {
     if expected == actual {
         return true;

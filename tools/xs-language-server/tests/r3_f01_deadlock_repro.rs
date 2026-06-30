@@ -3,11 +3,11 @@
 //!
 //! The claim asserts that:
 //!   - `did_close` (server.rs:406-414) acquires them in order:
-//!       documents -> symbol_tables -> merged_views (held simultaneously).
+//!     documents -> symbol_tables -> merged_views (held simultaneously).
 //!   - `did_change_watched_files` (server.rs:472-485) acquires them in order:
-//!       merged_views -> documents -> symbol_tables.
+//!     merged_views -> documents -> symbol_tables.
 //!   - `get_or_build_merged_view` (server.rs:105-142) acquires them in order:
-//!       workspace -> symbol_tables -> merged_views.
+//!     workspace -> symbol_tables -> merged_views.
 //!
 //! For a classic hold-and-wait deadlock, two tasks must hold one mutex each
 //! while awaiting the other. This test constructs the simplest possible

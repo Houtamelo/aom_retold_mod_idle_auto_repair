@@ -208,12 +208,8 @@ fn parse_summary_descriptions(doc: &Html) -> HashMap<String, String> {
 /// Parse `aiAddEchoCategory (string categoryName)` from a summary cell.
 fn parse_summary_signature(text: &str) -> Option<(String, String)> {
     let text = text.trim();
-    let Some(open) = text.find('(') else {
-        return None;
-    };
-    let Some(close) = text.rfind(')') else {
-        return None;
-    };
+    let open = text.find('(')?;
+    let close = text.rfind(')')?;
     let name = text[..open].trim().to_string();
     let params = text[open + 1..close].to_string();
     if name.is_empty() || !name.chars().next()?.is_alphabetic() {
@@ -354,9 +350,7 @@ fn parse_aiplans_file(path: &Path) -> Result<Vec<AiplanConstant>> {
 /// Parse `cAttackPlanAttackRouteID = 0` from a summary cell.
 fn parse_aiplan_name_value(text: &str) -> Option<(String, String)> {
     let text = text.trim();
-    let Some(eq) = text.find('=') else {
-        return None;
-    };
+    let eq = text.find('=')?;
     let name = text[..eq].trim().to_string();
     let value = text[eq + 1..].trim().to_string();
     if name.is_empty() {

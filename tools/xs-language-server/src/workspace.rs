@@ -566,7 +566,7 @@ mod tests {
     #[test]
     fn lookup_mod_returns_none_for_unowned_file() {
         let tmp = TempDir::new().unwrap();
-        let mut ws = Workspace::new(tmp.path().to_path_buf());
+        let ws = Workspace::new(tmp.path().to_path_buf());
         let file = Url::from_file_path("/tmp/orphan.xs").unwrap();
         assert!(ws.lookup_mod(&file).is_none());
     }
@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn build_virtual_project_lists_mod_overrides() {
         let tmp = TempDir::new().unwrap();
-        let game_root = tmp.path().join("game");
+        let _game_root = tmp.path().join("game");
         let mod_root = tmp.path().join("mod_a");
         touch(
             &mod_root

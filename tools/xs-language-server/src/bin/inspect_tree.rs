@@ -30,7 +30,7 @@ fn main() {
     }
 }
 
-fn walk(cursor: &mut TreeCursor, depth: usize, target: usize, lines: &[&str]) {
+fn walk(cursor: &mut TreeCursor, depth: usize, target: usize, _lines: &[&str]) {
     let node = cursor.node();
     let start = node.start_position();
     let end = node.end_position();
@@ -51,9 +51,9 @@ fn walk(cursor: &mut TreeCursor, depth: usize, target: usize, lines: &[&str]) {
         );
     }
     if cursor.goto_first_child() {
-        walk(cursor, depth + 1, target, lines);
+        walk(cursor, depth + 1, target, _lines);
         while cursor.goto_next_sibling() {
-            walk(cursor, depth + 1, target, lines);
+            walk(cursor, depth + 1, target, _lines);
         }
         cursor.goto_parent();
     }

@@ -651,7 +651,7 @@ impl LanguageServer for XsLanguageServer {
         // Phase 0: include-directive path token (runs before identifier
         // resolution; a miss falls through to the existing logic below)
         // -----------------------------------------------------------------
-        if let Some(current_file) = uri.to_file_path().ok() {
+        if let Ok(current_file) = uri.to_file_path() {
             if let Some(include_target) = parser::detect_include_path_at_position(
                 &current_file,
                 &text,
@@ -1260,7 +1260,7 @@ async fn warn_unowned_file(
         for m in registered_mods {
             warn!("    - {}", m);
         }
-        if let Some(path) = file_path {
+        if let Some(_path) = file_path {
             warn!("  hint: a mod at <mod_uri> owns a file when file_path.starts_with(<mod_uri>);");
             warn!("        check for case sensitivity, trailing slash, or symlink mismatches");
             warn!("        between the registered prefix and the actual file path.");
@@ -1350,6 +1350,9 @@ fn lsp_symbol_kind(kind: symbols::SymbolKind) -> SymbolKind {
 
 /// Build a tree of `DocumentSymbol`s where class members are nested under
 /// their owning class.
+// tower_lsp migration from `deprecated` to `tags` is a breaking change and
+// orthogonal to this mechanical clippy cleanup.
+#[allow(deprecated)]
 fn build_document_symbol_tree(table: &symbols::SymbolTable) -> Vec<DocumentSymbol> {
     // First pass: group members by their owning class. We don't rely on
     // insertion order in `table.symbols` because `extract_class` emits the
@@ -1407,6 +1410,8 @@ fn build_document_symbol_tree(table: &symbols::SymbolTable) -> Vec<DocumentSymbo
     items
 }
 
+// See `build_document_symbol_tree` above: tower_lsp deprecated field migration is out of scope.
+#[allow(deprecated)]
 fn symbol_to_lsp_child(s: &symbols::Symbol) -> DocumentSymbol {
     DocumentSymbol {
         name: s.name.clone(),
@@ -1422,6 +1427,8 @@ fn symbol_to_lsp_child(s: &symbols::Symbol) -> DocumentSymbol {
 
 /// Convert a workspace symbol to the LSP `SymbolInformation` shape for
 /// `workspace/symbol` responses.
+// See `build_document_symbol_tree` above: tower_lsp deprecated field migration is out of scope.
+#[allow(deprecated)]
 fn symbol_to_workspace_symbol(s: &symbols::Symbol, uri: &Url, _rel: &str) -> SymbolInformation {
     SymbolInformation {
         name: s.name.clone(),

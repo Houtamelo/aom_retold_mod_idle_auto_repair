@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tower_lsp::lsp_types::{SemanticTokenModifier, SemanticTokenType};
+use tower_lsp::lsp_types::SemanticTokenType;
 
 use xs_language_server::{engine_api, parser, semantic_tokens, symbols, workspace};
 

@@ -154,6 +154,9 @@ mod wire_helpers {
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"capabilities":{},"trace":"off","rootUri":null,"workspaceFolders":null}}"#;
 const INITIALIZED: &str = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
 const DID_OPEN: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/test.xs","languageId":"xs","version":1,"text":"rule test\nminInterval 5\nactive\n{\n   aiEcho(\"hello\");\n}"}}}"#;
+// Reference fixture kept for future diagnostic-change scenarios; not used by
+// the current scenario set.
+#[allow(dead_code)]
 const DID_CHANGE: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/test.xs","version":2},"contentChanges":[{"text":"rule test2\nactive\n{\n   aiEcho(\"changed\");\n}"}]}}"#;
 const DID_OPEN_BAD: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/bad.xs","languageId":"xs","version":1,"text":"rule brokenRule\nminInterval 5\nactive\n{\n   int x = ;\n   aiEcho(\"hello\n}\n\nvoid unclosed(int a\n{\n}\n"}}}"#;
 const DID_CHANGE_BAD_FIX: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/bad.xs","version":2},"contentChanges":[{"text":"rule fixedRule\nminInterval 5\nactive\n{\n   aiEcho(\"hello\");\n}\n"}]}}"#;
@@ -518,7 +521,7 @@ fn run_baseline() -> bool {
 
     // After fixing every diagnostic in /tmp/bad.xs, the server MUST publish an
     // empty diagnostic array (version 2) so the client clears stale markers.
-    let bad_clean_empty = bad_clean_diag_raw.as_deref().map_or(false, |raw| {
+    let bad_clean_empty = bad_clean_diag_raw.as_deref().is_some_and(|raw| {
         raw.contains("\"uri\":\"file:///tmp/bad.xs\"")
             && raw.contains("\"diagnostics\":[]")
             && raw.contains("\"version\":2")
@@ -598,7 +601,7 @@ fn run_baseline() -> bool {
     // Definition on an engine-API symbol (`aiEcho`): should return null
     // because engine symbols have no source location.
     let def_result = definition_resp.get("result");
-    let is_null = def_result.map_or(false, |v| v.is_null());
+    let is_null = def_result.is_some_and(|v| v.is_null());
     let no_stub_uri = !definition_resp.to_string().contains("xs-stub://");
     if is_null && no_stub_uri {
         println!("PASS: definition returned null for engine-API symbol (aiEcho)");
@@ -1704,6 +1707,10 @@ fn run_definition_across_include() -> bool {
     )
 }
 
+// The cycle test intentionally detaches from stdout and reaps the child via
+// `try_wait()` / `kill()` within a bounded timeout; the zombie-process lint
+// does not fit this scenario.
+#[allow(clippy::zombie_processes)]
 fn run_cycle_does_not_hang() -> bool {
     let main = "include \"util.xs\";\nvoid aFn() {}\n";
     let util = "include \"main.xs\";\nvoid bFn() {}\n";

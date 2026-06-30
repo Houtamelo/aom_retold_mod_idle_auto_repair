@@ -127,7 +127,6 @@ fn symbol_to_completion_item(sym: &Symbol) -> CompletionItem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     use tempfile::TempDir;
 

@@ -190,15 +190,15 @@ fn is_constant_expression(node: Node<'_>, source: &str) -> bool {
         "number_literal" | "string_literal" | "true" | "false" | "identifier" => true,
         "unary_expression" => node
             .child_by_field_name("argument")
-            .map_or(false, |c| is_constant_expression(c, source)),
+            .is_some_and(|c| is_constant_expression(c, source)),
         "parenthesized_expression" => node
             .named_children(&mut node.walk())
             .next()
-            .map_or(false, |c| is_constant_expression(c, source)),
+            .is_some_and(|c| is_constant_expression(c, source)),
         "expression" => node
             .named_children(&mut node.walk())
             .next()
-            .map_or(false, |c| is_constant_expression(c, source)),
+            .is_some_and(|c| is_constant_expression(c, source)),
         // Binary expression over constants. The XS compiler accepts
         // `const int X = cFoo + 1;` and similar arithmetic over other
         // constants. Both operands must be constant expressions.

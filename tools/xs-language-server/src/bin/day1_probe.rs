@@ -96,6 +96,8 @@ fn main() {
     }
 }
 
+// One-off probe utility; parameter count matches the counters it collects.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     cursor: &mut TreeCursor,
     depth: usize,

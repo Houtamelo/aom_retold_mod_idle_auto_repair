@@ -10,7 +10,7 @@
 //!   * `rule_definition`     -> Rule
 //!   * `function_definition` -> Function
 //!   * `declaration`         -> Variable or Constant (depending on `const`
-//!                              type-qualifier)
+//!     type-qualifier)
 //!
 //! Note: `#define` is NOT supported (XS doesn't use it; only `#if`/`#ifdef`
 //! appear in real code, and those files are already failing to parse
@@ -54,19 +54,14 @@ impl SymbolKind {
 /// * `Extern` — `extern` declaration; visible to other files without `include`.
 /// * `Public` — global function/variable not marked `extern` or `static`.
 ///   Functions default to public; non-`extern` variables are `Local`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Visibility {
+    #[default]
     Local,
     Const,
     Extern,
     Public,
-}
-
-impl Default for Visibility {
-    fn default() -> Self {
-        Visibility::Local
-    }
 }
 
 /// A function parameter — `int x` or `string s = "default"`.

@@ -452,12 +452,12 @@ mod tests {
 
         load_or_parse_symbols(&file, "ai/core/core.xs", &cache_dir).unwrap();
         assert!(
-            !parse_cache_dir(&cache_dir)
+            parse_cache_dir(&cache_dir)
                 .read_dir()
                 .unwrap()
                 .flatten()
                 .next()
-                .is_none()
+                .is_some()
         );
 
         invalidate_parse_cache("ai/core/core.xs", &cache_dir).unwrap();

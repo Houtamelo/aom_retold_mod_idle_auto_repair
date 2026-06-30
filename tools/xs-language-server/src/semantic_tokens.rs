@@ -67,6 +67,9 @@ pub fn server_capabilities() -> SemanticTokensServerCapabilities {
 /// include-paste merged view, if one was built. `member_index` maps member
 /// names to their strongest workspace origin for `obj.field`/`Class.method`
 /// references.
+// Semantic-token entry points pass the full LSP context; splitting these
+// signatures would force unrelated data structures into a helper struct.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_tokens(
     source: &str,
     current_file: Option<&Path>,
@@ -102,6 +105,8 @@ pub fn compute_tokens(
     tokens
 }
 
+// Recursive tree walker; see `compute_tokens` rationale for the arity.
+#[allow(clippy::too_many_arguments)]
 fn walk_for_tokens(
     node: tree_sitter::Node<'_>,
     source: &str,
@@ -196,6 +201,8 @@ fn node_range(node: tree_sitter::Node<'_>) -> Range {
     )
 }
 
+// Identifier classifier; arity mirrors the token-walker context.
+#[allow(clippy::too_many_arguments)]
 fn classify_identifier(
     node: tree_sitter::Node<'_>,
     source: &str,
@@ -228,7 +235,7 @@ fn classify_identifier(
             (None, None)
         };
 
-    let Some(symbol) = symbol else { return None };
+    let symbol = symbol?;
     let origin = defining_path
         .map(|p| classify_origin(p, workspace, project))
         .unwrap_or(Origin::Engine);
