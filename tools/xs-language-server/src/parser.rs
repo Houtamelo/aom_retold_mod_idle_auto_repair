@@ -90,10 +90,9 @@ fn range_contains(node: tree_sitter::Node<'_>, line: u32, col: u32) -> bool {
     let start = node.start_position();
     let end = node.end_position();
 
-    let after_start = line > start.row as u32
-        || (line == start.row as u32 && col >= start.column as u32);
-    let before_end = line < end.row as u32
-        || (line == end.row as u32 && col < end.column as u32);
+    let after_start =
+        line > start.row as u32 || (line == start.row as u32 && col >= start.column as u32);
+    let before_end = line < end.row as u32 || (line == end.row as u32 && col < end.column as u32);
 
     after_start && before_end
 }

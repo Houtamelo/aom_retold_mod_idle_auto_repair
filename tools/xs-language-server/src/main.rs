@@ -15,7 +15,9 @@ use xs_language_server::server::XsLanguageServer;
 async fn main() -> anyhow::Result<()> {
     // Honor RUST_LOG; default to info so the JSON-RPC traffic stays quiet.
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_writer(std::io::stderr)
         .init();
 

@@ -119,11 +119,7 @@ fn extern_variable_emits_extern_and_origin_modifiers() {
         .iter()
         .find(|t| token_text(source, t) == "gFoo" && t.token_type == SemanticTokenType::VARIABLE)
         .expect("gFoo variable token missing");
-    let modifiers: Vec<&str> = extern_token
-        .modifiers
-        .iter()
-        .map(|m| m.as_str())
-        .collect();
+    let modifiers: Vec<&str> = extern_token.modifiers.iter().map(|m| m.as_str()).collect();
     assert!(
         modifiers.contains(&"extern"),
         "extern variable should have extern modifier: {:?}",
@@ -171,10 +167,9 @@ fn constant_preserves_origin_modifier_with_new_token_type() {
         "MOD_MAX should emit 'constant' token type"
     );
     assert!(
-        constant_tokens.iter().any(|t| t
-            .modifiers
+        constant_tokens
             .iter()
-            .any(|m| m.as_str() == "modded")),
+            .any(|t| t.modifiers.iter().any(|m| m.as_str() == "modded")),
         "MOD_MAX in modded code should keep modded origin modifier"
     );
 }

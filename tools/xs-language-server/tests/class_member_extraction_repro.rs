@@ -79,7 +79,10 @@ fn cross_file_field_origin_is_unmodded_when_vanilla() {
         cache_dir.path(),
         None,
     );
-    assert_eq!(member_index.origin("value"), Some(semantic_tokens::Origin::Unmodded));
+    assert_eq!(
+        member_index.origin("value"),
+        Some(semantic_tokens::Origin::Unmodded)
+    );
 }
 
 #[test]
@@ -99,7 +102,10 @@ fn cross_file_method_origin_is_unmodded_when_vanilla() {
         cache_dir.path(),
         None,
     );
-    assert_eq!(member_index.origin("work"), Some(semantic_tokens::Origin::Unmodded));
+    assert_eq!(
+        member_index.origin("work"),
+        Some(semantic_tokens::Origin::Unmodded)
+    );
 }
 
 #[test]
@@ -124,7 +130,10 @@ fn ambiguous_member_prefers_modded_origin() {
         cache_dir.path(),
         None,
     );
-    assert_eq!(member_index.origin("value"), Some(semantic_tokens::Origin::Modded));
+    assert_eq!(
+        member_index.origin("value"),
+        Some(semantic_tokens::Origin::Modded)
+    );
 }
 
 #[test]

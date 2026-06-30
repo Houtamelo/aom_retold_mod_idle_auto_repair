@@ -50,7 +50,15 @@ pub fn check_calls_with_merged(
     project: Option<&crate::semantic::VirtualProject>,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    walk(tree.root_node(), source, engine, table, merged, project, &mut out);
+    walk(
+        tree.root_node(),
+        source,
+        engine,
+        table,
+        merged,
+        project,
+        &mut out,
+    );
     out
 }
 
@@ -165,7 +173,9 @@ fn check_one_call(
         //     user has clearly written an integer in disguise.
         let numeric = ["int", "float"];
         if numeric.contains(&expected.ty.as_str()) && numeric.contains(&actual_ty.as_str()) {
-            if let Some(reason) = narrowing_warning_message(arg_node, source, &expected.ty, &actual_ty) {
+            if let Some(reason) =
+                narrowing_warning_message(arg_node, source, &expected.ty, &actual_ty)
+            {
                 out.push(Diagnostic {
                     range: node_range(arg_node),
                     severity: Some(DiagnosticSeverity::WARNING),
@@ -188,22 +198,22 @@ fn check_one_call(
             continue;
         }
         out.push(Diagnostic {
-                range: node_range(arg_node),
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: None,
-                code_description: None,
-                source: Some("xs-language-server".to_string()),
-                message: format!(
-                    "expected argument {i} of type `{expected}` for `{name}`, got `{actual}`",
-                    i = i + 1,
-                    expected = expected.ty,
-                    name = name,
-                    actual = actual_ty
-                ),
-                related_information: None,
-                tags: None,
-                data: None,
-            });
+            range: node_range(arg_node),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("xs-language-server".to_string()),
+            message: format!(
+                "expected argument {i} of type `{expected}` for `{name}`, got `{actual}`",
+                i = i + 1,
+                expected = expected.ty,
+                name = name,
+                actual = actual_ty
+            ),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
     }
 }
 
@@ -464,10 +474,7 @@ fn node_text<'a>(node: tree_sitter::Node<'a>, source: &'a str) -> &'a str {
     &source[node.byte_range()]
 }
 
-fn find_named_child<'a>(
-    node: tree_sitter::Node<'a>,
-    kind: &str,
-) -> Option<tree_sitter::Node<'a>> {
+fn find_named_child<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).find(|c| c.kind() == kind)
 }
@@ -636,8 +643,10 @@ void test() { myFn(1, 2); }"#;
         let diags = check_workspace_call(decl, caller);
         let msgs = messages(&diags);
         assert!(
-            msgs.iter().any(|m| m.contains("expected 1 required argument") && m.contains("got 0")),
-            "missing ref param should error, got: {:?}", msgs
+            msgs.iter()
+                .any(|m| m.contains("expected 1 required argument") && m.contains("got 0")),
+            "missing ref param should error, got: {:?}",
+            msgs
         );
     }
 
@@ -687,8 +696,11 @@ void test() { myFn(1, 2); }"#;
         let diags2 = check_workspace_call(decl, caller2);
         let msgs2 = messages(&diags2);
         assert!(
-            msgs2.iter().any(|m| m.contains("expected 1 required argument")),
-            "missing ref with defaulted non-ref should still error, got: {:?}", msgs2
+            msgs2
+                .iter()
+                .any(|m| m.contains("expected 1 required argument")),
+            "missing ref with defaulted non-ref should still error, got: {:?}",
+            msgs2
         );
     }
 
@@ -700,8 +712,9 @@ void test() { myFn(1, 2); }"#;
         let diags = check_calls(&tree, src, &engine(), &table, None);
         let msgs = messages(&diags);
         assert!(
-            msgs.iter().any(|m| m.contains("expected argument 1 of type `string`")
-                && m.contains("got `int`")),
+            msgs.iter()
+                .any(|m| m.contains("expected argument 1 of type `string`")
+                    && m.contains("got `int`")),
             "missing type diagnostic, got: {:?}",
             msgs
         );
@@ -715,8 +728,9 @@ void test() { myFn(1, 2); }"#;
         let diags = check_calls(&tree, src, &engine(), &table, None);
         let msgs = messages(&diags);
         assert!(
-            msgs.iter().any(|m| m.contains("expected argument 1 of type `int`")
-                && m.contains("got `string`")),
+            msgs.iter()
+                .any(|m| m.contains("expected argument 1 of type `int`")
+                    && m.contains("got `string`")),
             "missing type diagnostic, got: {:?}",
             msgs
         );
@@ -738,8 +752,9 @@ void test() { myFn(1, 2); }"#;
         let diags = check_calls(&tree, src, &engine(), &table, None);
         let msgs = messages(&diags);
         assert!(
-            msgs.iter().any(|m| m.contains("expected argument 1 of type `string`")
-                && m.contains("got `int`")),
+            msgs.iter()
+                .any(|m| m.contains("expected argument 1 of type `string`")
+                    && m.contains("got `int`")),
             "missing type diagnostic for `int x` passed as string, got: {:?}",
             msgs
         );
@@ -976,13 +991,15 @@ void test() { setOverrideStrategy(strategy); }"#;
         let table = table_for(&source_a);
         let own = table.clone();
         let cache_dir = TempDir::new().unwrap();
-        let merged =
-            MergedView::build(&a, &source_a, &own, &ws, &project, cache_dir.path());
+        let merged = MergedView::build(&a, &source_a, &own, &ws, &project, cache_dir.path());
 
-        let diags = check_calls_with_merged(&tree, &source_a, &engine(), &table, Some(&merged), None);
+        let diags =
+            check_calls_with_merged(&tree, &source_a, &engine(), &table, Some(&merged), None);
         let msgs = messages(&diags);
         assert!(
-            msgs.iter().any(|m| m.contains("expected argument 1 of type `int`") && m.contains("got `string`")),
+            msgs.iter()
+                .any(|m| m.contains("expected argument 1 of type `int`")
+                    && m.contains("got `string`")),
             "expected type error from included function, got: {:?}",
             msgs
         );

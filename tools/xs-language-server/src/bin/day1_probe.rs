@@ -135,7 +135,16 @@ fn walk(
         }
     }
     if cursor.goto_first_child() {
-        walk(cursor, depth + 1, errors, missing, total, max_depth, samples, sample_cap);
+        walk(
+            cursor,
+            depth + 1,
+            errors,
+            missing,
+            total,
+            max_depth,
+            samples,
+            sample_cap,
+        );
         while cursor.goto_next_sibling() {
             walk(
                 cursor,

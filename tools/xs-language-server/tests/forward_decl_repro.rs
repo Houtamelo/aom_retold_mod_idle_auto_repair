@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use xs_language_server::engine_api::EngineApi;
 use xs_language_server::merged_view::{MergedView, VisibilityProvenance};
 use xs_language_server::semantic::{
-    check_forward_declarations_for_merged_view, VirtualProject as SemanticProject,
+    VirtualProject as SemanticProject, check_forward_declarations_for_merged_view,
 };
 use xs_language_server::workspace::{VirtualProject as WorkspaceVirtualProject, Workspace};
 
@@ -76,17 +76,16 @@ fn test_vanilla_main_xs_in_mod_overlay_produces_zero_false_positives() {
         .find("setupDebugCategories")
         .expect("setupDebugCategories should be visible in merged view");
     assert!(
-        matches!(ms.provenance, VisibilityProvenance::TransitiveInclude { .. }),
+        matches!(
+            ms.provenance,
+            VisibilityProvenance::TransitiveInclude { .. }
+        ),
         "expected transitive include provenance, got {:?}",
         ms.provenance
     );
 
-    let diags = check_forward_declarations_for_merged_view(
-        &prj,
-        &EngineApi::default(),
-        &current,
-        &merged,
-    );
+    let diags =
+        check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
     assert_eq!(
         before_declaration_count(&diags),
         0,
@@ -103,12 +102,8 @@ fn test_real_same_file_forward_decl_error_still_detected() {
         "ai/a.xs",
     );
 
-    let diags = check_forward_declarations_for_merged_view(
-        &prj,
-        &EngineApi::default(),
-        &current,
-        &merged,
-    );
+    let diags =
+        check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
     assert_eq!(
         before_declaration_count(&diags),
         1,
@@ -135,12 +130,8 @@ fn test_mutable_function_called_before_redefinition_does_not_emit() {
         "ai/main.xs",
     );
 
-    let diags = check_forward_declarations_for_merged_view(
-        &prj,
-        &EngineApi::default(),
-        &current,
-        &merged,
-    );
+    let diags =
+        check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
     assert_eq!(
         before_declaration_count(&diags),
         0,
@@ -174,7 +165,8 @@ fn test_cyclic_includes_do_not_infinite_loop() {
     let cache_dir = TempDir::new().unwrap();
 
     let merged = std::thread::scope(|s| {
-        let handle = s.spawn(|| MergedView::build(&a, &source, &own, &ws, &project, cache_dir.path()));
+        let handle =
+            s.spawn(|| MergedView::build(&a, &source, &own, &ws, &project, cache_dir.path()));
         handle
             .join()
             .expect("merged view build should terminate without panicking")

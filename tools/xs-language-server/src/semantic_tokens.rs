@@ -211,26 +211,22 @@ fn classify_identifier(
         return None;
     }
 
-    let (symbol, defining_path): (Option<&Symbol>, Option<&Path>) = if let Some(ms) =
-        merged.and_then(|m| m.find(name))
-    {
-        (
-            Some(&ms.symbol),
-            ms.provenance.origin(),
-        )
-    } else if let Some(sym) = own_table.find(name) {
-        (Some(sym), current_file)
-    } else if engine.find_syscall(name).is_some() {
-        return Some(Token {
-            line: node.start_position().row as u32,
-            char: node.start_position().column as u32,
-            len: (node.end_byte() - node.start_byte()) as u32,
-            token_type: SemanticTokenType::FUNCTION,
-            modifiers: vec![SemanticTokenModifier::new("engine")],
-        });
-    } else {
-        (None, None)
-    };
+    let (symbol, defining_path): (Option<&Symbol>, Option<&Path>) =
+        if let Some(ms) = merged.and_then(|m| m.find(name)) {
+            (Some(&ms.symbol), ms.provenance.origin())
+        } else if let Some(sym) = own_table.find(name) {
+            (Some(sym), current_file)
+        } else if engine.find_syscall(name).is_some() {
+            return Some(Token {
+                line: node.start_position().row as u32,
+                char: node.start_position().column as u32,
+                len: (node.end_byte() - node.start_byte()) as u32,
+                token_type: SemanticTokenType::FUNCTION,
+                modifiers: vec![SemanticTokenModifier::new("engine")],
+            });
+        } else {
+            (None, None)
+        };
 
     let Some(symbol) = symbol else { return None };
     let origin = defining_path
@@ -372,7 +368,11 @@ impl MemberIndex {
         if let Some(path) = current_file {
             for sym in &own_table.symbols {
                 if is_class_member(sym) {
-                    promote(&mut origins, sym.name.clone(), classify_origin(path, workspace, project));
+                    promote(
+                        &mut origins,
+                        sym.name.clone(),
+                        classify_origin(path, workspace, project),
+                    );
                 }
             }
         }
@@ -394,7 +394,11 @@ impl MemberIndex {
             };
             for sym in &table.symbols {
                 if is_class_member(sym) {
-                    promote(&mut origins, sym.name.clone(), classify_origin(&path, workspace, project));
+                    promote(
+                        &mut origins,
+                        sym.name.clone(),
+                        classify_origin(&path, workspace, project),
+                    );
                 }
             }
         }
@@ -446,7 +450,10 @@ fn classify_member_identifier(
         char: node.start_position().column as u32,
         len: (node.end_byte() - node.start_byte()) as u32,
         token_type,
-        modifiers: vec![origin_modifier(origin), SemanticTokenModifier::new("member")],
+        modifiers: vec![
+            origin_modifier(origin),
+            SemanticTokenModifier::new("member"),
+        ],
     })
 }
 
@@ -587,7 +594,9 @@ mod tests {
         let symbols = extract_symbols(&tree, source);
         // We expect at least the function name flagged as a declaration.
         assert!(
-            symbols.iter().any(|(n, k, _, is_decl)| n == "foo" && *k == SymbolKind::Function && *is_decl),
+            symbols
+                .iter()
+                .any(|(n, k, _, is_decl)| n == "foo" && *k == SymbolKind::Function && *is_decl),
             "function declaration should be flagged"
         );
     }
@@ -644,10 +653,7 @@ mod tests {
         let entry = ws.mods().first().unwrap();
         let project = ws.build_virtual_project(entry);
 
-        assert_eq!(
-            classify_origin(&overlay, &ws, &project),
-            Origin::Modded
-        );
+        assert_eq!(classify_origin(&overlay, &ws, &project), Origin::Modded);
         assert_eq!(
             classify_origin(&game_root.join("ai").join("g.xs"), &ws, &project),
             Origin::Unmodded

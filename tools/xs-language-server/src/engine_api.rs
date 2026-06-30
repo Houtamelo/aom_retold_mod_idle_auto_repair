@@ -58,7 +58,10 @@ pub struct AiplanConstant {
     pub variable_type: String,
     /// `variable_value` is sometimes a JSON string (e.g. `"\"-1\""` for ints)
     /// and sometimes a bare JSON number (e.g. `0` for booleans). Accept both.
-    #[serde(rename = "variable_value", deserialize_with = "deserialize_string_or_number")]
+    #[serde(
+        rename = "variable_value",
+        deserialize_with = "deserialize_string_or_number"
+    )]
     pub variable_value: String,
 }
 
@@ -123,8 +126,8 @@ impl EngineApi {
     pub fn load_from_archive(archive: &Path, cache_dir: &Path) -> anyhow::Result<Self> {
         cache::ensure_cache_dirs(cache_dir)
             .with_context(|| format!("preparing cache directory {cache_dir:?}"))?;
-        let hash = cache::sha256_file(archive)
-            .with_context(|| format!("hashing archive {archive:?}"))?;
+        let hash =
+            cache::sha256_file(archive).with_context(|| format!("hashing archive {archive:?}"))?;
         let cache_path = cache::engine_cache_path(cache_dir, &hash);
 
         let data: EngineData = match Self::extract_and_cache(archive, cache_dir, &hash) {
@@ -237,11 +240,7 @@ mod tests {
             1804,
             "expected 1804 syscalls parsed directly from the Doxygen archive"
         );
-        assert_eq!(
-            api.aiplans.len(),
-            193,
-            "expected 193 AI-plan constants"
-        );
+        assert_eq!(api.aiplans.len(), 193, "expected 193 AI-plan constants");
 
         let hash = cache::sha256_file(archive).unwrap();
         assert!(cache::engine_cache_path(cache_dir, &hash).exists());

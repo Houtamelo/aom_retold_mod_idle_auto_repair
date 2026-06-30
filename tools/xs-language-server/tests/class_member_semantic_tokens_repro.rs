@@ -73,8 +73,14 @@ fn instance_field_reference_emits_variable_member_unmodded() {
         .iter()
         .find(|t| token_text(source, t) == "health" && t.token_type == SemanticTokenType::VARIABLE)
         .expect("health field token missing");
-    assert!(has_modifier(field_token, "member"), "field reference should have member modifier");
-    assert!(has_modifier(field_token, "unmodded"), "vanilla field reference should have unmodded modifier");
+    assert!(
+        has_modifier(field_token, "member"),
+        "field reference should have member modifier"
+    );
+    assert!(
+        has_modifier(field_token, "unmodded"),
+        "vanilla field reference should have unmodded modifier"
+    );
 }
 
 #[test]
@@ -94,10 +100,18 @@ fn static_method_call_emits_function_member_unmodded() {
 
     let method_token = tokens
         .iter()
-        .find(|t| token_text(source, t) == "takeDamage" && t.token_type == SemanticTokenType::FUNCTION)
+        .find(|t| {
+            token_text(source, t) == "takeDamage" && t.token_type == SemanticTokenType::FUNCTION
+        })
         .expect("takeDamage method token missing");
-    assert!(has_modifier(method_token, "member"), "method reference should have member modifier");
-    assert!(has_modifier(method_token, "unmodded"), "vanilla method reference should have unmodded modifier");
+    assert!(
+        has_modifier(method_token, "member"),
+        "method reference should have member modifier"
+    );
+    assert!(
+        has_modifier(method_token, "unmodded"),
+        "vanilla method reference should have unmodded modifier"
+    );
 }
 
 #[test]
@@ -124,8 +138,14 @@ fn modded_instance_field_reference_emits_variable_member_modded() {
         .iter()
         .find(|t| token_text(source, t) == "health" && t.token_type == SemanticTokenType::VARIABLE)
         .expect("health field token missing");
-    assert!(has_modifier(field_token, "member"), "field reference should have member modifier");
-    assert!(has_modifier(field_token, "modded"), "modded field reference should have modded modifier");
+    assert!(
+        has_modifier(field_token, "member"),
+        "field reference should have member modifier"
+    );
+    assert!(
+        has_modifier(field_token, "modded"),
+        "modded field reference should have modded modifier"
+    );
 }
 
 #[test]
@@ -156,8 +176,14 @@ fn ambiguous_member_name_prefers_modded_origin() {
         .iter()
         .find(|t| token_text(source, t) == "value" && t.token_type == SemanticTokenType::VARIABLE)
         .expect("value field token missing");
-    assert!(has_modifier(field_token, "member"), "field reference should have member modifier");
-    assert!(has_modifier(field_token, "modded"), "ambiguous member should prefer modded origin");
+    assert!(
+        has_modifier(field_token, "member"),
+        "field reference should have member modifier"
+    );
+    assert!(
+        has_modifier(field_token, "modded"),
+        "ambiguous member should prefer modded origin"
+    );
 }
 
 #[test]
@@ -175,8 +201,14 @@ fn engine_class_member_reference_emits_variable_member_engine() {
         .iter()
         .find(|t| token_text(source, t) == "health" && t.token_type == SemanticTokenType::VARIABLE)
         .expect("health field token missing");
-    assert!(has_modifier(field_token, "member"), "field reference should have member modifier");
-    assert!(has_modifier(field_token, "engine"), "engine class member should have engine modifier");
+    assert!(
+        has_modifier(field_token, "member"),
+        "field reference should have member modifier"
+    );
+    assert!(
+        has_modifier(field_token, "engine"),
+        "engine class member should have engine modifier"
+    );
 }
 
 #[test]

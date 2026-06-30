@@ -124,8 +124,11 @@ impl Fixture {
         let game_root = tmp.join(format!("aomr_include_game_{pid}"));
         let _ = std::fs::remove_dir_all(&game_root);
         std::fs::create_dir_all(&game_root).expect("create temp game root");
-        std::fs::copy(resolve_doxygen_archive(), game_root.join("doxygen_retail.7z"))
-            .expect("copy doxygen archive");
+        std::fs::copy(
+            resolve_doxygen_archive(),
+            game_root.join("doxygen_retail.7z"),
+        )
+        .expect("copy doxygen archive");
         write_files(&game_root, vanilla_files);
         let game_root = std::fs::canonicalize(&game_root).unwrap();
 
@@ -293,7 +296,10 @@ fn test_direct_include_resolves_to_target() {
     // Cursor on the `d` of `debug.xs`.
     let resp = fx.definition(&uri, 0, 14);
     let result = resp.get("result").expect("result present");
-    let target_uri = result.get("uri").and_then(|u| u.as_str()).expect("uri present");
+    let target_uri = result
+        .get("uri")
+        .and_then(|u| u.as_str())
+        .expect("uri present");
     assert!(
         target_uri.ends_with("game/ai/core/debug.xs"),
         "expected game debug.xs, got {}",
@@ -325,7 +331,10 @@ fn test_mod_overlay_resolves_to_mod_file() {
 
     let resp = fx.definition(&uri, 0, 14);
     let result = resp.get("result").expect("result present");
-    let target_uri = result.get("uri").and_then(|u| u.as_str()).expect("uri present");
+    let target_uri = result
+        .get("uri")
+        .and_then(|u| u.as_str())
+        .expect("uri present");
     let vanilla_uri = Url::from_file_path(fx.game_root.join("game").join("ai/core/debug.xs"))
         .unwrap()
         .to_string();
@@ -352,7 +361,10 @@ fn test_vanilla_fallback_when_mod_missing() {
 
     let resp = fx.definition(&uri, 0, 14);
     let result = resp.get("result").expect("result present");
-    let target_uri = result.get("uri").and_then(|u| u.as_str()).expect("uri present");
+    let target_uri = result
+        .get("uri")
+        .and_then(|u| u.as_str())
+        .expect("uri present");
     assert!(
         target_uri.ends_with("game/ai/core/debug.xs"),
         "expected vanilla fallback, got {}",
@@ -388,7 +400,10 @@ fn test_not_found_returns_null() {
 fn test_cursor_outside_path_token_uses_existing_logic() {
     let mut fx = Fixture::new(
         &[
-            ("ai/core/main.xs", "include \"core/debug.xs\"; void foo() {}\n"),
+            (
+                "ai/core/main.xs",
+                "include \"core/debug.xs\"; void foo() {}\n",
+            ),
             ("ai/core/debug.xs", "void helper() {}\n"),
         ],
         &[],

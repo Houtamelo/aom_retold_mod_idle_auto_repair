@@ -59,13 +59,19 @@ pub fn collect_all(
 
         let definition_diags = definition_check::validate_definitions(tree, source);
         if !definition_diags.is_empty() {
-            diags.entry(uri.clone()).or_default().extend(definition_diags);
+            diags
+                .entry(uri.clone())
+                .or_default()
+                .extend(definition_diags);
         }
 
         let typecheck_diags =
             typecheck::check_calls_with_merged(tree, source, engine, table, merged, project);
         if !typecheck_diags.is_empty() {
-            diags.entry(uri.clone()).or_default().extend(typecheck_diags);
+            diags
+                .entry(uri.clone())
+                .or_default()
+                .extend(typecheck_diags);
         }
     }
 
@@ -148,7 +154,11 @@ fn to_diagnostic(node: Node, source: &str) -> Diagnostic {
     } else {
         // Defensive: should never be reached because callers only hand us
         // ERROR / MISSING nodes, but keeps the exhaustiveness checker happy.
-        format!("Parse error near line {}, column {}", start.row + 1, start.column + 1)
+        format!(
+            "Parse error near line {}, column {}",
+            start.row + 1,
+            start.column + 1
+        )
     };
     Diagnostic {
         range: Range {
@@ -181,7 +191,11 @@ fn missing_token_message(node: Node) -> String {
     let token = node.kind();
     if token.is_empty() || token.chars().any(|c| c.is_alphabetic() && c.is_uppercase()) {
         let pos = node.start_position();
-        return format!("Parse error near line {}, column {}", pos.row + 1, pos.column + 1);
+        return format!(
+            "Parse error near line {}, column {}",
+            pos.row + 1,
+            pos.column + 1
+        );
     }
     format!("Missing '{}'", token)
 }
@@ -225,7 +239,11 @@ fn unexpected_token_message(node: Node, source: &str) -> String {
     let kind = target.kind();
     let text = node_text(target, source);
     if text.is_empty() {
-        return format!("Parse error near line {}, column {}", pos.row + 1, pos.column + 1);
+        return format!(
+            "Parse error near line {}, column {}",
+            pos.row + 1,
+            pos.column + 1
+        );
     }
     match friendly_kind(kind) {
         Some(k) => format!("Unexpected {} '{}'", k, text),
@@ -259,10 +277,7 @@ pub fn categorize(d: &Diagnostic) -> DiagnosticCategory {
         || msg.contains("must be assigned a constant expression")
     {
         DiagnosticCategory::DefinitionError
-    } else if msg.contains("expected")
-        && msg.contains("argument")
-        && msg.contains("of type")
-    {
+    } else if msg.contains("expected") && msg.contains("argument") && msg.contains("of type") {
         // Type mismatch diagnostics mention the expected type (e.g.
         // "expected argument 1 of type `int`, got `float`").
         DiagnosticCategory::WrongArgType
@@ -297,7 +312,7 @@ pub fn is_argument_mismatch(d: &Diagnostic) -> bool {
 mod tests {
     use tower_lsp::lsp_types::{Diagnostic, Range};
 
-    use super::{categorize, DiagnosticCategory};
+    use super::{DiagnosticCategory, categorize};
 
     fn diag(message: &str) -> Diagnostic {
         Diagnostic {
@@ -316,11 +331,15 @@ mod tests {
     #[test]
     fn test_diagnostic_category_assigns_extern_collision() {
         assert_eq!(
-            categorize(&diag("duplicate extern: 'gFoo' is declared extern in a.xs and b.xs")),
+            categorize(&diag(
+                "duplicate extern: 'gFoo' is declared extern in a.xs and b.xs"
+            )),
             DiagnosticCategory::ExternCollision
         );
         assert_eq!(
-            categorize(&diag("extern collision: 'gFoo' is declared extern in a.xs, also defined in b.xs")),
+            categorize(&diag(
+                "extern collision: 'gFoo' is declared extern in a.xs, also defined in b.xs"
+            )),
             DiagnosticCategory::ExternCollision
         );
     }
@@ -378,7 +397,9 @@ mod tests {
     #[test]
     fn test_diagnostic_category_assigns_other() {
         assert_eq!(
-            categorize(&diag("mutable function 'foo' redefined with different signature")),
+            categorize(&diag(
+                "mutable function 'foo' redefined with different signature"
+            )),
             DiagnosticCategory::Other
         );
     }
@@ -407,7 +428,11 @@ mod tests {
     fn parse_message_for_missing_semicolon() {
         let msgs = parse_messages("void f() { int x = 1 }\n");
         let wanted = msgs.iter().find(|m| m == &&"Missing ';'".to_string());
-        assert!(wanted.is_some(), "expected \"Missing ';'\" among {:?}", msgs);
+        assert!(
+            wanted.is_some(),
+            "expected \"Missing ';'\" among {:?}",
+            msgs
+        );
         for m in &msgs {
             assert_no_internals(m);
         }
@@ -417,7 +442,11 @@ mod tests {
     fn parse_message_for_missing_closing_brace() {
         let msgs = parse_messages("void f() { int x = 1;\n");
         let wanted = msgs.iter().find(|m| m == &&"Missing '}'".to_string());
-        assert!(wanted.is_some(), "expected \"Missing '}}'\" among {:?}", msgs);
+        assert!(
+            wanted.is_some(),
+            "expected \"Missing '}}'\" among {:?}",
+            msgs
+        );
         for m in &msgs {
             assert_no_internals(m);
         }

@@ -551,7 +551,15 @@ fn walk_includes(
                     }
                 };
 
-                add_included_symbols(&table, &to_path, file, effective_line, line, depth + 1, view);
+                add_included_symbols(
+                    &table,
+                    &to_path,
+                    file,
+                    effective_line,
+                    line,
+                    depth + 1,
+                    view,
+                );
                 view.sources.insert(to_path.clone(), child_source.clone());
                 view.tables.insert(to_path.clone(), table);
 

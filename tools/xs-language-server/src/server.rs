@@ -652,9 +652,12 @@ impl LanguageServer for XsLanguageServer {
         // resolution; a miss falls through to the existing logic below)
         // -----------------------------------------------------------------
         if let Some(current_file) = uri.to_file_path().ok() {
-            if let Some(include_target) =
-                parser::detect_include_path_at_position(&current_file, &text, pos.line, pos.character)
-            {
+            if let Some(include_target) = parser::detect_include_path_at_position(
+                &current_file,
+                &text,
+                pos.line,
+                pos.character,
+            ) {
                 let (ws_clone, project) = {
                     let ws = self.workspace.lock().await;
                     let entry = ws.lookup_mod(uri);
@@ -665,8 +668,8 @@ impl LanguageServer for XsLanguageServer {
                     (ws.clone(), project)
                 };
 
-                if let Some(resolved) = ws_clone
-                    .resolve_include_for_file(&project, &current_file, &include_target)
+                if let Some(resolved) =
+                    ws_clone.resolve_include_for_file(&project, &current_file, &include_target)
                 {
                     let def_uri = Url::from_file_path(&resolved)
                         .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -739,7 +742,11 @@ impl LanguageServer for XsLanguageServer {
             return Ok(None);
         };
         let items = build_document_symbol_tree(table);
-        debug!("document_symbol: {} top-level symbol(s) for {}", items.len(), uri);
+        debug!(
+            "document_symbol: {} top-level symbol(s) for {}",
+            items.len(),
+            uri
+        );
         Ok(Some(DocumentSymbolResponse::Nested(items)))
     }
 
@@ -748,7 +755,14 @@ impl LanguageServer for XsLanguageServer {
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = params.text_document.uri;
-        let text = { self.documents.lock().await.get(&uri).unwrap_or("").to_string() };
+        let text = {
+            self.documents
+                .lock()
+                .await
+                .get(&uri)
+                .unwrap_or("")
+                .to_string()
+        };
         let current_file = uri.to_file_path().ok();
         let merged = match current_file {
             Some(_) => self.get_or_build_merged_view(&uri, &text).await,
@@ -1364,7 +1378,11 @@ fn build_document_symbol_tree(table: &symbols::SymbolTable) -> Vec<DocumentSymbo
         let children = if sym.kind == symbols::SymbolKind::Class {
             class_members
                 .remove(&sym.name)
-                .map(|mems| mems.into_iter().map(symbol_to_lsp_child).collect::<Vec<_>>())
+                .map(|mems| {
+                    mems.into_iter()
+                        .map(symbol_to_lsp_child)
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -1378,7 +1396,11 @@ fn build_document_symbol_tree(table: &symbols::SymbolTable) -> Vec<DocumentSymbo
             deprecated: None,
             range: sym.full_range,
             selection_range: sym.selection_range,
-            children: if children.is_empty() { None } else { Some(children) },
+            children: if children.is_empty() {
+                None
+            } else {
+                Some(children)
+            },
         });
     }
 

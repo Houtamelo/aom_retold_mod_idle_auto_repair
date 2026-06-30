@@ -100,7 +100,9 @@ fn validate_declaration(node: Node<'_>, source: &str, out: &mut Vec<Diagnostic>)
                 if !is_constant_expression(value_node, source) {
                     let name_node = find_named_child(init, "identifier");
                     let name = name_node.map(|n| node_text(n, source)).unwrap_or("?");
-                    let range = name_node.map(node_range).unwrap_or_else(|| node_range(node));
+                    let range = name_node
+                        .map(node_range)
+                        .unwrap_or_else(|| node_range(node));
                     out.push(diagnostic(
                         range,
                         format!("constant `{name}` must be assigned a constant expression"),
@@ -124,8 +126,8 @@ fn validate_declaration(node: Node<'_>, source: &str, out: &mut Vec<Diagnostic>)
         return;
     };
     let name = node_text(name_node, source);
-    let type_node = find_named_child(node, "primitive_type")
-        .or_else(|| find_named_child(node, "array_type"));
+    let type_node =
+        find_named_child(node, "primitive_type").or_else(|| find_named_child(node, "array_type"));
     match type_node {
         Some(ty) if is_scalar_type(ty, source) => {
             out.push(diagnostic(
@@ -206,7 +208,9 @@ fn is_constant_expression(node: Node<'_>, source: &str) -> bool {
                 .named_children(&mut cursor)
                 .filter(|c| c.kind() != "operator")
                 .collect();
-            operands.iter().all(|op| is_constant_expression(*op, source))
+            operands
+                .iter()
+                .all(|op| is_constant_expression(*op, source))
                 && !operands.is_empty()
         }
         // `vector(...)` is a built-in type constructor. The XS engine treats
@@ -269,8 +273,10 @@ mod tests {
         let diags = validate_definitions(&parse(src), src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
-            msgs.iter().any(|m| m.contains("non-ref parameter `x` must have a default value")),
-            "expected default-required diagnostic, got: {:?}", msgs
+            msgs.iter()
+                .any(|m| m.contains("non-ref parameter `x` must have a default value")),
+            "expected default-required diagnostic, got: {:?}",
+            msgs
         );
     }
 
@@ -280,8 +286,10 @@ mod tests {
         let diags = validate_definitions(&parse(src), src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
-            msgs.iter().any(|m| m.contains("ref parameter `x` cannot have a default value")),
-            "expected ref-cannot-have-default diagnostic, got: {:?}", msgs
+            msgs.iter()
+                .any(|m| m.contains("ref parameter `x` cannot have a default value")),
+            "expected ref-cannot-have-default diagnostic, got: {:?}",
+            msgs
         );
     }
 
@@ -294,8 +302,10 @@ mod tests {
         let diags = validate_definitions(&parse(src), src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
-            msgs.iter().any(|m| m.contains("variable `x` of scalar type must be initialized")),
-            "expected uninit-scalar diagnostic, got: {:?}", msgs
+            msgs.iter()
+                .any(|m| m.contains("variable `x` of scalar type must be initialized")),
+            "expected uninit-scalar diagnostic, got: {:?}",
+            msgs
         );
     }
 
@@ -321,8 +331,10 @@ mod tests {
         let diags = validate_definitions(&parse(src), src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
-            msgs.iter().any(|m| m.contains("variable `x` of scalar type must be initialized")),
-            "float should be flagged as scalar, got: {:?}", msgs
+            msgs.iter()
+                .any(|m| m.contains("variable `x` of scalar type must be initialized")),
+            "float should be flagged as scalar, got: {:?}",
+            msgs
         );
     }
 
@@ -332,8 +344,10 @@ mod tests {
         let diags = validate_definitions(&parse(src), src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
-            msgs.iter().any(|m| m.contains("variable `x` of scalar type must be initialized")),
-            "bool should be flagged as scalar, got: {:?}", msgs
+            msgs.iter()
+                .any(|m| m.contains("variable `x` of scalar type must be initialized")),
+            "bool should be flagged as scalar, got: {:?}",
+            msgs
         );
     }
 
@@ -343,8 +357,10 @@ mod tests {
         let diags = validate_definitions(&parse(src), src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
-            msgs.iter().any(|m| m.contains("variable `x` of scalar type must be initialized")),
-            "string should be flagged as scalar, got: {:?}", msgs
+            msgs.iter()
+                .any(|m| m.contains("variable `x` of scalar type must be initialized")),
+            "string should be flagged as scalar, got: {:?}",
+            msgs
         );
     }
 
@@ -354,8 +370,10 @@ mod tests {
         let diags = validate_definitions(&parse(src), src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
-            msgs.iter().any(|m| m.contains("variable `x` of scalar type must be initialized")),
-            "vector should be flagged as scalar, got: {:?}", msgs
+            msgs.iter()
+                .any(|m| m.contains("variable `x` of scalar type must be initialized")),
+            "vector should be flagged as scalar, got: {:?}",
+            msgs
         );
     }
 
@@ -378,8 +396,10 @@ mod tests {
         let diags = validate_definitions(&parse(src), src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
-            msgs.iter().any(|m| m.contains("constant `x` must be assigned a constant expression")),
-            "expected non-const-RHS diagnostic, got: {:?}", msgs
+            msgs.iter()
+                .any(|m| m.contains("constant `x` must be assigned a constant expression")),
+            "expected non-const-RHS diagnostic, got: {:?}",
+            msgs
         );
     }
 
@@ -389,7 +409,8 @@ mod tests {
         let diags = validate_definitions(&parse(src), src);
         assert!(
             diags.is_empty(),
-            "literal RHS should be allowed, got: {:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+            "literal RHS should be allowed, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
 
@@ -399,7 +420,8 @@ mod tests {
         let diags = validate_definitions(&parse(src), src);
         assert!(
             diags.is_empty(),
-            "constant reference RHS should be allowed, got: {:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+            "constant reference RHS should be allowed, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
 
@@ -440,7 +462,9 @@ mod tests {
         let src = "const int x = aiEcho(\"hi\");\n";
         let diags = validate_definitions(&parse(src), src);
         assert!(
-            diags.iter().any(|d| d.message.contains("constant `x` must be assigned a constant expression")),
+            diags.iter().any(|d| d
+                .message
+                .contains("constant `x` must be assigned a constant expression")),
             "non-constructor call should be rejected, got: {:?}",
             diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );

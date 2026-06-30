@@ -7,10 +7,7 @@ use tower_lsp::lsp_types::{SemanticTokenModifier, SemanticTokenType};
 use xs_language_server::{engine_api, parser, semantic_tokens, symbols, workspace};
 
 fn token_text(source: &str, token: &semantic_tokens::Token) -> String {
-    let line = source
-        .lines()
-        .nth(token.line as usize)
-        .unwrap_or("");
+    let line = source.lines().nth(token.line as usize).unwrap_or("");
     line.chars()
         .skip(token.char as usize)
         .take(token.len as usize)
@@ -67,16 +64,29 @@ fn test_semantic_token_legend_advertised() {
         _ => panic!("expected SemanticTokensOptions"),
     };
     let legend = opts.legend;
-    let types: Vec<String> = legend.token_types.iter().map(|t| t.as_str().to_string()).collect();
+    let types: Vec<String> = legend
+        .token_types
+        .iter()
+        .map(|t| t.as_str().to_string())
+        .collect();
     let modifiers: Vec<String> = legend
         .token_modifiers
         .iter()
         .map(|m| m.as_str().to_string())
         .collect();
 
-    assert!(types.contains(&"function".to_string()), "legend must contain function");
-    assert!(types.contains(&"variable".to_string()), "legend must contain variable");
-    assert!(types.contains(&"type".to_string()), "legend must contain type");
+    assert!(
+        types.contains(&"function".to_string()),
+        "legend must contain function"
+    );
+    assert!(
+        types.contains(&"variable".to_string()),
+        "legend must contain variable"
+    );
+    assert!(
+        types.contains(&"type".to_string()),
+        "legend must contain type"
+    );
 
     assert!(
         modifiers.contains(&"engine".to_string()),
@@ -115,7 +125,10 @@ fn test_engine_function_emits_engine_modifier() {
         .expect("engineFn token missing");
     assert_eq!(engine_token.token_type, SemanticTokenType::FUNCTION);
     assert!(
-        engine_token.modifiers.iter().any(|m| m.as_str() == "engine"),
+        engine_token
+            .modifiers
+            .iter()
+            .any(|m| m.as_str() == "engine"),
         "engineFn should have engine modifier"
     );
 }
@@ -148,7 +161,10 @@ fn test_modded_function_emits_modded_modifier() {
         .expect("modFn token missing");
     assert_eq!(modded_token.token_type, SemanticTokenType::FUNCTION);
     assert!(
-        modded_token.modifiers.iter().any(|m| m.as_str() == "modded"),
+        modded_token
+            .modifiers
+            .iter()
+            .any(|m| m.as_str() == "modded"),
         "modFn should have modded modifier"
     );
 }

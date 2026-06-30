@@ -68,7 +68,9 @@ fn vanilla_class_reference_emits_type_unmodded() {
 
     let class_token = tokens
         .iter()
-        .find(|t| token_text(source, t) == "VanillaClass" && t.token_type == SemanticTokenType::TYPE)
+        .find(|t| {
+            token_text(source, t) == "VanillaClass" && t.token_type == SemanticTokenType::TYPE
+        })
         .expect("VanillaClass type token missing");
     assert!(
         class_token
@@ -120,7 +122,9 @@ fn unknown_class_reference_falls_back_to_engine() {
 
     let class_token = tokens
         .iter()
-        .find(|t| token_text(source, t) == "UnknownClass" && t.token_type == SemanticTokenType::TYPE)
+        .find(|t| {
+            token_text(source, t) == "UnknownClass" && t.token_type == SemanticTokenType::TYPE
+        })
         .expect("UnknownClass type token missing");
     assert!(
         class_token.modifiers.iter().any(|m| m.as_str() == "engine"),
@@ -138,7 +142,11 @@ fn class_declaration_does_not_crash_walker() {
         .iter()
         .filter(|s| s.kind == symbols::SymbolKind::Class)
         .collect();
-    assert_eq!(class_syms.len(), 1, "exactly one Class symbol should be extracted");
+    assert_eq!(
+        class_syms.len(),
+        1,
+        "exactly one Class symbol should be extracted"
+    );
     assert_eq!(class_syms[0].name, "MyClass");
     // The full range should be non-empty (start before end).
     let range = class_syms[0].full_range;

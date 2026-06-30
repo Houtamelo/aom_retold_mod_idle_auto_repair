@@ -21,7 +21,7 @@ use crate::engine_api::{EngineApi, EngineSignature};
 use crate::merged_view::MergedView;
 use crate::parser;
 use crate::symbols::{Symbol, SymbolKind, SymbolTable, Visibility};
-use crate::workspace::{Workspace, VirtualProject as WorkspaceVirtualProject};
+use crate::workspace::{VirtualProject as WorkspaceVirtualProject, Workspace};
 
 /// A single file inside the virtual project, ready for semantic analysis.
 #[derive(Debug, Clone)]
@@ -55,12 +55,17 @@ impl VirtualProject {
             if let Some(tree) = parser::parse(&source) {
                 let table = crate::symbols::build_symbol_table(&tree, &source);
                 for name in crate::symbols::extract_rule_registrations(&tree, &source) {
-                    registered_rules.entry(name.clone()).or_insert_with(|| make_rule_symbol(&name));
+                    registered_rules
+                        .entry(name.clone())
+                        .or_insert_with(|| make_rule_symbol(&name));
                 }
                 out.insert(path, ParsedFile { source, table });
             }
         }
-        Self { files: out, registered_rules }
+        Self {
+            files: out,
+            registered_rules,
+        }
     }
 
     /// Build a semantic project from a `workspace::VirtualProject` by parsing
@@ -119,12 +124,23 @@ impl VirtualProject {
             // so calls into registered-but-not-defined rules resolve.
             if let Some(tree) = parser::parse(&source) {
                 for name in crate::symbols::extract_rule_registrations(&tree, &source) {
-                    registered_rules.entry(name.clone()).or_insert_with(|| make_rule_symbol(&name));
+                    registered_rules
+                        .entry(name.clone())
+                        .or_insert_with(|| make_rule_symbol(&name));
                 }
             }
-            files.insert(path, ParsedFile { source, table: symbols });
+            files.insert(
+                path,
+                ParsedFile {
+                    source,
+                    table: symbols,
+                },
+            );
         }
-        Self { files, registered_rules }
+        Self {
+            files,
+            registered_rules,
+        }
     }
 }
 
@@ -200,7 +216,11 @@ pub fn resolve_callee<'a>(
         }
     }
 
-    if let Some(file) = project.files.values().find(|f| f.table.find(name).is_some()) {
+    if let Some(file) = project
+        .files
+        .values()
+        .find(|f| f.table.find(name).is_some())
+    {
         if let Some(sym) = file.table.find(name) {
             if is_callable_symbol(sym) {
                 return Resolution::Workspace(sym);
@@ -272,11 +292,7 @@ pub fn check_all(
             current_uri.clone(),
             check_forward_declarations(project, engine, current_file),
         );
-        merge_diagnostics_under_uri(
-            &mut out,
-            current_uri,
-            check_mutable_redefinitions(project),
-        );
+        merge_diagnostics_under_uri(&mut out, current_uri, check_mutable_redefinitions(project));
     }
 
     out
@@ -293,7 +309,9 @@ fn merge_diagnostics_under_uri(
     uri: Option<Url>,
     diags: Vec<Diagnostic>,
 ) {
-    let Some(uri) = uri else { return; };
+    let Some(uri) = uri else {
+        return;
+    };
     if !diags.is_empty() {
         base.entry(uri).or_default().extend(diags);
     }
@@ -331,7 +349,14 @@ fn build_merged_view_from_project(
     let ws = Workspace::new(game_root);
     let project = WorkspaceVirtualProject::default();
     let cache_dir = crate::cache::state_cache_dir();
-    Some(MergedView::build(current_file, source, own_table, &ws, &project, &cache_dir))
+    Some(MergedView::build(
+        current_file,
+        source,
+        own_table,
+        &ws,
+        &project,
+        &cache_dir,
+    ))
 }
 
 /// Effective line for ordering symbols in the merged translation unit.
@@ -348,21 +373,21 @@ fn effective_line(ms: &crate::merged_view::MergedSymbol) -> u32 {
 /// Only files in `merged` (current file + transitive includes) are considered.
 /// Two `extern` declarations on the same include chain are allowed; everything
 /// else collides. Each diagnostic is emitted under the declaring file's URI.
-    pub fn check_extern_collisions(
-        project: &VirtualProject,
-        current_file: &Path,
-        merged: Option<&MergedView>,
-    ) -> DiagnosticsByUri {
-        let mut diags: DiagnosticsByUri = HashMap::new();
+pub fn check_extern_collisions(
+    project: &VirtualProject,
+    current_file: &Path,
+    merged: Option<&MergedView>,
+) -> DiagnosticsByUri {
+    let mut diags: DiagnosticsByUri = HashMap::new();
 
-        // Extern collisions are inherently cross-file. Always gather
-        // symbols from the project's full file set — using `merged.files()`
-        // here would miss extern declarations in sibling files when the
-        // current file has no `include` directives (its merged view
-        // contains only itself). The merged view's edges are still used
-        // by `same_include_chain` below to suppress collisions between
-        // files linked by an include.
-        let paths_in_scope: Vec<&Path> = project.files.keys().map(|p| p.as_path()).collect();
+    // Extern collisions are inherently cross-file. Always gather
+    // symbols from the project's full file set — using `merged.files()`
+    // here would miss extern declarations in sibling files when the
+    // current file has no `include` directives (its merged view
+    // contains only itself). The merged view's edges are still used
+    // by `same_include_chain` below to suppress collisions between
+    // files linked by an include.
+    let paths_in_scope: Vec<&Path> = project.files.keys().map(|p| p.as_path()).collect();
 
     let mut by_name: HashMap<String, Vec<(&Path, &Symbol)>> = HashMap::new();
     for path in paths_in_scope {
@@ -391,7 +416,10 @@ fn effective_line(ms: &crate::merged_view::MergedSymbol) -> u32 {
         }
 
         // An `extern` declaration colliding with a non-`extern` definition.
-        for (path, sym) in occurrences.iter().filter(|(_, s)| s.visibility != Visibility::Extern) {
+        for (path, sym) in occurrences
+            .iter()
+            .filter(|(_, s)| s.visibility != Visibility::Extern)
+        {
             for (ext_path, ext_sym) in &extern_occurrences {
                 emit_extern_collision(&mut diags, name, *path, *sym, *ext_path);
                 // Also flag the extern declaration site? The engine error is
@@ -434,7 +462,10 @@ fn effective_line(ms: &crate::merged_view::MergedSymbol) -> u32 {
         };
         let mut filtered: DiagnosticsByUri = HashMap::new();
         for (uri, ds) in diags {
-            if uri == current_uri || m.files().any(|p| Url::from_file_path(p).ok() == Some(uri.clone())) {
+            if uri == current_uri
+                || m.files()
+                    .any(|p| Url::from_file_path(p).ok() == Some(uri.clone()))
+            {
                 filtered.insert(uri, ds);
             }
         }
@@ -539,10 +570,11 @@ pub fn check_forward_declarations(
 
     for (callee, callee_range) in calls {
         // Skip self-calls: a function calling itself is not a use-before-def.
-        if own_function_ranges
-            .iter()
-            .any(|(n, r)| n == &callee && contains_range(*r, callee_range) && r.start.line < callee_range.start.line)
-        {
+        if own_function_ranges.iter().any(|(n, r)| {
+            n == &callee
+                && contains_range(*r, callee_range)
+                && r.start.line < callee_range.start.line
+        }) {
             continue;
         }
 
@@ -579,7 +611,9 @@ pub fn check_forward_declarations(
         diags.push(Diagnostic {
             range: callee_range,
             severity: Some(DiagnosticSeverity::ERROR),
-            code: Some(tower_lsp::lsp_types::NumberOrString::String("E0310".to_string())),
+            code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                "E0310".to_string(),
+            )),
             code_description: None,
             source: Some("xs-language-server".to_string()),
             message,
@@ -677,10 +711,11 @@ pub fn check_forward_declarations_for_merged_view(
 
     for (callee, callee_range) in calls {
         // Skip self-calls.
-        if own_function_ranges
-            .iter()
-            .any(|(n, r)| n == &callee && contains_range(*r, callee_range) && r.start.line < callee_range.start.line)
-        {
+        if own_function_ranges.iter().any(|(n, r)| {
+            n == &callee
+                && contains_range(*r, callee_range)
+                && r.start.line < callee_range.start.line
+        }) {
             continue;
         }
 
@@ -714,7 +749,9 @@ pub fn check_forward_declarations_for_merged_view(
         diags.push(Diagnostic {
             range: callee_range,
             severity: Some(DiagnosticSeverity::ERROR),
-            code: Some(tower_lsp::lsp_types::NumberOrString::String("E0310".to_string())),
+            code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                "E0310".to_string(),
+            )),
             code_description: None,
             source: Some("xs-language-server".to_string()),
             message,
@@ -875,9 +912,11 @@ fn forward_callable(
     // virtual project regardless of `extern`.
     let defined_elsewhere = project.files.iter().any(|(path, file)| {
         path != current_file
-            && file.table.symbols.iter().any(|s| {
-                s.kind == SymbolKind::Function && s.name == callee && !s.is_forward
-            })
+            && file
+                .table
+                .symbols
+                .iter()
+                .any(|s| s.kind == SymbolKind::Function && s.name == callee && !s.is_forward)
     });
     if defined_elsewhere {
         return true;
@@ -927,10 +966,7 @@ fn node_text<'a>(node: tree_sitter::Node<'a>, source: &'a str) -> &'a str {
     &source[node.byte_range()]
 }
 
-fn find_named_child<'a>(
-    node: tree_sitter::Node<'a>,
-    kind: &str,
-) -> Option<tree_sitter::Node<'a>> {
+fn find_named_child<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).find(|c| c.kind() == kind)
 }
@@ -1093,10 +1129,12 @@ mod tests {
             total_count(&diags) >= 1,
             "expected at least one extern collision diagnostic"
         );
-        assert!(diags
-            .values()
-            .flatten()
-            .any(|d| d.message.contains("extern collision") && d.message.contains("gFoo")));
+        assert!(
+            diags
+                .values()
+                .flatten()
+                .any(|d| d.message.contains("extern collision") && d.message.contains("gFoo"))
+        );
     }
 
     /// When the current file has no `include` directives, the merged view
@@ -1119,8 +1157,10 @@ mod tests {
             "expected at least one extern collision diagnostic; a.xs declares extern gFoo, b.xs declares non-extern gFoo, neither includes the other — the LSP must see this"
         );
         assert!(
-            diags.values().flatten().any(|d| d.message.contains("extern collision")
-                && d.message.contains("gFoo")),
+            diags
+                .values()
+                .flatten()
+                .any(|d| d.message.contains("extern collision") && d.message.contains("gFoo")),
             "diagnostic message should identify the colliding symbol"
         );
     }
@@ -1189,7 +1229,10 @@ mod tests {
             "ai/a.xs",
         );
         let diags = check_extern_collisions(&prj, &current, Some(&merged));
-        assert!(diags.is_empty(), "unrelated files should not collide, got {diags:?}");
+        assert!(
+            diags.is_empty(),
+            "unrelated files should not collide, got {diags:?}"
+        );
     }
 
     #[test]
@@ -1202,7 +1245,10 @@ mod tests {
             "ai/a.xs",
         );
         let diags = check_extern_collisions(&prj, &current, Some(&merged));
-        assert!(diags.is_empty(), "same-chain extern duplicates should be allowed, got {diags:?}");
+        assert!(
+            diags.is_empty(),
+            "same-chain extern duplicates should be allowed, got {diags:?}"
+        );
     }
 
     #[test]
@@ -1261,12 +1307,10 @@ mod tests {
     #[test]
     fn test_diagnostic_range_uri_is_correct() {
         let (_tmp, prj, merged, current) = merged_fixture(
-            &[
-                (
-                    "ai/a.xs",
-                    "extern int gLocal = -1;\n// filler\nextern int gLocal = -1;\n",
-                ),
-            ],
+            &[(
+                "ai/a.xs",
+                "extern int gLocal = -1;\n// filler\nextern int gLocal = -1;\n",
+            )],
             "ai/a.xs",
         );
         let diags = check_extern_collisions(&prj, &current, Some(&merged));
@@ -1297,9 +1341,15 @@ mod tests {
 
     #[test]
     fn forward_declaration_allows_call() {
-        let prj = project(&[("a.xs", "void bar();\nvoid foo() { bar(); }\nvoid bar() {}\n")]);
+        let prj = project(&[(
+            "a.xs",
+            "void bar();\nvoid foo() { bar(); }\nvoid bar() {}\n",
+        )]);
         let diags = check_forward_declarations(&prj, &EngineApi::default(), &p("a.xs"));
-        assert!(diags.is_empty(), "expected no forward-decl errors, got {diags:?}");
+        assert!(
+            diags.is_empty(),
+            "expected no forward-decl errors, got {diags:?}"
+        );
     }
 
     #[test]
@@ -1313,14 +1363,23 @@ mod tests {
 
     #[test]
     fn mutable_function_is_forward_callable() {
-        let prj = project(&[("a.xs", "mutable void foo() {}\nvoid bar() { foo(); }\nvoid foo() {}\n")]);
+        let prj = project(&[(
+            "a.xs",
+            "mutable void foo() {}\nvoid bar() { foo(); }\nvoid foo() {}\n",
+        )]);
         let diags = check_forward_declarations(&prj, &EngineApi::default(), &p("a.xs"));
-        assert!(diags.is_empty(), "mutable should be forward-callable, got {diags:?}");
+        assert!(
+            diags.is_empty(),
+            "mutable should be forward-callable, got {diags:?}"
+        );
     }
 
     #[test]
     fn mutable_redefinition_same_signature_is_ok() {
-        let prj = project(&[("a.xs", "mutable void foo(int x = 1) {}\nvoid foo(int x = 1) {}\n")]);
+        let prj = project(&[(
+            "a.xs",
+            "mutable void foo(int x = 1) {}\nvoid foo(int x = 1) {}\n",
+        )]);
         let diags = check_mutable_redefinitions(&prj);
         assert!(diags.is_empty(), "expected ok, got {diags:?}");
     }
@@ -1341,7 +1400,10 @@ mod tests {
             ("b.xs", "void bar() {}\n"),
         ]);
         let diags = check_forward_declarations(&prj, &EngineApi::default(), &p("a.xs"));
-        assert!(diags.is_empty(), "cross-file function should be visible, got {diags:?}");
+        assert!(
+            diags.is_empty(),
+            "cross-file function should be visible, got {diags:?}"
+        );
     }
 
     #[test]
@@ -1364,7 +1426,12 @@ mod tests {
             ],
             "ai/a.xs",
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
+        let diags = check_forward_declarations_for_merged_view(
+            &prj,
+            &EngineApi::default(),
+            &current,
+            &merged,
+        );
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("before declaration"));
         assert!(diags[0].message.contains("bar"));
@@ -1380,8 +1447,16 @@ mod tests {
             ],
             "ai/a.xs",
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
-        assert!(diags.is_empty(), "expected clean diagnostics, got {diags:?}");
+        let diags = check_forward_declarations_for_merged_view(
+            &prj,
+            &EngineApi::default(),
+            &current,
+            &merged,
+        );
+        assert!(
+            diags.is_empty(),
+            "expected clean diagnostics, got {diags:?}"
+        );
     }
 
     #[test]
@@ -1394,7 +1469,12 @@ mod tests {
             ],
             "ai/a.xs",
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
+        let diags = check_forward_declarations_for_merged_view(
+            &prj,
+            &EngineApi::default(),
+            &current,
+            &merged,
+        );
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("Error 0310"));
         assert!(diags[0].message.contains("hidden"));
@@ -1405,15 +1485,17 @@ mod tests {
         // Scenario 12: mutable helper from an include resolves anywhere.
         let (_tmp, prj, merged, current) = merged_fixture(
             &[
-                (
-                    "ai/a.xs",
-                    "include \"b.xs\";\nvoid foo() { helper(5); }\n",
-                ),
+                ("ai/a.xs", "include \"b.xs\";\nvoid foo() { helper(5); }\n"),
                 ("ai/b.xs", "mutable void helper(int x = -1) {}\n"),
             ],
             "ai/a.xs",
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
+        let diags = check_forward_declarations_for_merged_view(
+            &prj,
+            &EngineApi::default(),
+            &current,
+            &merged,
+        );
         assert!(
             diags.is_empty(),
             "mutable included function should resolve, got {diags:?}"
@@ -1435,7 +1517,11 @@ mod tests {
             "ai/a.xs",
         );
         let diags = check_mutable_redefinitions_for_merged_view(&merged);
-        assert!(diags.iter().any(|d| d.message.contains("different signature")));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("different signature"))
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1462,8 +1548,16 @@ mod tests {
             merged.find("helper").is_some(),
             "helper should be visible in the merged view"
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
-        assert!(diags.is_empty(), "direct include should resolve, got {diags:?}");
+        let diags = check_forward_declarations_for_merged_view(
+            &prj,
+            &EngineApi::default(),
+            &current,
+            &merged,
+        );
+        assert!(
+            diags.is_empty(),
+            "direct include should resolve, got {diags:?}"
+        );
     }
 
     #[test]
@@ -1498,7 +1592,12 @@ mod tests {
             "helper should be a depth-2 transitive include, got {:?}",
             ms.provenance
         );
-        let diags = check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
+        let diags = check_forward_declarations_for_merged_view(
+            &prj,
+            &EngineApi::default(),
+            &current,
+            &merged,
+        );
         assert!(
             diags.is_empty(),
             "transitive include should resolve, got {diags:?}"
@@ -1523,7 +1622,10 @@ mod tests {
         );
         assert!(merged.graph().is_cyclic(), "cycle should be detected");
         assert!(merged.find("aFn").is_some(), "own symbol should be present");
-        assert!(merged.find("bFn").is_some(), "included symbol should be present");
+        assert!(
+            merged.find("bFn").is_some(),
+            "included symbol should be present"
+        );
         // Symbols from the cycle should appear exactly once due to the visited set.
         let a_count = merged
             .symbols()
@@ -1612,7 +1714,10 @@ mod tests {
         // exists but cannot be decoded as UTF-8. The walker skips it via
         // `is_readable_xs_file`, but this test exercises the
         // `load_from_workspace` fallback for paths that slip through.
-        let bad_path = root.join("game").join("random_maps").join("aso_grasslands.xs");
+        let bad_path = root
+            .join("game")
+            .join("random_maps")
+            .join("aso_grasslands.xs");
         std::fs::create_dir_all(bad_path.parent().unwrap()).unwrap();
         std::fs::write(&bad_path, [0xffu8, 0xfe, 0x00, 0xab, 0xcd]).unwrap();
 

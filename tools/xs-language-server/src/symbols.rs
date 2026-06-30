@@ -179,11 +179,7 @@ pub fn build_full_symbol_table(tree: &tree_sitter::Tree, source: &str) -> Symbol
     table
 }
 
-fn extract_local_declarations(
-    node: tree_sitter::Node<'_>,
-    source: &str,
-    out: &mut Vec<Symbol>,
-) {
+fn extract_local_declarations(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<Symbol>) {
     if node.kind() == "compound_statement" {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -337,7 +333,9 @@ fn extract_class(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<Symbol
         detail,
     });
 
-    let Some(body) = node.child_by_field_name("body") else { return };
+    let Some(body) = node.child_by_field_name("body") else {
+        return;
+    };
     let mut cursor = body.walk();
     for child in body.children(&mut cursor) {
         if child.kind() == "field_declaration" {
@@ -369,9 +367,17 @@ fn extract_class_member(
         let params = find_named_child(declarator, "parameter_list")
             .map(|n| extract_params(n, source))
             .unwrap_or_default();
-        (node_text(name_node, source).to_string(), SymbolKind::ClassMethod, params)
+        (
+            node_text(name_node, source).to_string(),
+            SymbolKind::ClassMethod,
+            params,
+        )
     } else {
-        (node_text(declarator, source).to_string(), SymbolKind::ClassField, Vec::new())
+        (
+            node_text(declarator, source).to_string(),
+            SymbolKind::ClassField,
+            Vec::new(),
+        )
     };
 
     let ty = find_named_child(node, "primitive_type")
@@ -385,7 +391,9 @@ fn extract_class_member(
         Some(declarator)
     };
     let full_range = node_range(node);
-    let selection_range = name_node.map(node_range).unwrap_or_else(|| node_range(node));
+    let selection_range = name_node
+        .map(node_range)
+        .unwrap_or_else(|| node_range(node));
     let detail = if kind == SymbolKind::ClassMethod {
         format_function_detail(&ty, &name, &params)
     } else {

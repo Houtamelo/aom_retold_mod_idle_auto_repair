@@ -33,7 +33,6 @@ static SELECTOR_SUMMARY_RIGHT: LazyLock<Selector> =
 static SELECTOR_SUMMARY_DESC: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(r#"tr[class^="memdesc"]"#).expect("valid selector"));
 
-
 /// Extract syscalls and AI-plan constants from `<game-path>/doxygen_retail.7z`.
 ///
 /// Extraction is performed into a temporary directory that is deleted when the
@@ -57,7 +56,9 @@ pub fn extract_engine_api(archive: &Path) -> Result<EngineData> {
     let constants = if let Some(path) = aiplans_file {
         parse_aiplans_file(&path)?
     } else {
-        warn!("doxygen archive is missing aiplans_8cpp.html; engine data will have no plan constants");
+        warn!(
+            "doxygen archive is missing aiplans_8cpp.html; engine data will have no plan constants"
+        );
         Vec::new()
     };
 
@@ -115,17 +116,14 @@ fn collect_html_files(
 /// `aifuncs_8cpp.html` -> `aifuncs.cpp`, `triggerfuncs__mainthread_8cpp.html`
 /// -> `triggerfuncs_mainthread.cpp`.
 fn html_filename_to_cpp(html_name: &str) -> String {
-    let base = html_name
-        .strip_suffix("_8cpp.html")
-        .unwrap_or(html_name);
+    let base = html_name.strip_suffix("_8cpp.html").unwrap_or(html_name);
     let base = base.replace("__", "_");
     format!("{base}.cpp")
 }
 
 /// Parse one function-reference page into syscalls.
 fn parse_function_file(path: &Path, source_filename: &str) -> Result<Vec<Syscall>> {
-    let html = fs::read_to_string(path)
-        .with_context(|| format!("reading {path:?}"))?;
+    let html = fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
     let doc = Html::parse_document(&html);
 
     // The summary table at the top of the page lists every function, including
@@ -165,14 +163,8 @@ fn parse_function_file(path: &Path, source_filename: &str) -> Result<Vec<Syscall
             continue;
         };
 
-        let help = help_by_hash
-            .get(hash)
-            .cloned()
-            .unwrap_or_default();
-        let defaults = defaults_by_name
-            .get(&name)
-            .cloned()
-            .unwrap_or_default();
+        let help = help_by_hash.get(hash).cloned().unwrap_or_default();
+        let defaults = defaults_by_name.get(&name).cloned().unwrap_or_default();
 
         let params: Vec<Param> = parse_params_text(&params_text)
             .into_iter()
@@ -201,8 +193,12 @@ fn parse_function_file(path: &Path, source_filename: &str) -> Result<Vec<Syscall
 fn parse_summary_descriptions(doc: &Html) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for row in doc.select(&SELECTOR_SUMMARY_DESC) {
-        let Some(class) = row.value().attr("class") else { continue; };
-        let Some(hash) = class.strip_prefix("memdesc:") else { continue; };
+        let Some(class) = row.value().attr("class") else {
+            continue;
+        };
+        let Some(hash) = class.strip_prefix("memdesc:") else {
+            continue;
+        };
         let text = normalize_text(&row.text().collect::<String>());
         map.insert(hash.to_string(), text);
     }
@@ -212,8 +208,12 @@ fn parse_summary_descriptions(doc: &Html) -> HashMap<String, String> {
 /// Parse `aiAddEchoCategory (string categoryName)` from a summary cell.
 fn parse_summary_signature(text: &str) -> Option<(String, String)> {
     let text = text.trim();
-    let Some(open) = text.find('(') else { return None; };
-    let Some(close) = text.rfind(')') else { return None; };
+    let Some(open) = text.find('(') else {
+        return None;
+    };
+    let Some(close) = text.rfind(')') else {
+        return None;
+    };
     let name = text[..open].trim().to_string();
     let params = text[open + 1..close].to_string();
     if name.is_empty() || !name.chars().next()?.is_alphabetic() {
@@ -307,16 +307,19 @@ fn parse_memdoc_defaults(item: &ElementRef<'_>) -> HashMap<String, String> {
 
 /// Parse AI-plan constants from `aiplans_8cpp.html`.
 fn parse_aiplans_file(path: &Path) -> Result<Vec<AiplanConstant>> {
-    let html = fs::read_to_string(path)
-        .with_context(|| format!("reading {path:?}"))?;
+    let html = fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
     let doc = Html::parse_document(&html);
 
     let desc_by_hash = parse_summary_descriptions(&doc);
     let mut constants = Vec::new();
 
     for row in doc.select(&SELECTOR_SUMMARY_ITEM) {
-        let Some(class) = row.value().attr("class") else { continue; };
-        let Some(hash) = class.strip_prefix("memitem:") else { continue; };
+        let Some(class) = row.value().attr("class") else {
+            continue;
+        };
+        let Some(hash) = class.strip_prefix("memitem:") else {
+            continue;
+        };
 
         let Some(right_text) = row
             .select(&SELECTOR_SUMMARY_RIGHT)
@@ -334,10 +337,7 @@ fn parse_aiplans_file(path: &Path) -> Result<Vec<AiplanConstant>> {
             continue;
         };
 
-        let desc = desc_by_hash
-            .get(hash)
-            .cloned()
-            .unwrap_or_default();
+        let desc = desc_by_hash.get(hash).cloned().unwrap_or_default();
         let (variable_type, variable_value) = parse_aiplan_description(&desc);
 
         constants.push(AiplanConstant {
@@ -354,7 +354,9 @@ fn parse_aiplans_file(path: &Path) -> Result<Vec<AiplanConstant>> {
 /// Parse `cAttackPlanAttackRouteID = 0` from a summary cell.
 fn parse_aiplan_name_value(text: &str) -> Option<(String, String)> {
     let text = text.trim();
-    let Some(eq) = text.find('=') else { return None; };
+    let Some(eq) = text.find('=') else {
+        return None;
+    };
     let name = text[..eq].trim().to_string();
     let value = text[eq + 1..].trim().to_string();
     if name.is_empty() {
@@ -397,11 +399,13 @@ mod tests {
         // present in the archive, so the server exposes exactly what Doxygen
         // provides (no legacy JSON backfill).
         assert_eq!(
-            data.syscalls.len(), 1804,
+            data.syscalls.len(),
+            1804,
             "expected 1804 syscalls parsed directly from docs/doxygen_retail.7z"
         );
         assert_eq!(
-            data.constants.len(), 193,
+            data.constants.len(),
+            193,
             "expected 193 AI-plan constants from docs/doxygen_retail.7z"
         );
     }

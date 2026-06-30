@@ -18,11 +18,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::Url;
-use xs_language_server::diagnostics::{collect_all, DiagnosticCategory};
+use xs_language_server::diagnostics::{DiagnosticCategory, collect_all};
 use xs_language_server::engine_api::EngineApi;
 use xs_language_server::merged_view::MergedView;
 use xs_language_server::parser;
-use xs_language_server::semantic::{VirtualProject as SemProject};
+use xs_language_server::semantic::VirtualProject as SemProject;
 use xs_language_server::symbols;
 use xs_language_server::workspace::{VirtualProject, Workspace};
 
@@ -138,7 +138,9 @@ fn collect_included_files(game_dir: &Path, files: &[PathBuf]) -> HashSet<PathBuf
             if !line.starts_with("include") {
                 continue;
             }
-            let Some(start) = line.find('"') else { continue };
+            let Some(start) = line.find('"') else {
+                continue;
+            };
             let rest = &line[start + 1..];
             let Some(end) = rest.find('"') else { continue };
             let mut target = rest[..end].replace('\\', "/");
@@ -213,8 +215,14 @@ fn parse_every_game_folder_file_completes_without_unexpected_errors() {
         eprintln!("AOMR_GAME_PATH not set, skipping game folder parse test");
         return;
     };
-    let GameFiles { text: files, binary_skipped } = collect_xs_files(&game_dir);
-    assert!(!files.is_empty(), "no parseable .xs files found under {game_dir:?}");
+    let GameFiles {
+        text: files,
+        binary_skipped,
+    } = collect_xs_files(&game_dir);
+    assert!(
+        !files.is_empty(),
+        "no parseable .xs files found under {game_dir:?}"
+    );
 
     let mut total_symbols = 0usize;
     let mut total_unexpected_errors = 0usize;
@@ -252,7 +260,10 @@ fn parse_every_game_folder_file_completes_without_unexpected_errors() {
             println!("  {n} unexpected ERROR(s) in {path:?}");
         }
         if error_files.len() > 10 {
-            println!("  ... and {} more files with errors", error_files.len() - 10);
+            println!(
+                "  ... and {} more files with errors",
+                error_files.len() - 10
+            );
         }
     }
 
@@ -308,8 +319,14 @@ fn every_game_folder_file_resolves_in_workspace() {
         eprintln!("AOMR_GAME_PATH not set, skipping workspace resolution test");
         return;
     };
-    let GameFiles { text: files, binary_skipped } = collect_xs_files(&game_dir);
-    assert!(!files.is_empty(), "no parseable .xs files found under {game_dir:?}");
+    let GameFiles {
+        text: files,
+        binary_skipped,
+    } = collect_xs_files(&game_dir);
+    assert!(
+        !files.is_empty(),
+        "no parseable .xs files found under {game_dir:?}"
+    );
 
     // The workspace is rooted at the install dir (the parent of `game/`),
     // matching the constructor signature in `Workspace::new`.
@@ -423,8 +440,14 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
     CACHE
         .get_or_init(|| {
             let game_dir = resolve_game_dir()?;
-            let GameFiles { text: files, binary_skipped } = collect_xs_files(&game_dir);
-            assert!(!files.is_empty(), "no parseable .xs files found under {game_dir:?}");
+            let GameFiles {
+                text: files,
+                binary_skipped,
+            } = collect_xs_files(&game_dir);
+            assert!(
+                !files.is_empty(),
+                "no parseable .xs files found under {game_dir:?}"
+            );
 
             // Analyze only top-level files: files that are included by another file
             // are pasted into their includer's scope, so checking them in isolation
@@ -486,10 +509,8 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
             let mut rule_call_unresolved = 0usize;
             let mut definition_error = 0usize;
             let mut total = 0usize;
-            let mut callee_counts: HashMap<String, usize> = TOP_BO_CALLEES
-                .iter()
-                .map(|c| (c.to_string(), 0))
-                .collect();
+            let mut callee_counts: HashMap<String, usize> =
+                TOP_BO_CALLEES.iter().map(|c| (c.to_string(), 0)).collect();
             let mut examples: HashMap<DiagnosticCategory, Vec<String>> = HashMap::new();
             let mut record_example = |cat, path: &Path, message: &str| {
                 let entry = examples.entry(cat).or_default();
@@ -517,14 +538,9 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
                 );
 
                 for (uri, file_diags) in diags_by_uri {
-                    let source_for_uri = source_by_uri
-                        .get(&uri)
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
+                    let source_for_uri = source_by_uri.get(&uri).map(|s| s.as_str()).unwrap_or("");
                     let line_count = source_for_uri.lines().count() as u32;
-                    let path_for_uri = uri
-                        .to_file_path()
-                        .unwrap_or_else(|_| path.clone());
+                    let path_for_uri = uri.to_file_path().unwrap_or_else(|_| path.clone());
 
                     for d in file_diags {
                         let cat = xs_language_server::diagnostics::categorize(&d);
