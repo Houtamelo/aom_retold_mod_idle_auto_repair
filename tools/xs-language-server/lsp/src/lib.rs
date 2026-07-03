@@ -11,6 +11,7 @@ pub mod diagnostics;
 pub mod doxygen;
 pub mod engine_api;
 pub mod parser;
+pub mod range;
 pub mod references;
 pub mod semantic;
 pub mod semantic_tokens;

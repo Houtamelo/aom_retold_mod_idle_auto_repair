@@ -22,7 +22,7 @@ fn compute_for(
     ws: &workspace::Workspace,
     project: &workspace::VirtualProject,
 ) -> Vec<semantic_tokens::Token> {
-    let tree = parser::parse(source).expect("parse");
+    let (_cst, _diags) = parser::parse(source);
     let own_table = symbols::build_full_symbol_table(source);
     let cache_dir = TempDir::new().unwrap();
     let member_index = semantic_tokens::MemberIndex::build(
@@ -135,7 +135,7 @@ fn unknown_class_reference_falls_back_to_engine() {
 #[test]
 fn class_declaration_does_not_crash_walker() {
     let source = "class MyClass { int field = 0; void method() {} }";
-    let tree = parser::parse(source).expect("parse");
+    let (_cst, _diags) = parser::parse(source);
     let table = symbols::build_symbol_table(source);
     let class_syms: Vec<_> = table
         .symbols
@@ -163,7 +163,7 @@ fn many_class_declarations_build_quickly() {
     for i in 0..60 {
         source.push_str(&format!("class Class{} {{}}\n", i));
     }
-    let tree = parser::parse(&source).expect("parse");
+    let (_cst, _diags) = parser::parse(&source);
 
     let start = Instant::now();
     let table = symbols::build_symbol_table(&source);

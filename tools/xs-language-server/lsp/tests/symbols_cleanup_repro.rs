@@ -1,7 +1,7 @@
 //! Typed-AST extraction tests for the fixtures originally used in the
 //! R1-F-01..R1-F-03 audit. These tests prove that `build_symbol_table`
 //! (now backed by `xs_parser::ast`) recovers the same symbols without
-//! relying on tree-sitter ERROR-node heuristics.
+//! relying on legacy parser ERROR-node heuristics.
 
 use xs_language_server::symbols::{SymbolKind, build_symbol_table};
 

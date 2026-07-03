@@ -226,8 +226,8 @@ fn parse_every_game_folder_file_completes_without_unexpected_errors() {
     // The typed-AST parser still rejects some constructs the engine accepts
     // (e.g. `class Foo { int[] bar; }` member declarations, `new ClassName(...)`
     // instantiation, `#if`/`#define` preprocessor directives). The design caps
-    // the resulting ERROR-severity parse diagnostics at the tree-sitter
-    // baseline (1,571) plus 10% headroom, with no single file exceeding 100.
+    // the resulting ERROR-severity parse diagnostics at the legacy
+    // tree-parser baseline (1,571) plus 10% headroom, with no single file exceeding 100.
     let total_threshold = 1730usize;
     let per_file_threshold = 100usize;
     assert!(

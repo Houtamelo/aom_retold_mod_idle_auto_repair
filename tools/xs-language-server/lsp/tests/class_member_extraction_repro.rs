@@ -146,7 +146,7 @@ fn many_classes_with_members_build_quickly() {
             i, i, i
         ));
     }
-    let tree = parser::parse(&source).expect("parse");
+    let (_cst, _diags) = parser::parse(&source);
 
     let start = Instant::now();
     let table = symbols::build_symbol_table(&source);
@@ -182,9 +182,7 @@ fn malformed_class_body_does_not_panic() {
     // Missing semicolon and an invalid nested class-like token:
     // the parser may produce ERROR nodes inside the body.
     let source = "class Bad { int x int y = 0; }";
-    let tree = parser::parse(source);
-    // parsing itself must not panic; build_symbol_table must not panic even if parse succeeded.
-    if let Some(t) = tree {
-        let _table = symbols::build_symbol_table(source);
-    }
+    let (_cst, _diags) = parser::parse(source);
+    // parsing itself must not panic; build_symbol_table must not panic even if parse produces diagnostics.
+    let _table = symbols::build_symbol_table(source);
 }

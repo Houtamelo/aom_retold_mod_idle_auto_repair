@@ -30,8 +30,8 @@ fn parse_typed(source: &str) -> Option<(Cst<'_>, TranslationUnit)> {
 ///
 /// Declaration names (functions, variables, rules, classes, parameters) and
 /// expression identifiers are included. Type identifiers and member field
-/// names are omitted to match the historical tree-sitter behaviour, which
-/// only matched `"identifier"` nodes.
+/// names are omitted to match the legacy parser behaviour, which only
+/// matched `"identifier"` nodes.
 pub fn find_identifier_uses(source: &str, name: &str) -> Vec<Range> {
     let Some((cst, tu)) = parse_typed(source) else {
         return Vec::new();

@@ -93,9 +93,9 @@ pub fn parse_cache_path(cache_dir: &Path, key: &str) -> PathBuf {
 
 /// A single entry in the per-file parse symbol cache.
 ///
-/// The raw tree-sitter `Tree` is intentionally NOT cached — it cannot be
+/// The raw parse tree is intentionally NOT cached — it cannot be
 /// cheaply serialized across process restarts. We cache the extracted
-/// `SymbolTable` and re-parse on demand to obtain the tree for diagnostics.
+/// `SymbolTable` and re-parse on demand to obtain the CST for diagnostics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParseCacheEntry {
     pub relative_path: String,

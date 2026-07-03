@@ -34,7 +34,7 @@ fn compute_for(
     ws: &workspace::Workspace,
     project: &workspace::VirtualProject,
 ) -> Vec<semantic_tokens::Token> {
-    let tree = parser::parse(source).expect("parse");
+    let (_cst, _diags) = parser::parse(source);
     let own_table = symbols::build_full_symbol_table(source);
     let cache_dir = TempDir::new().unwrap();
     let member_index = semantic_tokens::MemberIndex::build(

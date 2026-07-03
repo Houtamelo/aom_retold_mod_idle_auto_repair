@@ -1,7 +1,7 @@
 //! Retail parity test: chairon.xs symbol count.
 //!
 //! `chairon.xs` is a tiny real vanilla file. The typed-AST builder must
-//! produce the same number of top-level symbols as the old tree-sitter
+//! produce the same number of top-level symbols as the old tree-parser
 //! path. The old path counted two functions (`preInit` and `postInit`);
 //! there are no `extract_error_*` workaround shapes in this file, so the
 //! expected count stays 2.

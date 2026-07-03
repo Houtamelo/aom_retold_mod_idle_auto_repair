@@ -285,7 +285,7 @@ fn symbol_from_forward_declaration(fwd: &ForwardDeclaration, cst: &Cst<'_>, sour
 }
 
 fn symbol_from_declaration(decl: &Declaration, _cst: &Cst<'_>, source: &str) -> Option<Symbol> {
-    // Parity with the old tree-sitter path: one symbol per declaration,
+    // Parity with the legacy parser path: one symbol per declaration,
     // using the first init_declarator. Multi-variable declarations are
     // rare in real XS and changing the count would break the retail
     // parity test.
