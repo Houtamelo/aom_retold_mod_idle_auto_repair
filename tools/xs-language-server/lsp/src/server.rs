@@ -1001,44 +1001,24 @@ impl XsLanguageServer {
         let project = if current_file.is_some() { self.build_semantic_project(uri).await } else { None };
         let merged = self.get_or_build_merged_view(uri, text).await;
 
-        let diagnostics_by_uri = match parser::parse(text) {
-            Some(_tree) => {
-                // Hold the symbol-tables lock briefly to look up the
-                // per-file table; releasing before the heavier checks keeps
-                // the lock window minimal.
-                let table = {
-                    let tables = self.symbol_tables.lock().await;
-                    tables.get(uri).cloned()
-                };
-                match table {
-                    Some(table) => diagnostics::collect_all(
-                        text,
-                        &self.engine,
-                        &table,
-                        project.as_ref(),
-                        current_file.as_deref(),
-                        merged.as_ref(),
-                    ),
-                    None => {
-                        let mut map = std::collections::HashMap::new();
-                        map.insert(uri.clone(), diagnostics::collect_diagnostics(text));
-                        map
-                    }
-                }
-            }
+        // Hold the symbol-tables lock briefly to look up the per-file table;
+        // releasing before the heavier checks keeps the lock window minimal.
+        let table = {
+            let tables = self.symbol_tables.lock().await;
+            tables.get(uri).cloned()
+        };
+        let diagnostics_by_uri = match table {
+            Some(table) => diagnostics::collect_all(
+                text,
+                &self.engine,
+                &table,
+                project.as_ref(),
+                current_file.as_deref(),
+                merged.as_ref(),
+            ),
             None => {
                 let mut map = std::collections::HashMap::new();
-                map.insert(uri.clone(), vec![Diagnostic {
-                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("xs-language-server".to_string()),
-                    message: "internal error: failed to install XS language".to_string(),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                }]);
+                map.insert(uri.clone(), diagnostics::collect_diagnostics(text));
                 map
             }
         };

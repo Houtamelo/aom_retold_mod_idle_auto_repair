@@ -17,12 +17,14 @@ use std::{
 };
 
 use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, Position, Range, Uri};
+use xs_parser::ast::{CallExpr, Expr, TypeTable};
+use xs_parser::parser::{Cst, NodeRef, Parser, Rule};
 
 use crate::{
     diagnostics::DiagnosticsByUri,
     engine_api::{EngineApi, EngineSignature},
     merged_view::MergedView,
-    parser,
+    range::span_to_range,
     symbols::{Symbol, SymbolKind, SymbolTable, Visibility},
     workspace::{VirtualProject as WorkspaceVirtualProject, Workspace},
 };
@@ -486,9 +488,6 @@ pub fn check_forward_declarations(
     let Some(file) = project.files.get(current_file) else {
         return Vec::new();
     };
-    let Some(tree) = parser::parse(&file.source) else {
-        return Vec::new();
-    };
 
     // Ranges of function definitions in this file, used to detect a call that
     // sits inside its own definition (self-recursion is not a forward-decl
@@ -501,7 +500,7 @@ pub fn check_forward_declarations(
         .map(|s| (s.name.clone(), s.full_range))
         .collect();
 
-    let calls = collect_calls(&tree, &file.source);
+    let calls = collect_calls(&file.source);
     let mut diags = Vec::new();
 
     for (callee, callee_range) in calls {
@@ -616,9 +615,6 @@ pub fn check_forward_declarations_for_merged_view(
     let Some(file) = project.files.get(current_file) else {
         return Vec::new();
     };
-    let Some(tree) = parser::parse(&file.source) else {
-        return Vec::new();
-    };
 
     // Ranges of own-file function definitions, used to detect a call that
     // sits inside its own definition (self-recursion is allowed).
@@ -630,7 +626,7 @@ pub fn check_forward_declarations_for_merged_view(
         .map(|s| (s.name.clone(), s.full_range))
         .collect();
 
-    let calls = collect_calls(&tree, &file.source);
+    let calls = collect_calls(&file.source);
     let mut diags = Vec::new();
 
     for (callee, callee_range) in calls {
@@ -832,43 +828,26 @@ fn forward_callable(project: &VirtualProject, current_file: &Path, callee: &str,
     project.registered_rules.contains_key(callee)
 }
 
-/// Collect bare identifier call expressions from a tree.
-fn collect_calls(tree: &tree_sitter::Tree, source: &str) -> Vec<(String, Range)> {
+/// Collect bare identifier call expressions from a source file.
+fn collect_calls(source: &str) -> Vec<(String, Range)> {
+    let mut diags = Vec::new();
+    let cst = Parser::new_with_context(source, &mut diags, TypeTable::with_primitives()).parse(&mut diags);
     let mut out = Vec::new();
-    walk_calls(tree.root_node(), source, &mut out);
+    walk_cst_calls(&cst, NodeRef::ROOT, &mut out, source);
     out
 }
 
-fn walk_calls(node: tree_sitter::Node<'_>, source: &str, out: &mut Vec<(String, Range)>) {
-    if node.kind() == "call_expression" {
-        if let Some(name) = call_callee_name(node, source) {
-            out.push((name, node_range(node)));
+fn walk_cst_calls(cst: &Cst, node: NodeRef, out: &mut Vec<(String, Range)>, source: &str) {
+    if cst.match_rule(node, Rule::CallExpr) {
+        if let Some(call) = CallExpr::from_cst(cst, node) {
+            if let Expr::Identifier(id) = call.target.as_ref() {
+                out.push((id.name.node.clone(), span_to_range(source, call.span.clone())));
+            }
         }
     }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        walk_calls(child, source, out);
+    for child in cst.children(node) {
+        walk_cst_calls(cst, child, out, source);
     }
-}
-
-fn call_callee_name(call_node: tree_sitter::Node<'_>, source: &str) -> Option<String> {
-    // We only check bare identifier calls; method calls (`obj.method`) are
-    // not forward-declaration checked by the engine.
-    let func_node = find_named_child(call_node, "identifier")?;
-    Some(node_text(func_node, source).to_string())
-}
-
-fn node_range(node: tree_sitter::Node<'_>) -> Range {
-    let start = node.start_position();
-    let end = node.end_position();
-    Range::new(Position::new(start.row as u32, start.column as u32), Position::new(end.row as u32, end.column as u32))
-}
-
-fn node_text<'a>(node: tree_sitter::Node<'a>, source: &'a str) -> &'a str { &source[node.byte_range()] }
-
-fn find_named_child<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
-    let mut cursor = node.walk();
-    node.named_children(&mut cursor).find(|c| c.kind() == kind)
 }
 
 #[cfg(test)]

@@ -288,11 +288,8 @@ impl MergedView {
             });
         }
 
-        let tree = parser::parse(source);
-        let directives = tree
-            .as_ref()
-            .map(|t| parser::extract_include_directives(t, source))
-            .unwrap_or_default();
+        let (cst, _) = parser::parse(source);
+        let directives = parser::extract_include_directives(&cst, source);
         let current_rel = relative_path_for(project, workspace, file);
         let mut visited = HashSet::new();
         visited.insert(file.to_path_buf());
@@ -461,11 +458,8 @@ fn walk_includes(
     view: &mut MergedView,
 ) {
     let rel = relative_path_for(project, workspace, file);
-    let tree = parser::parse(source);
-    let directives = tree
-        .as_ref()
-        .map(|t| parser::extract_include_directives(t, source))
-        .unwrap_or_default();
+    let (cst, _) = parser::parse(source);
+    let directives = parser::extract_include_directives(&cst, source);
 
     for (target, range) in directives {
         let line = range.start.line;

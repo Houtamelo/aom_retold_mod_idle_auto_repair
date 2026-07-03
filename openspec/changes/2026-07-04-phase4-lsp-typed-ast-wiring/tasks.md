@@ -43,23 +43,23 @@ Chain strategy: pending
 
 ## Phase 3: PR-B — handler rewires
 
-- [ ] 3.1 **T-LSP-B-01** Create `lsp/src/range.rs` with `pub fn span_to_range(source: &str, span: Span) -> lsp_types::Range`; add CRLF, multi-byte, and empty-span unit tests.
-- [ ] 3.2 **T-LSP-B-02** Rewrite `lsp/src/semantic_tokens.rs` to walk the typed AST and emit tokens via `span_to_range`.
-- [ ] 3.3 **T-LSP-B-03** Rewrite `lsp/src/references.rs::find_references` to walk the typed AST.
-- [ ] 3.4 **T-LSP-B-04** Rewrite `lsp/src/definition_check.rs::definition_position` to walk the typed AST.
-- [ ] 3.5 **T-LSP-B-05** Rewrite `lsp/src/diagnostics.rs` to count `xs_parser::Diagnostic` items by severity, removing `is_error`/`is_missing` checks and tree-sitter message formatters.
-- [ ] 3.6 **T-LSP-B-06** Rewrite the rest of `lsp/src/definition_check.rs` (declaration/param validation walker) against the typed AST.
-- [ ] 3.7 **T-LSP-B-07** Rewrite `lsp/src/typecheck.rs` to walk typed `Expr::Call` / `PostfixExpr::Call` and map `expr_type` to `Expr` variants.
-- [ ] 3.8 **T-LSP-B-08** Update `lsp/tests/game_folder_parse.rs` thresholds per user choice G2: assert typed-AST `ERROR`-severity diagnostic count is no higher than the tree-sitter baseline and record the measured baseline in `apply-progress.md`.
-- [ ] 3.9 **T-LSP-B-09** Replace `lsp/tests/symbols_cleanup_repro.rs` with typed-AST extraction tests on the same fixtures.
+- [x] 3.1 **T-LSP-B-01** Create `lsp/src/range.rs` with `pub fn span_to_range(source: &str, span: Span) -> lsp_types::Range`; add CRLF, multi-byte, and empty-span unit tests.
+- [x] 3.2 **T-LSP-B-02** Rewrite `lsp/src/semantic_tokens.rs` to walk the typed AST and emit tokens via `span_to_range`.
+- [x] 3.3 **T-LSP-B-03** Rewrite `lsp/src/references.rs::find_references` to walk the typed AST.
+- [x] 3.4 **T-LSP-B-04** Rewrite `lsp/src/definition_check.rs::definition_position` to walk the typed AST.
+- [x] 3.5 **T-LSP-B-05** Rewrite `lsp/src/diagnostics.rs` to count `xs_parser::Diagnostic` items by severity, removing `is_error`/`is_missing` checks and tree-sitter message formatters.
+- [x] 3.6 **T-LSP-B-06** Rewrite the rest of `lsp/src/definition_check.rs` (declaration/param validation walker) against the typed AST.
+- [x] 3.7 **T-LSP-B-07** Rewrite `lsp/src/typecheck.rs` to walk typed `Expr::Call` / `PostfixExpr::Call` and map `expr_type` to `Expr` variants.
+- [x] 3.8 **T-LSP-B-08** Update `lsp/tests/game_folder_parse.rs` thresholds per user choice G2: assert typed-AST `ERROR`-severity diagnostic count is no higher than the tree-sitter baseline and record the measured baseline in `apply-progress.md`.
+- [x] 3.9 **T-LSP-B-09** Replace `lsp/tests/symbols_cleanup_repro.rs` with typed-AST extraction tests on the same fixtures.
 
 ## Phase 4: PR-C — drop tree-sitter and finalize
 
-- [ ] 4.1 **T-LSP-C-01** Remove `tree-sitter`, `tree-sitter-c`, `tree-sitter-language`, and `tree-sitter-xs` from `tools/xs-language-server/lsp/Cargo.toml`; add `xs-parser = { path = "../xs-parser" }`; verify clean build.
-- [ ] 4.2 **T-LSP-C-02** Simplify `lsp/src/parser.rs` to a thin wrapper over `xs_parser::parser::Parser::new`.
-- [ ] 4.3 **T-LSP-C-03** Delete `lsp/src/bin/day1_probe.rs`, `lsp/src/bin/dump_top_level.rs`, and `lsp/src/bin/inspect_tree.rs`.
-- [ ] 4.4 **T-LSP-C-04** Run the full unit-test suite: `/usr/local/cargo/bin/cargo test --lib --tests --manifest-path tools/xs-language-server/Cargo.toml`; verify all 252+ baseline and new tests pass. `rustdoc` doc-test failures are expected in this sandbox and must be excluded from the gate.
-- [ ] 4.5 **T-LSP-C-05** Manually exercise `xs-language-server --stdio` on a fixture for `initialize`, `shutdown`, and one of `textDocument/definition` or `textDocument/semanticTokens`.
+- [x] 4.1 **T-LSP-C-01** Remove `tree-sitter`, `tree-sitter-c`, `tree-sitter-language`, and `tree-sitter-xs` from `tools/xs-language-server/lsp/Cargo.toml`; add `xs-parser = { path = "../xs-parser" }`; verify clean build.
+- [x] 4.2 **T-LSP-C-02** Simplify `lsp/src/parser.rs` to a thin wrapper over `xs_parser::parser::Parser::new`.
+- [x] 4.3 **T-LSP-C-03** Delete `lsp/src/bin/day1_probe.rs`, `lsp/src/bin/dump_top_level.rs`, and `lsp/src/bin/inspect_tree.rs`.
+- [x] 4.4 **T-LSP-C-04** Run the full unit-test suite: `/usr/local/cargo/bin/cargo test --lib --tests --manifest-path tools/xs-language-server/Cargo.toml`; verify all 252+ baseline and new tests pass. `rustdoc` doc-test failures are expected in this sandbox and must be excluded from the gate.
+- [x] 4.5 **T-LSP-C-05** Manually exercise `xs-language-server --stdio` on a fixture for `initialize`, `shutdown`, and one of `textDocument/definition` or `textDocument/semanticTokens`.
 
 ## Dependency graph
 

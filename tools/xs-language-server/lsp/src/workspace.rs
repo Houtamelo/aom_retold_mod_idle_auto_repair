@@ -683,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_include_resolves_via_tree_sitter() {
+    fn direct_include_resolves_via_typed_ast() {
         // Scenario 4: an includer references an include target using an
         // AST-based walker, not a line regex.
         let tmp = TempDir::new().unwrap();
@@ -698,8 +698,8 @@ mod tests {
         let project = VirtualProject::default();
 
         let source = std::fs::read_to_string(&includer).unwrap();
-        let tree = parser::parse(&source).unwrap();
-        let directives = parser::extract_include_directives(&tree, &source);
+        let (cst, _) = parser::parse(&source);
+        let directives = parser::extract_include_directives(&cst, &source);
         assert_eq!(directives.len(), 1);
         assert_eq!(directives[0].0, "b.xs");
 
