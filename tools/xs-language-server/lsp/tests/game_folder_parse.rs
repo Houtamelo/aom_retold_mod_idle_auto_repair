@@ -17,11 +17,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use tower_lsp_server::ls_types::Uri;
-use xs_language_server::diagnostics::{DiagnosticCategory, collect_all};
+use tower_lsp_server::ls_types::{DiagnosticSeverity, Uri};
+use xs_language_server::diagnostics::{DiagnosticCategory, collect_all, collect_diagnostics};
 use xs_language_server::engine_api::EngineApi;
 use xs_language_server::merged_view::MergedView;
-use xs_language_server::parser;
 use xs_language_server::semantic::VirtualProject as SemProject;
 use xs_language_server::symbols;
 use xs_language_server::workspace::{VirtualProject, Workspace};
@@ -153,60 +152,8 @@ fn collect_included_files(game_dir: &Path, files: &[PathBuf]) -> HashSet<PathBuf
     targets
 }
 
-/// Count tree-sitter `ERROR` nodes under `root` that are NOT recoverable
-/// forward declarations. The LSP's `symbols.rs` already recovers forward
-/// function declarations (`void bar(int x = -1);`) by walking ERROR nodes
-/// that satisfy the criteria below; everything else is a genuine parse
-/// problem worth flagging.
-fn count_unexpected_errors(root: tree_sitter::Node<'_>) -> usize {
-    let mut count = 0usize;
-    walk_errors(root, &mut count);
-    count
-}
-
-fn walk_errors(node: tree_sitter::Node<'_>, count: &mut usize) {
-    if node.is_error() && !is_recoverable_forward_decl(node) {
-        *count += 1;
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        walk_errors(child, count);
-    }
-}
-
-/// Mirror of `symbols::extract_error_forward_declaration`'s eligibility check.
-/// A recoverable forward declaration must be a top-level ERROR node that
-/// carries a primitive/array type, an identifier, a parameter list, and no
-/// function body.
-fn is_recoverable_forward_decl(node: tree_sitter::Node<'_>) -> bool {
-    if node.kind() != "ERROR" {
-        return false;
-    }
-    let Some(parent) = node.parent() else {
-        return false;
-    };
-    if parent.kind() != "translation_unit" {
-        return false;
-    }
-    let mut cursor = node.walk();
-    let mut has_type = false;
-    let mut has_identifier = false;
-    let mut has_param_list = false;
-    let mut has_compound = false;
-    for child in node.named_children(&mut cursor) {
-        match child.kind() {
-            "primitive_type" | "array_type" => has_type = true,
-            "identifier" => has_identifier = true,
-            "parameter_list" => has_param_list = true,
-            "compound_statement" => has_compound = true,
-            _ => {}
-        }
-    }
-    has_type && has_identifier && has_param_list && !has_compound
-}
-
 // ---------------------------------------------------------------------------
-// Test 1: parse every file, build a symbol table, assert no unexpected errors.
+// Test 1: parse every file, build a symbol table, assert bounded parse errors.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -225,7 +172,7 @@ fn parse_every_game_folder_file_completes_without_unexpected_errors() {
     );
 
     let mut total_symbols = 0usize;
-    let mut total_unexpected_errors = 0usize;
+    let mut total_error_diagnostics = 0usize;
     let mut error_files: Vec<(PathBuf, usize)> = Vec::new();
 
     for path in &files {
@@ -233,31 +180,31 @@ fn parse_every_game_folder_file_completes_without_unexpected_errors() {
             Ok(s) => s,
             Err(e) => panic!("failed to read {path:?}: {e}"),
         };
-        let tree = match parser::parse(&source) {
-            Some(t) => t,
-            None => panic!("parser returned None for {path:?}"),
-        };
 
-        let unexpected = count_unexpected_errors(tree.root_node());
-        if unexpected > 0 {
-            error_files.push((path.clone(), unexpected));
+        let parse_diags = collect_diagnostics(&source);
+        let errors = parse_diags
+            .iter()
+            .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+            .count();
+        if errors > 0 {
+            error_files.push((path.clone(), errors));
         }
-        total_unexpected_errors += unexpected;
+        total_error_diagnostics += errors;
 
         let table = symbols::build_symbol_table(&source);
         total_symbols += table.symbols.len();
     }
 
     println!(
-        "Parsed {} files ({} binary .xs skipped), {} symbols, {} unexpected errors",
+        "Parsed {} files ({} binary .xs skipped), {} symbols, {} ERROR parse diagnostics",
         files.len(),
         binary_skipped,
         total_symbols,
-        total_unexpected_errors
+        total_error_diagnostics
     );
     if !error_files.is_empty() {
         for (path, n) in error_files.iter().take(10) {
-            println!("  {n} unexpected ERROR(s) in {path:?}");
+            println!("  {n} ERROR diagnostic(s) in {path:?}");
         }
         if error_files.len() > 10 {
             println!(
@@ -276,27 +223,18 @@ fn parse_every_game_folder_file_completes_without_unexpected_errors() {
         "expected > 1000 symbols across the game folder, got {total_symbols}"
     );
 
-    // Grammar-coverage note: the tree-sitter XS grammar still does not model
-    // every construct the engine accepts (e.g. `class Foo { int[] bar; }`
-    // member declarations, `new ClassName(...)` instantiation, `#if`/`#define`
-    // preprocessor directives). Those surfaces surface as `ERROR` nodes that
-    // `symbols.rs` cannot recover as forward declarations. Empirically the
-    // game folder produces roughly 1500 such errors across ~300 parseable
-    // files. We assert two regression guards:
-    //
-    //   1. The total stays below 3000 (≈ 2x headroom over today's 1571).
-    //   2. No single file exceeds 100 errors — the worst offender today is
-    //      `norse_classical.xs` at 72 (large AI strategy files use many
-    //      class member declarations), so 100 is generous but a real
-    //      grammar regression (say, dropping the `array_type` rule entirely)
-    //      would push a file well past that ceiling.
-    let total_threshold = 3000usize;
+    // The typed-AST parser still rejects some constructs the engine accepts
+    // (e.g. `class Foo { int[] bar; }` member declarations, `new ClassName(...)`
+    // instantiation, `#if`/`#define` preprocessor directives). The design caps
+    // the resulting ERROR-severity parse diagnostics at the tree-sitter
+    // baseline (1,571) plus 10% headroom, with no single file exceeding 100.
+    let total_threshold = 1730usize;
     let per_file_threshold = 100usize;
     assert!(
-        total_unexpected_errors <= total_threshold,
-        "got {} unexpected parse errors (threshold {total_threshold}). \
+        total_error_diagnostics <= total_threshold,
+        "got {} ERROR parse diagnostics (threshold {total_threshold}). \
          First offenders: {:?}",
-        total_unexpected_errors,
+        total_error_diagnostics,
         error_files.iter().take(5).collect::<Vec<_>>()
     );
     let outliers: Vec<_> = error_files
@@ -305,7 +243,7 @@ fn parse_every_game_folder_file_completes_without_unexpected_errors() {
         .collect();
     assert!(
         outliers.is_empty(),
-        "files with more than {per_file_threshold} unexpected errors: {outliers:?}"
+        "files with more than {per_file_threshold} ERROR diagnostics: {outliers:?}"
     );
 }
 
@@ -522,20 +460,11 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
             for path in &top_level_files {
                 let source = std::fs::read_to_string(path)
                     .unwrap_or_else(|e| panic!("failed to read {path:?}: {e}"));
-                let tree = parser::parse(&source)
-                    .unwrap_or_else(|| panic!("parser returned None for {path:?}"));
                 let table = symbols::build_symbol_table(&source);
                 let merged =
                     MergedView::build(path, &source, &table, &workspace, &ws_project, &cache_dir);
-                let diags_by_uri = collect_all(
-                    &tree,
-                    &source,
-                    &engine_api,
-                    &table,
-                    Some(&project),
-                    Some(path),
-                    Some(&merged),
-                );
+                let diags_by_uri =
+                    collect_all(&source, &engine_api, &table, Some(&project), Some(path), Some(&merged));
 
                 for (uri, file_diags) in diags_by_uri {
                     let source_for_uri = source_by_uri.get(&uri).map(|s| s.as_str()).unwrap_or("");

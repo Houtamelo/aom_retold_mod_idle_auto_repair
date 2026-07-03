@@ -808,10 +808,7 @@ impl LanguageServer for XsLanguageServer {
                 let Ok(file_text) = tokio::fs::read_to_string(&path).await else {
                     continue;
                 };
-                let Some(tree) = parser::parse(&file_text) else {
-                    continue;
-                };
-                let raw = references::find_identifier_uses(&tree, &file_text, &ident);
+                let raw = references::find_identifier_uses(&file_text, &ident);
                 let Some(file_uri) = Uri::from_file_path(&path) else {
                     continue;
                 };
@@ -845,12 +842,9 @@ impl LanguageServer for XsLanguageServer {
             // Walk every file in the include-paste scope.
             for path in mv.files() {
                 let source = mv.source(path).unwrap_or("");
-                let Some(tree) = parser::parse(source) else {
-                    continue;
-                };
                 let table =
                     if current_file.as_deref() == Some(path) { Some(mv.own_table()) } else { mv.tables().get(path) };
-                let raw = references::find_identifier_uses(&tree, source, &ident);
+                let raw = references::find_identifier_uses(source, &ident);
                 let ranges = match table {
                     Some(t) => references::filter_declaration(raw, t, &ident, params.context.include_declaration),
                     None => raw,
@@ -875,14 +869,10 @@ impl LanguageServer for XsLanguageServer {
             }
         } else {
             // Fallback to the current file only when no merged view is available.
-            let Some(tree) = parser::parse(&text) else {
-                debug!("references: parse failed for {:?}", uri);
-                return Ok(None);
-            };
             let ranges = {
                 let tables = self.symbol_tables.lock().await;
                 let table = tables.get(uri);
-                let raw = references::find_identifier_uses(&tree, &text, &ident);
+                let raw = references::find_identifier_uses(&text, &ident);
                 match table {
                     Some(t) => references::filter_declaration(raw, t, &ident, params.context.include_declaration),
                     None => raw,
@@ -928,12 +918,7 @@ impl LanguageServer for XsLanguageServer {
             return Ok(None);
         }
 
-        let Some(tree) = parser::parse(&text) else {
-            debug!("rename: parse failed for {:?}", uri);
-            return Ok(None);
-        };
-
-        let raw = references::find_identifier_uses(&tree, &text, &ident);
+        let raw = references::find_identifier_uses(&text, &ident);
         let ranges = {
             let tables = self.symbol_tables.lock().await;
             match tables.get(uri) {
@@ -988,12 +973,7 @@ impl LanguageServer for XsLanguageServer {
             return Ok(None);
         }
 
-        let Some(tree) = parser::parse(&text) else {
-            debug!("prepare_rename: parse failed for {:?}", uri);
-            return Ok(None);
-        };
-
-        let Some(range) = references::identifier_range_at(&tree, pos.line, pos.character) else {
+        let Some(range) = references::identifier_range_at(&text, pos.line, pos.character) else {
             debug!("prepare_rename: no identifier node under {:?}", pos);
             return Ok(None);
         };
@@ -1022,7 +1002,7 @@ impl XsLanguageServer {
         let merged = self.get_or_build_merged_view(uri, text).await;
 
         let diagnostics_by_uri = match parser::parse(text) {
-            Some(tree) => {
+            Some(_tree) => {
                 // Hold the symbol-tables lock briefly to look up the
                 // per-file table; releasing before the heavier checks keeps
                 // the lock window minimal.
@@ -1032,7 +1012,6 @@ impl XsLanguageServer {
                 };
                 match table {
                     Some(table) => diagnostics::collect_all(
-                        &tree,
                         text,
                         &self.engine,
                         &table,
@@ -1042,7 +1021,7 @@ impl XsLanguageServer {
                     ),
                     None => {
                         let mut map = std::collections::HashMap::new();
-                        map.insert(uri.clone(), diagnostics::collect_diagnostics(&tree, text));
+                        map.insert(uri.clone(), diagnostics::collect_diagnostics(text));
                         map
                     }
                 }

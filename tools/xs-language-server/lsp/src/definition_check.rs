@@ -11,205 +11,346 @@
 //! the compiler with default field values, so they don't need an initializer
 //! at the declaration site. The scalar set is fixed by the grammar
 //! (`bool | int | float | string | vector`) — anything else is a class.
-//!
-//! These checks mirror the compiler so the LSP can flag errors before the
-//! file is ever loaded by the engine.
 
-use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, Position, Range};
-use tree_sitter::{Node, Tree};
+use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, Range};
+use xs_parser::ast::{
+    ClassDefinition, ClassMember, Declaration, Expr, ForwardDeclaration, FunctionDefinition,
+    ParameterDeclaration, ParameterInner, TopLevelItem, TranslationUnit, Type, TypeSpecifier,
+};
+use xs_parser::parser::{Cst, NodeRef, Parser};
 
-/// Walk `tree` and return one diagnostic per definition that violates an
-/// XS compiler rule.
-pub fn validate_definitions(tree: &Tree, source: &str) -> Vec<Diagnostic> {
+use crate::range::span_to_range;
+
+/// Walk the typed AST of `source` and return one diagnostic per definition
+/// that violates an XS compiler rule.
+pub fn validate_definitions(source: &str) -> Vec<Diagnostic> {
+    let Some((cst, tu)) = parse_typed(source) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    let root = tree.root_node();
-    let mut cursor = root.walk();
-    for child in root.children(&mut cursor) {
-        match child.kind() {
-            "function_definition" => validate_function_params(child, source, &mut out),
-            "declaration" => validate_declaration(child, source, &mut out),
-            _ => {}
-        }
+    for item in &tu.items {
+        validate_top_level_item(&cst, source, item, &mut out);
     }
     out
 }
 
-fn validate_function_params(node: Node<'_>, source: &str, out: &mut Vec<Diagnostic>) {
-    let Some(param_list) = find_named_child(node, "parameter_list") else {
+fn parse_typed(source: &str) -> Option<(Cst<'_>, TranslationUnit)> {
+    let mut diags = Vec::new();
+    let cst = Parser::new_with_context(source, &mut diags, xs_parser::ast::TypeTable::with_primitives()).parse(&mut diags);
+    let tu = TranslationUnit::from_cst(&cst, NodeRef::ROOT)?;
+    Some((cst, tu))
+}
+
+fn base_name(direct: &xs_parser::ast::DirectDeclarator) -> &xs_parser::ast::Identifier {
+    match direct {
+        xs_parser::ast::DirectDeclarator::IdentDeclarator(id) => &id.name,
+        xs_parser::ast::DirectDeclarator::FunctionDeclarator(fd) => &fd.base,
+        xs_parser::ast::DirectDeclarator::ParenDeclarator(pd) => base_name(&pd.inner.direct),
+    }
+}
+
+fn validate_top_level_item(
+    cst: &Cst<'_>,
+    source: &str,
+    item: &TopLevelItem,
+    out: &mut Vec<Diagnostic>,
+) {
+    match item {
+        TopLevelItem::FunctionDefinition(f) => validate_function_definition(cst, source, f, out),
+        TopLevelItem::ForwardDeclaration(f) => validate_forward_declaration(cst, source, f, out),
+        TopLevelItem::ClassDefinition(c) => validate_class_definition(cst, source, c, out),
+        TopLevelItem::Declaration(d) => validate_declaration(cst, source, d, out),
+        _ => {}
+    }
+}
+
+fn validate_function_definition(
+    cst: &Cst<'_>,
+    source: &str,
+    f: &FunctionDefinition,
+    out: &mut Vec<Diagnostic>,
+) {
+    validate_declarator_params(cst, source, &f.declarator.direct, out);
+    validate_block_items(cst, source, &f.body.inner, out);
+}
+
+fn validate_forward_declaration(
+    cst: &Cst<'_>,
+    source: &str,
+    f: &ForwardDeclaration,
+    out: &mut Vec<Diagnostic>,
+) {
+    validate_declarator_params(cst, source, &f.declarator.direct, out);
+
+    let is_extern = f
+        .decl_specs
+        .storage
+        .iter()
+        .any(|(s, _)| *s == xs_parser::ast::StorageClassSpecifier::Extern);
+    if is_extern {
         return;
-    };
-    let mut cursor = param_list.walk();
-    for param in param_list.children(&mut cursor) {
-        if param.kind() != "parameter_declaration" {
+    }
+
+    // A bare variable forward declaration (`int x;`) also needs an
+    // initializer if its type is scalar.
+    let is_function = matches!(f.declarator.direct, xs_parser::ast::DirectDeclarator::FunctionDeclarator(_));
+    if is_function {
+        return;
+    }
+    if is_scalar_type(&f.decl_specs.ty) {
+        let name = &base_name(&f.declarator.direct).node;
+        let name_range = span_to_range(source, base_name(&f.declarator.direct).span.clone());
+        out.push(diagnostic(
+            name_range,
+            format!("variable `{name}` of scalar type must be initialized"),
+        ));
+    }
+}
+
+fn validate_class_definition(
+    cst: &Cst<'_>,
+    source: &str,
+    c: &ClassDefinition,
+    out: &mut Vec<Diagnostic>,
+) {
+    for member in &c.members.inner {
+        match member {
+            ClassMember::FunctionDefinition(f) => validate_function_definition(cst, source, f, out),
+            ClassMember::ForwardDeclaration(f) => validate_forward_declaration(cst, source, f, out),
+            _ => {}
+        }
+    }
+}
+
+fn validate_declaration(
+    cst: &Cst<'_>,
+    source: &str,
+    d: &Declaration,
+    out: &mut Vec<Diagnostic>,
+) {
+    if d.decl_specs.storage.iter().any(|(s, _)| *s == xs_parser::ast::StorageClassSpecifier::Extern) {
+        return;
+    }
+
+    let is_const = d.decl_specs.is_const();
+    for init in &d.init_declarator_list.items {
+        let name = &base_name(&init.declarator.direct).node;
+        let name_range = span_to_range(source, base_name(&init.declarator.direct).span.clone());
+
+        if is_const {
+            if let Some(expr) = init.expr(cst) {
+                if !is_constant_expression(cst, &expr) {
+                    out.push(diagnostic(
+                        name_range,
+                        format!("constant `{name}` must be assigned a constant expression"),
+                    ));
+                }
+            } else {
+                out.push(diagnostic(
+                    name_range,
+                    format!("constant `{name}` must be assigned a constant expression"),
+                ));
+            }
             continue;
         }
-        let Some(name_node) = find_named_child(param, "identifier") else {
-            continue;
-        };
-        let name = node_text(name_node, source);
-        let is_ref = parameter_is_ref(param);
-        let has_default = parameter_has_default(param);
 
-        if is_ref && has_default {
-            out.push(diagnostic(node_range(name_node), format!("ref parameter `{name}` cannot have a default value")));
-        } else if !is_ref && !has_default {
+        let has_initializer = init.initializer.is_some();
+        if !has_initializer && is_scalar_type(&d.decl_specs.ty) {
             out.push(diagnostic(
-                node_range(name_node),
-                format!("non-ref parameter `{name}` must have a default value"),
-            ));
-        }
-    }
-}
-
-/// True if the parameter declaration carries a `ref` type qualifier.
-fn parameter_is_ref(param: Node<'_>) -> bool {
-    let mut cursor = param.walk();
-    for child in param.children(&mut cursor) {
-        if child.kind() == "type_qualifier" {
-            let mut inner = child.walk();
-            for token in child.children(&mut inner) {
-                if token.kind() == "ref" {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// True if the parameter declaration has an `= default` clause.
-fn parameter_has_default(param: Node<'_>) -> bool {
-    let mut cursor = param.walk();
-    param.children(&mut cursor).any(|c| c.kind() == "=")
-}
-
-fn validate_declaration(node: Node<'_>, source: &str, out: &mut Vec<Diagnostic>) {
-    // Forward function declaration: validate its parameters too.
-    if let Some(declarator) = find_named_child(node, "function_declarator") {
-        validate_function_params(declarator, source, out);
-        return;
-    }
-
-    // `const` declarations must have a constant RHS expression.
-    if let Some(init) = find_named_child(node, "init_declarator") {
-        if declaration_has_modifier(node, "const") {
-            if let Some(value_node) = init.child_by_field_name("value") {
-                if !is_constant_expression(value_node, source) {
-                    let name_node = find_named_child(init, "identifier");
-                    let name = name_node.map(|n| node_text(n, source)).unwrap_or("?");
-                    let range = name_node.map(node_range).unwrap_or_else(|| node_range(node));
-                    out.push(diagnostic(range, format!("constant `{name}` must be assigned a constant expression")));
-                }
-            }
-        }
-        return;
-    }
-
-    // No initializer: only SCALAR-typed variables are required to have one.
-    // Class/struct instances (e.g. `AttackWave gFoo;`) are accepted by the
-    // compiler with default field values, so they don't need an initializer
-    // at the declaration site. The scalar set is fixed and known from the
-    // grammar: `bool`, `int`, `float`, `string`, `vector`. Anything else is
-    // a class type.
-    if declaration_has_modifier(node, "extern") {
-        return;
-    }
-    let Some(name_node) = find_named_child(node, "identifier") else {
-        return;
-    };
-    let name = node_text(name_node, source);
-    let type_node = find_named_child(node, "primitive_type").or_else(|| find_named_child(node, "array_type"));
-    match type_node {
-        Some(ty) if is_scalar_type(ty, source) => {
-            out.push(diagnostic(
-                node_range(name_node),
+                name_range,
                 format!("variable `{name}` of scalar type must be initialized"),
             ));
         }
-        _ => {
-            // Class/struct type (or no resolvable type) — compiler accepts.
-        }
     }
 }
 
-/// True if `type_node` is a scalar XS type per the grammar's
-/// `primitive_type` set (`bool`, `int`, `float`, `string`, `vector`),
-/// or an array of one of those.
-///
-/// The grammar at `tree-sitter-xs/src/grammar.json:1714` enumerates exactly:
-///   bool | int | float | string | vector | void
-/// We exclude `void` (no variable can be declared `void`) and treat any
-/// other named type or array of named type as a class.
-fn is_scalar_type(type_node: Node<'_>, source: &str) -> bool {
-    if type_node.kind() == "array_type" {
-        if let Some(elem) = type_node.child_by_field_name("element") {
-            return is_scalar_type(elem, source);
-        }
-        return false;
-    }
-    if type_node.kind() != "primitive_type" {
-        return false;
-    }
-    let text = node_text(type_node, source);
-    !matches!(text, "void")
-}
-
-/// True if `node` (a `declaration`) has a storage-class/type-qualifier
-/// child whose keyword text is `keyword` (e.g. `"extern"` or `"const"`).
-fn declaration_has_modifier(node: Node<'_>, keyword: &str) -> bool {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() != "storage_class_specifier" && child.kind() != "type_qualifier" {
-            continue;
-        }
-        let mut inner = child.walk();
-        for token in child.children(&mut inner) {
-            if token.kind() == keyword {
-                return true;
+fn validate_declarator_params(
+    cst: &Cst<'_>,
+    source: &str,
+    direct: &xs_parser::ast::DirectDeclarator,
+    out: &mut Vec<Diagnostic>,
+) {
+    match direct {
+        xs_parser::ast::DirectDeclarator::FunctionDeclarator(fd) => {
+            if let Some(pl) = &fd.params {
+                for (param, _) in &pl.inner.items.items {
+                    validate_parameter(cst, source, param, out);
+                }
             }
         }
+        xs_parser::ast::DirectDeclarator::ParenDeclarator(pd) => {
+            validate_declarator_params(cst, source, &pd.inner.direct, out);
+        }
+        _ => {}
     }
-    false
 }
 
-/// Conservative check for a constant RHS expression: literals, identifiers,
-/// unary/binary/parenthesized expressions over other constant expressions,
-/// and the narrow set of built-in type constructors (`vector(...)`).
-/// Everything else (function calls other than `vector`) is rejected.
-fn is_constant_expression(node: Node<'_>, source: &str) -> bool {
-    match node.kind() {
-        "number_literal" | "string_literal" | "true" | "false" | "identifier" => true,
-        "unary_expression" => node
-            .child_by_field_name("argument")
-            .is_some_and(|c| is_constant_expression(c, source)),
-        "parenthesized_expression" => node
-            .named_children(&mut node.walk())
-            .next()
-            .is_some_and(|c| is_constant_expression(c, source)),
-        "expression" => node
-            .named_children(&mut node.walk())
-            .next()
-            .is_some_and(|c| is_constant_expression(c, source)),
-        // Binary expression over constants. The XS compiler accepts
-        // `const int X = cFoo + 1;` and similar arithmetic over other
-        // constants. Both operands must be constant expressions.
-        "binary_expression" => {
-            let mut cursor = node.walk();
-            let operands: Vec<_> = node
-                .named_children(&mut cursor)
-                .filter(|c| c.kind() != "operator")
-                .collect();
-            operands.iter().all(|op| is_constant_expression(*op, source)) && !operands.is_empty()
+fn validate_parameter(
+    cst: &Cst<'_>,
+    source: &str,
+    param: &ParameterDeclaration,
+    out: &mut Vec<Diagnostic>,
+) {
+    let name = param_name(param);
+    let name_range = name.map(|n| span_to_range(source, n.span.clone()));
+    let Some(name_range) = name_range else { return };
+    let name = name.unwrap().node.clone();
+
+    let is_ref = param.decl_specs.is_ref();
+    let has_default = parameter_has_default(cst, param);
+
+    if is_ref && has_default {
+        out.push(diagnostic(name_range, format!("ref parameter `{name}` cannot have a default value")));
+    } else if !is_ref && !has_default {
+        out.push(diagnostic(
+            name_range,
+            format!("non-ref parameter `{name}` must have a default value"),
+        ));
+    }
+}
+
+fn param_name(param: &ParameterDeclaration) -> Option<&xs_parser::ast::Identifier> {
+    match &param.inner {
+        ParameterInner::RegularParam(r) => Some(&r.name),
+        ParameterInner::FunctionPointerParam(fp) => Some(&fp.name),
+    }
+}
+
+fn parameter_has_default(cst: &Cst<'_>, param: &ParameterDeclaration) -> bool {
+    match &param.inner {
+        ParameterInner::RegularParam(r) => r.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0)).is_some(),
+        ParameterInner::FunctionPointerParam(fp) => {
+            fp.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0)).is_some()
         }
-        // `vector(...)` is a built-in type constructor. The XS engine treats
-        // it as a literal value, not a function call result. The shipped game
-        // scripts use it for every `const vector X = vector(...)` patrol-point
-        // definition (~85 occurrences). All other call expressions
-        // (`aiEcho(...)`, `xsVectorSet(...)`, etc.) remain rejected.
-        "call_expression" => node
-            .child_by_field_name("function")
-            .map(|f| node_text(f, source) == "vector")
-            .unwrap_or(false),
+    }
+}
+
+fn validate_block_items(
+    cst: &Cst<'_>,
+    source: &str,
+    items: &[xs_parser::ast::statement::BlockItem],
+    out: &mut Vec<Diagnostic>,
+) {
+    use xs_parser::ast::statement::{BlockItem, ForInit, Statement};
+    for item in items {
+        match item {
+            BlockItem::Declaration(d) => validate_declaration(cst, source, d, out),
+            BlockItem::ForwardDeclaration(f) => validate_forward_declaration(cst, source, f, out),
+            BlockItem::FunctionDefinition(f) => validate_function_definition(cst, source, f, out),
+            BlockItem::Statement(s) => match s {
+                Statement::If(i) => {
+                    validate_statement(cst, source, &i.then, out);
+                    if let Some(else_) = &i.else_ {
+                        validate_statement(cst, source, else_, out);
+                    }
+                }
+                Statement::While(w) => validate_statement(cst, source, &w.body, out),
+                Statement::For(f) => {
+                    if let ForInit::Declaration(d) = &f.init {
+                        validate_declaration(cst, source, d, out);
+                    }
+                    validate_statement(cst, source, &f.body, out);
+                }
+                Statement::Compound(c) => validate_block_items(cst, source, &c.items.inner, out),
+                Statement::Switch(s) => {
+                    for case in &s.cases.inner {
+                        validate_block_items(cst, source, &case.body.items.inner, out);
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+}
+
+fn validate_statement(
+    cst: &Cst<'_>,
+    source: &str,
+    stmt: &xs_parser::ast::statement::Statement,
+    out: &mut Vec<Diagnostic>,
+) {
+    validate_block_items(cst, source, &[], out); // no-op to keep signature uniform
+    use xs_parser::ast::statement::{ForInit, Statement};
+    match stmt {
+        Statement::Compound(c) => validate_block_items(cst, source, &c.items.inner, out),
+        Statement::If(i) => {
+            validate_statement(cst, source, &i.then, out);
+            if let Some(else_) = &i.else_ {
+                validate_statement(cst, source, else_, out);
+            }
+        }
+        Statement::While(w) => validate_statement(cst, source, &w.body, out),
+        Statement::For(f) => {
+            if let ForInit::Declaration(d) = &f.init {
+                validate_declaration(cst, source, d, out);
+            }
+            validate_statement(cst, source, &f.body, out);
+        }
+        Statement::Switch(s) => {
+            for case in &s.cases.inner {
+                validate_block_items(cst, source, &case.body.items.inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// True when `ty` denotes a scalar XS type (`bool`, `int`, `float`,
+/// `string`, `vector`). Arrays of scalar types are also scalar.
+fn is_scalar_type(ty: &TypeSpecifier) -> bool {
+    if ty.is_array {
+        return is_scalar_type(&xs_parser::ast::DeclarationSpecifiers {
+            storage: vec![],
+            ty: xs_parser::ast::type_system::TypeSpecifier {
+                ty: ty.ty.clone(),
+                is_array: false,
+                span: ty.span.clone(),
+            },
+            type_quals: vec![],
+            span: ty.span.clone(),
+        }.ty);
+    }
+    matches!(
+        ty.ty,
+        Type::Bool | Type::Int | Type::Float | Type::String | Type::Vector
+    )
+}
+
+/// Conservative constant-expression check over the typed AST. Accepts
+/// literals, identifiers, unary/binary expressions over constants,
+/// parenthesised constants, and the special `vector(...)` constructor.
+fn is_constant_expression(cst: &Cst<'_>, expr: &Expr) -> bool {
+    match expr {
+        Expr::IntLiteral(_)
+        | Expr::FloatLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::TrueLiteral(_)
+        | Expr::FalseLiteral(_)
+        | Expr::NullLiteral(_)
+        | Expr::Default(_)
+        | Expr::Identifier(_) => true,
+        Expr::Paren(p) => is_constant_expression(cst, &p.inner),
+        Expr::Unary(u) => is_constant_expression(cst, &u.operand),
+        Expr::Binary(b) => {
+            is_constant_expression(cst, &b.lhs) && is_constant_expression(cst, &b.rhs)
+        }
+        Expr::Conditional(c) => {
+            is_constant_expression(cst, &c.cond)
+                && c.then.as_ref().map_or(true, |e| is_constant_expression(cst, e))
+                && is_constant_expression(cst, &c.else_)
+        }
+        Expr::Comma(c) => c.exprs.iter().all(|e| is_constant_expression(cst, e)),
+        Expr::Postfix(p) => {
+            // Only `vector(...)` is accepted as a constant constructor.
+            if let xs_parser::ast::expr::PostfixInner::Call(_call) = &p.inner {
+                if let Expr::Identifier(id) = p.target.as_ref() {
+                    if id.name.node == "vector" {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
         _ => false,
     }
 }
@@ -228,30 +369,14 @@ fn diagnostic(range: Range, message: String) -> Diagnostic {
     }
 }
 
-fn node_range(node: Node<'_>) -> Range {
-    let start = node.start_position();
-    let end = node.end_position();
-    Range::new(Position::new(start.row as u32, start.column as u32), Position::new(end.row as u32, end.column as u32))
-}
-
-fn node_text<'a>(node: Node<'a>, source: &'a str) -> &'a str { &source[node.byte_range()] }
-
-fn find_named_child<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
-    let mut cursor = node.walk();
-    node.named_children(&mut cursor).find(|c| c.kind() == kind)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser;
-
-    fn parse(src: &str) -> Tree { parser::parse(src).expect("parse") }
 
     #[test]
     fn flags_non_ref_param_without_default() {
         let src = "void f(int x) {}\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
             msgs.iter()
@@ -264,7 +389,7 @@ mod tests {
     #[test]
     fn flags_ref_param_with_default() {
         let src = "void f(ref int x = 0) {}\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
             msgs.iter()
@@ -276,11 +401,8 @@ mod tests {
 
     #[test]
     fn flags_uninitialized_top_level_variable() {
-        // Scalar types (int, float, bool, string, vector) must be
-        // initialized at declaration time. Class/struct instances are
-        // exempted (see `allows_uninitialized_class_variable`).
         let src = "int x;\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
             msgs.iter()
@@ -292,12 +414,8 @@ mod tests {
 
     #[test]
     fn allows_uninitialized_class_variable() {
-        // Class/struct instances are accepted by the compiler with
-        // default field values. The shipped game scripts use this pattern
-        // heavily for things like `AttackWave gLandAttackWave;` which
-        // are then configured via setter calls.
         let src = "AttackWave gFoo;\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         assert!(
             diags.is_empty(),
             "class declaration without init should be allowed, got: {:?}",
@@ -307,9 +425,8 @@ mod tests {
 
     #[test]
     fn flags_uninitialized_float_variable() {
-        // Same rule as int — float is a scalar type per the grammar.
         let src = "float x;\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
             msgs.iter()
@@ -322,7 +439,7 @@ mod tests {
     #[test]
     fn flags_uninitialized_bool_variable() {
         let src = "bool x;\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
             msgs.iter()
@@ -335,7 +452,7 @@ mod tests {
     #[test]
     fn flags_uninitialized_string_variable() {
         let src = "string x;\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
             msgs.iter()
@@ -348,7 +465,7 @@ mod tests {
     #[test]
     fn flags_uninitialized_vector_variable() {
         let src = "vector x;\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
             msgs.iter()
@@ -360,10 +477,8 @@ mod tests {
 
     #[test]
     fn allows_uninitialized_extern_variable() {
-        // `extern` declarations name a definition elsewhere and are
-        // allowed without an initializer regardless of type.
         let src = "extern int gFoo;\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         assert!(
             diags.is_empty(),
             "extern int should be allowed without init, got: {:?}",
@@ -374,7 +489,7 @@ mod tests {
     #[test]
     fn flags_constant_assigned_non_constant() {
         let src = "const int x = aiEcho(\"hi\");\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         let msgs: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
             msgs.iter()
@@ -387,7 +502,7 @@ mod tests {
     #[test]
     fn allows_constant_assigned_literal() {
         let src = "const int x = 42;\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         assert!(
             diags.is_empty(),
             "literal RHS should be allowed, got: {:?}",
@@ -398,7 +513,7 @@ mod tests {
     #[test]
     fn allows_constant_assigned_other_constant() {
         let src = "const int cOne = 1;\nconst int cTwo = cOne;\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         assert!(
             diags.is_empty(),
             "constant reference RHS should be allowed, got: {:?}",
@@ -408,11 +523,8 @@ mod tests {
 
     #[test]
     fn allows_constant_assigned_arithmetic_over_constants() {
-        // The XS compiler accepts `const int X = cFoo + 1;` — arithmetic
-        // over other constants is itself a constant expression. Used
-        // heavily in the shipped game scripts (e.g. `human_assist.xs`).
         let src = "const int cOne = 1;\nconst int cTwo = cOne + 1;\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         assert!(
             diags.is_empty(),
             "binary expression over constants should be allowed, got: {:?}",
@@ -422,12 +534,8 @@ mod tests {
 
     #[test]
     fn allows_constant_assigned_vector_constructor() {
-        // `vector(...)` is a built-in type constructor. The XS engine
-        // treats it as a literal value, not a function call result. The
-        // shipped game scripts use it heavily for `const vector X = vector(...)`
-        // patrol-point definitions.
         let src = "const vector v = vector(1.0, 2.0, 3.0);\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         assert!(
             diags.is_empty(),
             "vector(...) should be a constant constructor, got: {:?}",
@@ -437,11 +545,8 @@ mod tests {
 
     #[test]
     fn rejects_constant_assigned_other_call() {
-        // `aiEcho(...)` is a real function call, not a constructor. The
-        // engine does not treat it as a constant expression. The whitelisted
-        // exception (`vector`) is narrowly scoped.
         let src = "const int x = aiEcho(\"hi\");\n";
-        let diags = validate_definitions(&parse(src), src);
+        let diags = validate_definitions(src);
         assert!(
             diags.iter().any(|d| d
                 .message

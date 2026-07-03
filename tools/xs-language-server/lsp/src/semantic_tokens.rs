@@ -16,11 +16,17 @@ use tower_lsp_server::ls_types::{
     SemanticTokensOptions,
     SemanticTokensServerCapabilities,
 };
+use xs_parser::ast::{
+    ClassDefinition, ClassMember, DeclarationSpecifiers, Expr, PostfixInner, TopLevelItem,
+    TranslationUnit, Type, TypeTable,
+};
+use xs_parser::parser::{Cst, NodeRef, Parser};
 
 use crate::{
     cache,
     engine_api,
     merged_view::MergedView,
+    range::span_to_range,
     symbols::{self, Symbol, SymbolKind, Visibility},
     workspace::{VirtualProject, Workspace},
 };
@@ -66,6 +72,13 @@ pub fn server_capabilities() -> SemanticTokensServerCapabilities {
     })
 }
 
+fn parse_typed(source: &str) -> Option<(Cst<'_>, TranslationUnit)> {
+    let mut diags = Vec::new();
+    let cst = Parser::new_with_context(source, &mut diags, TypeTable::with_primitives()).parse(&mut diags);
+    let tu = TranslationUnit::from_cst(&cst, NodeRef::ROOT)?;
+    Some((cst, tu))
+}
+
 /// Compute semantic tokens for `source`.
 ///
 /// `current_file` is the absolute path of the file being analysed, used to
@@ -87,16 +100,39 @@ pub fn compute_tokens(
     project: &VirtualProject,
     member_index: &MemberIndex,
 ) -> Vec<Token> {
-    let Some(tree) = crate::parser::parse(source) else {
+    let Some((cst, tu)) = parse_typed(source) else {
         return Vec::new();
     };
 
     let mut tokens = Vec::new();
-    let mut cursor = tree.root_node().walk();
-    walk_for_tokens(
-        tree.root_node(),
+
+    // Declared symbols: rules, functions, variables, constants, classes,
+    // class fields, class methods.
+    for sym in &own_table.symbols {
+        if let Some(token) = token_for_symbol(sym, current_file, own_table, merged, workspace, project) {
+            tokens.push(token);
+        }
+    }
+
+    // Type specifiers (primitive and user-defined class types) wherever they
+    // appear in declarations, function signatures, and class members.
+    visit_top_level_for_types(
         source,
-        &mut cursor,
+        &tu,
+        current_file,
+        own_table,
+        merged,
+        engine,
+        workspace,
+        project,
+        &mut tokens,
+    );
+
+    // Expression identifiers and member references.
+    visit_top_level_for_exprs(
+        &cst,
+        source,
+        &tu,
         current_file,
         own_table,
         merged,
@@ -107,17 +143,238 @@ pub fn compute_tokens(
         &mut tokens,
     );
 
-    // LSP requires tokens sorted by position with stable order.
     tokens.sort_by(|a, b| a.line.cmp(&b.line).then(a.char.cmp(&b.char)));
     tokens
 }
 
-// Recursive tree walker; see `compute_tokens` rationale for the arity.
-#[allow(clippy::too_many_arguments)]
-fn walk_for_tokens(
-    node: tree_sitter::Node<'_>,
+fn token_for_symbol(
+    sym: &Symbol,
+    current_file: Option<&Path>,
+    own_table: &symbols::SymbolTable,
+    merged: Option<&MergedView>,
+    workspace: &Workspace,
+    project: &VirtualProject,
+) -> Option<Token> {
+    let name = &sym.name;
+    let token_type = match sym.kind {
+        SymbolKind::Rule => SemanticTokenType::new("rule"),
+        SymbolKind::Function | SymbolKind::ClassMethod => SemanticTokenType::FUNCTION,
+        SymbolKind::Variable | SymbolKind::ClassField => SemanticTokenType::VARIABLE,
+        SymbolKind::Constant => SemanticTokenType::new("constant"),
+        SymbolKind::Class => SemanticTokenType::TYPE,
+    };
+
+    let defining_path: Option<&Path> = if let Some(ms) = merged.and_then(|m| m.find(name)) {
+        ms.provenance.origin()
+    } else if own_table.find(name).map_or(false, |s| std::ptr::eq(s, sym)) {
+        current_file
+    } else {
+        None
+    };
+    let origin = defining_path
+        .map(|p| classify_origin(p, workspace, project))
+        .unwrap_or(Origin::Engine);
+
+    let range = sym.selection_range;
+    let len = range.end.character.saturating_sub(range.start.character)
+        + (range.end.line.saturating_sub(range.start.line)) * u32::MAX;
+    Some(Token {
+        line: range.start.line,
+        char: range.start.character,
+        len,
+        token_type,
+        modifiers: classify_modifiers(sym, origin),
+    })
+}
+
+fn visit_top_level_for_types(
     source: &str,
-    cursor: &mut tree_sitter::TreeCursor<'_>,
+    tu: &TranslationUnit,
+    current_file: Option<&Path>,
+    own_table: &symbols::SymbolTable,
+    merged: Option<&MergedView>,
+    engine: &engine_api::SharedEngineApi,
+    workspace: &Workspace,
+    project: &VirtualProject,
+    tokens: &mut Vec<Token>,
+) {
+    for item in &tu.items {
+        visit_top_level_item_for_types(
+            source,
+            item,
+            current_file,
+            own_table,
+            merged,
+            engine,
+            workspace,
+            project,
+            tokens,
+        );
+    }
+}
+
+fn visit_top_level_item_for_types(
+    source: &str,
+    item: &TopLevelItem,
+    current_file: Option<&Path>,
+    own_table: &symbols::SymbolTable,
+    merged: Option<&MergedView>,
+    engine: &engine_api::SharedEngineApi,
+    workspace: &Workspace,
+    project: &VirtualProject,
+    tokens: &mut Vec<Token>,
+) {
+    match item {
+        TopLevelItem::FunctionDefinition(f) => {
+            visit_type_specifier(source, &f.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens);
+            visit_params_for_types(source, &f.declarator.direct, current_file, own_table, merged, engine, workspace, project, tokens);
+        }
+        TopLevelItem::ForwardDeclaration(f) => {
+            visit_type_specifier(source, &f.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens);
+            visit_params_for_types(source, &f.declarator.direct, current_file, own_table, merged, engine, workspace, project, tokens);
+        }
+        TopLevelItem::ClassDefinition(c) => visit_class_for_types(source, c, current_file, own_table, merged, engine, workspace, project, tokens),
+        TopLevelItem::Declaration(d) => {
+            visit_type_specifier(source, &d.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens);
+        }
+        _ => {}
+    }
+}
+
+fn visit_class_for_types(
+    source: &str,
+    c: &ClassDefinition,
+    current_file: Option<&Path>,
+    own_table: &symbols::SymbolTable,
+    merged: Option<&MergedView>,
+    engine: &engine_api::SharedEngineApi,
+    workspace: &Workspace,
+    project: &VirtualProject,
+    tokens: &mut Vec<Token>,
+) {
+    for member in &c.members.inner {
+        match member {
+            ClassMember::FunctionDefinition(f) => {
+                visit_type_specifier(source, &f.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens);
+                visit_params_for_types(source, &f.declarator.direct, current_file, own_table, merged, engine, workspace, project, tokens);
+            }
+            ClassMember::ForwardDeclaration(f) => {
+                visit_type_specifier(source, &f.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens);
+                visit_params_for_types(source, &f.declarator.direct, current_file, own_table, merged, engine, workspace, project, tokens);
+            }
+            ClassMember::FieldDeclaration(f) => {
+                visit_type_specifier(source, &f.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens);
+            }
+        }
+    }
+}
+
+fn visit_params_for_types(
+    source: &str,
+    direct: &xs_parser::ast::DirectDeclarator,
+    current_file: Option<&Path>,
+    own_table: &symbols::SymbolTable,
+    merged: Option<&MergedView>,
+    engine: &engine_api::SharedEngineApi,
+    workspace: &Workspace,
+    project: &VirtualProject,
+    tokens: &mut Vec<Token>,
+) {
+    match direct {
+        xs_parser::ast::DirectDeclarator::FunctionDeclarator(fd) => {
+            if let Some(pl) = &fd.params {
+                for (param, _) in &pl.inner.items.items {
+                    visit_type_specifier(
+                        source,
+                        &param.decl_specs,
+                        current_file,
+                        own_table,
+                        merged,
+                        engine,
+                        workspace,
+                        project,
+                        tokens,
+                    );
+                }
+            }
+        }
+        xs_parser::ast::DirectDeclarator::ParenDeclarator(pd) => {
+            visit_params_for_types(source, &pd.inner.direct, current_file, own_table, merged, engine, workspace, project, tokens);
+        }
+        _ => {}
+    }
+}
+
+fn visit_type_specifier(
+    source: &str,
+    specs: &DeclarationSpecifiers,
+    current_file: Option<&Path>,
+    own_table: &symbols::SymbolTable,
+    merged: Option<&MergedView>,
+    engine: &engine_api::SharedEngineApi,
+    workspace: &Workspace,
+    project: &VirtualProject,
+    tokens: &mut Vec<Token>,
+) {
+    let ty = &specs.ty;
+    let token_type = if is_primitive_type(ty) {
+        SemanticTokenType::TYPE
+    } else if let Type::Class(name) = &ty.ty {
+        let type_name = name.node.as_str();
+        if own_table.find(type_name).is_some()
+            || merged.and_then(|m| m.find(type_name)).is_some()
+            || engine.find_syscall(type_name).is_some()
+        {
+            SemanticTokenType::TYPE
+        } else {
+            // Unknown class: still emit a type token with engine origin.
+            SemanticTokenType::TYPE
+        }
+    } else {
+        return;
+    };
+
+    let origin = if is_primitive_type(ty) {
+        Origin::Engine
+    } else if let Type::Class(name) = &ty.ty {
+        let type_name = &name.node;
+        let defining_path = if let Some(ms) = merged.and_then(|m| m.find(type_name)) {
+            ms.provenance.origin()
+        } else if own_table.find(type_name).is_some() {
+            current_file
+        } else {
+            None
+        };
+        defining_path
+            .map(|p| classify_origin(p, workspace, project))
+            .unwrap_or(Origin::Engine)
+    } else {
+        Origin::Engine
+    };
+
+    let range = span_to_range(source, ty.span.clone());
+    let len = range.end.character.saturating_sub(range.start.character)
+        + (range.end.line.saturating_sub(range.start.line)) * u32::MAX;
+    tokens.push(Token {
+        line: range.start.line,
+        char: range.start.character,
+        len,
+        token_type,
+        modifiers: vec![origin_modifier(origin)],
+    });
+}
+
+fn is_primitive_type(ty: &xs_parser::ast::type_system::TypeSpecifier) -> bool {
+    matches!(
+        ty.ty,
+        Type::Void | Type::Bool | Type::Int | Type::Float | Type::String | Type::Vector
+    )
+}
+
+fn visit_top_level_for_exprs(
+    cst: &Cst<'_>,
+    source: &str,
+    tu: &TranslationUnit,
     current_file: Option<&Path>,
     own_table: &symbols::SymbolTable,
     merged: Option<&MergedView>,
@@ -127,77 +384,345 @@ fn walk_for_tokens(
     member_index: &MemberIndex,
     tokens: &mut Vec<Token>,
 ) {
-    match node.kind() {
-        "identifier" => {
-            if let Some(token) =
-                classify_identifier(node, source, current_file, own_table, merged, engine, workspace, project)
-            {
-                tokens.push(token);
+    for item in &tu.items {
+        visit_top_level_item_for_exprs(
+            cst, source, item, current_file, own_table, merged, engine, workspace, project, member_index, tokens,
+        );
+    }
+}
+
+fn visit_top_level_item_for_exprs(
+    cst: &Cst<'_>,
+    source: &str,
+    item: &TopLevelItem,
+    current_file: Option<&Path>,
+    own_table: &symbols::SymbolTable,
+    merged: Option<&MergedView>,
+    engine: &engine_api::SharedEngineApi,
+    workspace: &Workspace,
+    project: &VirtualProject,
+    member_index: &MemberIndex,
+    tokens: &mut Vec<Token>,
+) {
+    match item {
+        TopLevelItem::FunctionDefinition(f) => {
+            visit_block_items_for_exprs(
+                cst, source, &f.body.inner, current_file, own_table, merged, engine, workspace, project, member_index,
+                tokens,
+            );
+        }
+        TopLevelItem::ClassDefinition(c) => {
+            for member in &c.members.inner {
+                match member {
+                    ClassMember::FunctionDefinition(f) => visit_block_items_for_exprs(
+                        cst, source, &f.body.inner, current_file, own_table, merged, engine, workspace, project, member_index,
+                        tokens,
+                    ),
+                    ClassMember::FieldDeclaration(f) => {
+                        if let Some(expr) = f.expr(cst) {
+                            visit_expr(
+                                cst, source, &expr, current_file, own_table, merged, engine, workspace, project, member_index,
+                                tokens,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
-        "field_identifier" => {
-            if let Some(token) = classify_member_identifier(node, source, member_index) {
-                tokens.push(token);
+        TopLevelItem::Declaration(d) => {
+            for init in &d.init_declarator_list.items {
+                if let Some(expr) = init.expr(cst) {
+                    visit_expr(
+                        cst, source, &expr, current_file, own_table, merged, engine, workspace, project, member_index,
+                        tokens,
+                    );
+                }
             }
-        }
-        "_type_identifier" | "type_identifier" => {
-            if let Some(token) =
-                classify_type_identifier(node, source, current_file, own_table, merged, workspace, project)
-            {
-                tokens.push(token);
-            }
-        }
-        "primitive_type" => {
-            tokens.push(Token {
-                line: node.start_position().row as u32,
-                char: node.start_position().column as u32,
-                len: (node.end_byte() - node.start_byte()) as u32,
-                token_type: SemanticTokenType::TYPE,
-                modifiers: vec![SemanticTokenModifier::new("engine")],
-            });
         }
         _ => {}
     }
+}
 
-    if cursor.goto_first_child() {
-        loop {
-            walk_for_tokens(
-                cursor.node(),
+fn visit_block_items_for_exprs(
+    cst: &Cst<'_>,
+    source: &str,
+    items: &[xs_parser::ast::statement::BlockItem],
+    current_file: Option<&Path>,
+    own_table: &symbols::SymbolTable,
+    merged: Option<&MergedView>,
+    engine: &engine_api::SharedEngineApi,
+    workspace: &Workspace,
+    project: &VirtualProject,
+    member_index: &MemberIndex,
+    tokens: &mut Vec<Token>,
+) {
+    use xs_parser::ast::statement::BlockItem;
+    for item in items {
+        match item {
+            BlockItem::Declaration(d) => {
+                for init in &d.init_declarator_list.items {
+                    if let Some(expr) = init.expr(cst) {
+                        visit_expr(
+                            cst, source, &expr, current_file, own_table, merged, engine, workspace, project, member_index,
+                            tokens,
+                        );
+                    }
+                }
+            }
+            BlockItem::FunctionDefinition(f) => visit_block_items_for_exprs(
+                cst, source, &f.body.inner, current_file, own_table, merged, engine, workspace, project, member_index,
+                tokens,
+            ),
+            BlockItem::Statement(s) => visit_statement_for_exprs(
+                cst, source, s, current_file, own_table, merged, engine, workspace, project, member_index, tokens,
+            ),
+            _ => {}
+        }
+    }
+}
+
+fn visit_statement_for_exprs(
+    cst: &Cst<'_>,
+    source: &str,
+    stmt: &xs_parser::ast::statement::Statement,
+    current_file: Option<&Path>,
+    own_table: &symbols::SymbolTable,
+    merged: Option<&MergedView>,
+    engine: &engine_api::SharedEngineApi,
+    workspace: &Workspace,
+    project: &VirtualProject,
+    member_index: &MemberIndex,
+    tokens: &mut Vec<Token>,
+) {
+    use xs_parser::ast::statement::{ForInit, Statement};
+    match stmt {
+        Statement::Compound(c) => visit_block_items_for_exprs(
+            cst, source, &c.items.inner, current_file, own_table, merged, engine, workspace, project, member_index,
+            tokens,
+        ),
+        Statement::Expression(es) => {
+            if let Some(e) = es.expr.as_ref().and_then(|u| Expr::from_cst(cst, u.0)) {
+                visit_expr(
+                    cst, source, &e, current_file, own_table, merged, engine, workspace, project, member_index,
+                    tokens,
+                );
+            }
+        }
+        Statement::Return(r) => {
+            if let Some(v) = &r.value {
+                if let Some(e) = Expr::from_cst(cst, v.0) {
+                    visit_expr(
+                        cst, source, &e, current_file, own_table, merged, engine, workspace, project, member_index,
+                        tokens,
+                    );
+                }
+            }
+        }
+        Statement::If(i) => {
+            if let Some(e) = Expr::from_cst(cst, i.cond.inner.0) {
+                visit_expr(
+                    cst, source, &e, current_file, own_table, merged, engine, workspace, project, member_index,
+                    tokens,
+                );
+            }
+            visit_statement_for_exprs(
+                cst, source, &i.then, current_file, own_table, merged, engine, workspace, project, member_index,
+                tokens,
+            );
+            if let Some(else_) = &i.else_ {
+                visit_statement_for_exprs(
+                    cst, source, else_, current_file, own_table, merged, engine, workspace, project, member_index,
+                    tokens,
+                );
+            }
+        }
+        Statement::While(w) => {
+            if let Some(e) = Expr::from_cst(cst, w.cond.inner.0) {
+                visit_expr(
+                    cst, source, &e, current_file, own_table, merged, engine, workspace, project, member_index,
+                    tokens,
+                );
+            }
+            visit_statement_for_exprs(
+                cst, source, &w.body, current_file, own_table, merged, engine, workspace, project, member_index,
+                tokens,
+            );
+        }
+        Statement::For(f) => {
+            match &f.init {
+                ForInit::Declaration(d) => {
+                    for init in &d.init_declarator_list.items {
+                        if let Some(e) = init.expr(cst) {
+                            visit_expr(
+                                cst, source, &e, current_file, own_table, merged, engine, workspace, project, member_index,
+                                tokens,
+                            );
+                        }
+                    }
+                }
+                ForInit::Expression(u) => {
+                    if let Some(e) = Expr::from_cst(cst, u.0) {
+                        visit_expr(
+                            cst, source, &e, current_file, own_table, merged, engine, workspace, project, member_index,
+                            tokens,
+                        );
+                    }
+                }
+                ForInit::Empty => {}
+            }
+            if let Some(u) = &f.cond {
+                if let Some(e) = Expr::from_cst(cst, u.0) {
+                    visit_expr(
+                        cst, source, &e, current_file, own_table, merged, engine, workspace, project, member_index,
+                        tokens,
+                    );
+                }
+            }
+            if let Some(u) = &f.post {
+                if let Some(e) = Expr::from_cst(cst, u.0) {
+                    visit_expr(
+                        cst, source, &e, current_file, own_table, merged, engine, workspace, project, member_index,
+                        tokens,
+                    );
+                }
+            }
+            visit_statement_for_exprs(
+                cst, source, &f.body, current_file, own_table, merged, engine, workspace, project, member_index,
+                tokens,
+            );
+        }
+        Statement::Switch(s) => {
+            if let Some(e) = Expr::from_cst(cst, s.cond.inner.0) {
+                visit_expr(
+                    cst, source, &e, current_file, own_table, merged, engine, workspace, project, member_index,
+                    tokens,
+                );
+            }
+            for case in &s.cases.inner {
+                visit_block_items_for_exprs(
+                    cst, source, &case.body.items.inner, current_file, own_table, merged, engine, workspace, project,
+                    member_index, tokens,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn visit_expr(
+    cst: &Cst<'_>,
+    source: &str,
+    expr: &Expr,
+    current_file: Option<&Path>,
+    own_table: &symbols::SymbolTable,
+    merged: Option<&MergedView>,
+    engine: &engine_api::SharedEngineApi,
+    workspace: &Workspace,
+    project: &VirtualProject,
+    member_index: &MemberIndex,
+    tokens: &mut Vec<Token>,
+) {
+    match expr {
+        Expr::Identifier(id) => {
+            if let Some(token) = classify_identifier(
+                &id.name.node,
                 source,
-                cursor,
+                &id.name.span,
                 current_file,
                 own_table,
                 merged,
                 engine,
                 workspace,
                 project,
-                member_index,
-                tokens,
-            );
-            if !cursor.goto_next_sibling() {
-                break;
+            ) {
+                tokens.push(token);
             }
         }
-        cursor.goto_parent();
+        Expr::Postfix(pfe) => {
+            if let PostfixInner::Call(call) = &pfe.inner {
+                // If the call target is itself a field expression, the field is a
+                // method reference.
+                if let Expr::Postfix(inner_pfe) = pfe.target.as_ref() {
+                    if let PostfixInner::Field(field) = &inner_pfe.inner {
+                        if let Some(token) = classify_member_identifier(
+                            &field.field.node,
+                            &field.field.span,
+                            source,
+                            member_index,
+                            true,
+                        ) {
+                            tokens.push(token);
+                        }
+                    }
+                }
+                if let Some(args) = &call.args {
+                    for (arg, _) in &args.items.items {
+                        if let Some(e) = arg.expr(cst) {
+                            visit_expr(
+                                cst, source, &e, current_file, own_table, merged, engine, workspace, project, member_index,
+                                tokens,
+                            );
+                        }
+                    }
+                }
+            } else if let PostfixInner::Field(field) = &pfe.inner {
+                if let Some(token) = classify_member_identifier(
+                    &field.field.node,
+                    &field.field.span,
+                    source,
+                    member_index,
+                    false,
+                ) {
+                    tokens.push(token);
+                }
+                visit_expr(
+                    cst, source, &pfe.target, current_file, own_table, merged, engine, workspace, project, member_index,
+                    tokens,
+                );
+            } else {
+                visit_expr(
+                    cst, source, &pfe.target, current_file, own_table, merged, engine, workspace, project, member_index,
+                    tokens,
+                );
+            }
+        }
+        Expr::Unary(u) => visit_expr(
+            cst, source, &u.operand, current_file, own_table, merged, engine, workspace, project, member_index,
+            tokens,
+        ),
+        Expr::Binary(b) => {
+            visit_expr(cst, source, &b.lhs, current_file, own_table, merged, engine, workspace, project, member_index, tokens);
+            visit_expr(cst, source, &b.rhs, current_file, own_table, merged, engine, workspace, project, member_index, tokens);
+        }
+        Expr::Conditional(c) => {
+            visit_expr(cst, source, &c.cond, current_file, own_table, merged, engine, workspace, project, member_index, tokens);
+            if let Some(t) = &c.then {
+                visit_expr(cst, source, t, current_file, own_table, merged, engine, workspace, project, member_index, tokens);
+            }
+            visit_expr(cst, source, &c.else_, current_file, own_table, merged, engine, workspace, project, member_index, tokens);
+        }
+        Expr::Assignment(a) => {
+            visit_expr(cst, source, &a.lhs, current_file, own_table, merged, engine, workspace, project, member_index, tokens);
+            visit_expr(cst, source, &a.rhs, current_file, own_table, merged, engine, workspace, project, member_index, tokens);
+        }
+        Expr::Comma(c) => {
+            for e in &c.exprs {
+                visit_expr(cst, source, e, current_file, own_table, merged, engine, workspace, project, member_index, tokens);
+            }
+        }
+        Expr::Paren(p) => visit_expr(
+            cst, source, &p.inner, current_file, own_table, merged, engine, workspace, project, member_index,
+            tokens,
+        ),
+        _ => {}
     }
 }
 
-fn node_text<'a>(node: tree_sitter::Node<'a>, source: &'a str) -> &'a str { &source[node.byte_range()] }
-
-fn node_range(node: tree_sitter::Node<'_>) -> Range {
-    let start = node.start_position();
-    let end = node.end_position();
-    Range::new(
-        tower_lsp_server::ls_types::Position::new(start.row as u32, start.column as u32),
-        tower_lsp_server::ls_types::Position::new(end.row as u32, end.column as u32),
-    )
-}
-
-// Identifier classifier; arity mirrors the token-walker context.
-#[allow(clippy::too_many_arguments)]
 fn classify_identifier(
-    node: tree_sitter::Node<'_>,
+    name: &str,
     source: &str,
+    span: &std::ops::Range<usize>,
     current_file: Option<&Path>,
     own_table: &symbols::SymbolTable,
     merged: Option<&MergedView>,
@@ -205,21 +730,23 @@ fn classify_identifier(
     workspace: &Workspace,
     project: &VirtualProject,
 ) -> Option<Token> {
-    let name = node_text(node, source);
     if name.is_empty() {
         return None;
     }
 
-    let (symbol, defining_path): (Option<&Symbol>, Option<&Path>) = if let Some(ms) = merged.and_then(|m| m.find(name))
-    {
+    let range = span_to_range(source, span.clone());
+    let len = range.end.character.saturating_sub(range.start.character)
+        + (range.end.line.saturating_sub(range.start.line)) * u32::MAX;
+
+    let (symbol, defining_path): (Option<&Symbol>, Option<&Path>) = if let Some(ms) = merged.and_then(|m| m.find(name)) {
         (Some(&ms.symbol), ms.provenance.origin())
     } else if let Some(sym) = own_table.find(name) {
         (Some(sym), current_file)
     } else if engine.find_syscall(name).is_some() {
         return Some(Token {
-            line: node.start_position().row as u32,
-            char: node.start_position().column as u32,
-            len: (node.end_byte() - node.start_byte()) as u32,
+            line: range.start.line,
+            char: range.start.character,
+            len,
             token_type: SemanticTokenType::FUNCTION,
             modifiers: vec![SemanticTokenModifier::new("engine")],
         });
@@ -240,46 +767,11 @@ fn classify_identifier(
     };
 
     Some(Token {
-        line: node.start_position().row as u32,
-        char: node.start_position().column as u32,
-        len: (node.end_byte() - node.start_byte()) as u32,
+        line: range.start.line,
+        char: range.start.character,
+        len,
         token_type,
         modifiers: classify_modifiers(symbol, origin),
-    })
-}
-
-fn classify_type_identifier(
-    node: tree_sitter::Node<'_>,
-    source: &str,
-    current_file: Option<&Path>,
-    own_table: &symbols::SymbolTable,
-    merged: Option<&MergedView>,
-    workspace: &Workspace,
-    project: &VirtualProject,
-) -> Option<Token> {
-    let name = node_text(node, source);
-    if name.is_empty() {
-        return None;
-    }
-
-    let defining_path: Option<&Path> = if let Some(ms) = merged.and_then(|m| m.find(name)) {
-        ms.provenance.origin()
-    } else if own_table.find(name).is_some() {
-        current_file
-    } else {
-        None
-    };
-
-    let origin = defining_path
-        .map(|p| classify_origin(p, workspace, project))
-        .unwrap_or(Origin::Engine);
-
-    Some(Token {
-        line: node.start_position().row as u32,
-        char: node.start_position().column as u32,
-        len: (node.end_byte() - node.start_byte()) as u32,
-        token_type: SemanticTokenType::TYPE,
-        modifiers: vec![origin_modifier(origin)],
     })
 }
 
@@ -401,30 +893,26 @@ fn is_class_member(sym: &Symbol) -> bool {
     sym.class_owner.is_some() && (sym.kind == SymbolKind::ClassField || sym.kind == SymbolKind::ClassMethod)
 }
 
-fn classify_member_identifier(node: tree_sitter::Node<'_>, source: &str, member_index: &MemberIndex) -> Option<Token> {
-    let name = node_text(node, source);
+fn classify_member_identifier(
+    name: &str,
+    span: &std::ops::Range<usize>,
+    source: &str,
+    member_index: &MemberIndex,
+    is_call: bool,
+) -> Option<Token> {
     if name.is_empty() {
         return None;
     }
     let origin = member_index.origin(name)?;
-
-    let field_expr = node.parent()?;
-    if field_expr.kind() != "field_expression" {
-        return None;
-    }
-    let is_call = field_expr
-        .parent()
-        .filter(|call| call.kind() == "call_expression")
-        .and_then(|call| call.child_by_field_name("function"))
-        .map(|func| func.id() == field_expr.id())
-        .unwrap_or(false);
-
+    let range = span_to_range(source, span.clone());
+    let len = range.end.character.saturating_sub(range.start.character)
+        + (range.end.line.saturating_sub(range.start.line)) * u32::MAX;
     let token_type = if is_call { SemanticTokenType::FUNCTION } else { SemanticTokenType::VARIABLE };
 
     Some(Token {
-        line: node.start_position().row as u32,
-        char: node.start_position().column as u32,
-        len: (node.end_byte() - node.start_byte()) as u32,
+        line: range.start.line,
+        char: range.start.character,
+        len,
         token_type,
         modifiers: vec![origin_modifier(origin), SemanticTokenModifier::new("member")],
     })
@@ -466,82 +954,15 @@ pub fn encode(tokens: &[Token]) -> Vec<SemanticToken> {
     data
 }
 
-/// Extract all identifier/type nodes from a source file, marking whether each
+/// Extract declared symbols from a source file, marking whether each
 /// is a declaration. Used internally and exposed for unit tests.
-pub fn extract_symbols(tree: &tree_sitter::Tree, source: &str) -> Vec<(String, SymbolKind, Range, bool)> {
-    let mut out = Vec::new();
-    let mut cursor = tree.root_node().walk();
-    collect_symbols(tree.root_node(), source, &mut cursor, &mut out);
-    out
-}
-
-fn collect_symbols(
-    node: tree_sitter::Node<'_>,
-    source: &str,
-    cursor: &mut tree_sitter::TreeCursor<'_>,
-    out: &mut Vec<(String, SymbolKind, Range, bool)>,
-) {
-    match node.kind() {
-        "function_definition" => {
-            if let Some(name_node) = node.child_by_field_name("declarator") {
-                // tree-sitter-xs grammar names the function identifier field "declarator"
-                // in function_definition; fall back to named child search if missing.
-                if name_node.kind() == "identifier" {
-                    out.push((
-                        node_text(name_node, source).to_string(),
-                        SymbolKind::Function,
-                        node_range(name_node),
-                        true,
-                    ));
-                }
-            }
-        }
-        "declaration" => {
-            if let Some(init) = node.child_by_field_name("declarator") {
-                // For variables the declarator is an init_declarator node; the
-                // actual identifier may sit deeper. We approximate with the
-                // first identifier child.
-                if let Some(id) = find_first_identifier(init, source) {
-                    out.push((id.0, SymbolKind::Variable, id.1, true));
-                }
-            }
-        }
-        "identifier" => {
-            out.push((node_text(node, source).to_string(), SymbolKind::Variable, node_range(node), false));
-        }
-        "_type_identifier" => {
-            out.push((
-                node_text(node, source).to_string(),
-                SymbolKind::Variable, // placeholder kind for type usage
-                node_range(node),
-                false,
-            ));
-        }
-        _ => {}
-    }
-
-    if cursor.goto_first_child() {
-        loop {
-            collect_symbols(cursor.node(), source, cursor, out);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-        cursor.goto_parent();
-    }
-}
-
-fn find_first_identifier(node: tree_sitter::Node<'_>, source: &str) -> Option<(String, Range)> {
-    if node.kind() == "identifier" {
-        return Some((node_text(node, source).to_string(), node_range(node)));
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(id) = find_first_identifier(child, source) {
-            return Some(id);
-        }
-    }
-    None
+pub fn extract_symbols(source: &str) -> Vec<(String, SymbolKind, Range, bool)> {
+    let table = symbols::build_symbol_table(source);
+    table
+        .symbols
+        .iter()
+        .map(|sym| (sym.name.clone(), sym.kind, sym.selection_range, true))
+        .collect()
 }
 
 #[cfg(test)]
@@ -551,9 +972,7 @@ mod tests {
     #[test]
     fn extract_symbols_flags_function_declaration() {
         let source = "void foo(int x) { int y = 1; }";
-        let tree = crate::parser::parse(source).expect("parse");
-        let symbols = extract_symbols(&tree, source);
-        // We expect at least the function name flagged as a declaration.
+        let symbols = extract_symbols(source);
         assert!(
             symbols
                 .iter()

@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 
-use tower_lsp_server::ls_types::{Position, Range};
+use tower_lsp_server::ls_types::Range;
 use xs_parser::ast::expr::{CallExpr, Expr, PostfixExpr, PostfixInner, StringLiteral};
 use xs_parser::ast::statement::{BlockItem, ForInit, Statement};
 use xs_parser::ast::type_table::TypeTable;
@@ -26,6 +26,8 @@ use xs_parser::ast::{
     StorageClassSpecifier, TopLevelItem, TranslationUnit, Type, TypeQualifier,
 };
 use xs_parser::parser::{Cst, NodeRef, Parser, Span};
+
+use crate::range::span_to_range;
 
 /// What kind of XS construct a symbol represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -862,21 +864,6 @@ fn default_expr_text(
     let (_, unparsed) = default?;
     let span = cst.span(unparsed.0);
     Some(source[span].to_string())
-}
-
-fn span_to_range(source: &str, span: Span) -> Range {
-    Range::new(
-        byte_offset_to_position(source, span.start),
-        byte_offset_to_position(source, span.end),
-    )
-}
-
-fn byte_offset_to_position(source: &str, offset: usize) -> Position {
-    let before = &source[..offset.min(source.len())];
-    let line = before.bytes().filter(|&b| b == b'\n').count() as u32;
-    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let character = (offset - line_start) as u32;
-    Position::new(line, character)
 }
 
 // ------------------------------------------------------------------
