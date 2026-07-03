@@ -1,0 +1,24 @@
+[package]
+name = "xs-parser"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "xs_parser"
+
+[dependencies]
+# Lelwel deps
+logos = "0.16"
+codespan-reporting = "0.13"
+
+[dev-dependencies]
+codespan-reporting = "0.13"
+
+[[example]]
+name = "test_parse"
+
+[[example]]
+name = "diag_cst"
+
+[build-dependencies]
+lelwel = "0.10"

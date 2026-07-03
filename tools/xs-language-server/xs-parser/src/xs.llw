@@ -1,0 +1,727 @@
+//==============================================================================
+// xs.llw - Proof-of-Concept Lelwel grammar for the XS scripting language.
+//
+// XS is the C-like scripting language used by Age of Mythology: Retold's
+// modding engine. This file is exploratory: it is a translation of the
+// existing tree-sitter grammar (tools/xs-language-server/tree-sitter-xs/
+// src/grammar.json) into lelwel's LL(1) + extensions format.
+//
+// To try it: `cargo install --features=cli,lsp lelwel` and open this .llw
+// in Neovim with the nvim-lelwel plugin. The language server will surface
+// any conflicts you need to resolve.
+//
+// Limitations vs the tree-sitter version:
+//   * No semantic actions. The C.llw example uses predicates to disambiguate
+//     "type vs expression" (the C typedef problem). We use ordered choice
+//     `... / ...` instead, which is coarser but does not require a
+//     `ParserCallbacks` impl.
+//   * No preprocessor. XS uses both `include "path.xs";` (lelwel-friendly)
+//     and the C-style `#include`/`#ifdef`/`#define` (lexed away). The
+//     latter would need a separate preprocessor pass, like lelwel's C
+//     example does.
+//   * Lambda capture lists are not modeled (XS lambdas are always `[]`
+//     in practice; see bo_system_internal.xs).
+//   * No `do { } while()`, no `goto`/labels (XS does not use them in the
+//     mod scripts we care about).
+//   * No `typedef` (XS has no typedef).
+//   * No pointer declarators (`*p`) (XS has no pointers).
+//   * Function-pointer-typed *variable* declarations are supported
+//     (`void(int) callback = ...;`), but only when an initializer is
+//     present and the type's parameter list is non-empty. Bare
+//     `void(int) x;` (no initializer, empty params) is ambiguous with
+//     a function forward declaration and would need semantic action
+//     to disambiguate.
+//==============================================================================
+
+//==============================================================================
+// Tokens
+//
+// Token regexes themselves live in the generated `lexer.rs` (lelwel emits
+// a Logos-based skeleton). Here we only declare token names and display
+// symbols. Token names must start with an UPPERCASE letter, and may be
+// referenced in grammar rules by either their name (e.g. `Int`) or their
+// quoted symbol (e.g. `'int'`).
+//==============================================================================
+
+// --- Primitive type keywords (also used as `type_specifier` first sets) ---
+token Void='void' Int='int' Bool='bool' Float='float' StringKw='string' Vector='vector';
+
+// --- Storage-class / type qualifiers ---
+token Extern='extern' Static='static' Mutable='mutable' Const='const' Ref='ref';
+
+// --- Control flow ---
+token If='if' While='while' For='for' Return='return'
+      Break='break' Continue='continue'
+      Switch='switch' Case='case' DefaultKw='default';
+
+// --- Rule-block keywords (XS-specific) ---
+// `rule name { ... }` is the per-tick entry point. Modifiers like
+// `minInterval 15`, `active`, `inactive` follow the name on their own lines.
+token Rule='rule'
+      MinInterval='minInterval' MaxInterval='maxInterval'
+      MinIntervalMS='minIntervalMS' MaxIntervalMS='maxIntervalMS'
+      Priority='priority' HighFrequency='highFrequency'
+      RunImmediately='runImmediately' Group='group'
+      Active='active' Inactive='inactive';
+
+// --- Class / object ---
+token Class='class' New='new';
+
+// --- Preprocessor-ish ---
+token Include='include';
+token Hash='#';
+// Preprocessor directive keywords. Note: the symbols 'else' and 'if'
+// overlap with statement-level keywords; the grammar disambiguates
+// them by context (preproc rules require '#' first).
+token PreprocDefine='define' PreprocElif='elif' PreprocElse='else' PreprocEndif='endif'
+      PreprocDefined='defined';
+
+// --- Literals & identifiers ---
+// Engine constants like `cMyID` and function names like `kbUnitGetPlanID`
+// are just regular Identifiers; XS has no special token class for them.
+token Identifier='<identifier>'
+      IntConst='<integer literal>' FloatConst='<floating literal>' StringLiteral='<string literal>'
+      TrueKw='true' FalseKw='false' NullKw='null'
+      TrueUpper='TRUE' FalseUpper='FALSE' NullUpper='NULL' Nullptr='nullptr';
+
+// --- Punctuation ---
+token LPar='(' RPar=')' LBrace='{' RBrace='}' LBrak='[' RBrak=']'
+      Comma=',' Semi=';' Colon=':' Dot='.' Arrow='->' Question='?';
+
+// --- Assignment operators (right-associative chain) ---
+token Assign='=' PlusAssign='+=' MinusAssign='-=' StarAssign='*='
+      SlashAssign='/=' PercentAssign='%=';
+
+// --- Binary / unary operators ---
+// (Bitwise `&` and `^` are not part of XS in the scripts we model; the
+//  grammar leaves them out entirely to avoid W002 unused token
+//  warnings. `~` IS used as a unary prefix (bitwise NOT). If you need
+//  bitwise And/Or, add the tokens back and extend the binary_expr
+//  rule.)
+token Plus='+' Minus='-' Star='*' Slash='/' Percent='%'
+      Eq='==' Neq='!=' Lt='<' Gt='>' Leq='<=' Geq='>='
+      AndAnd='&&' OrOr='||' Tilde='~' Excl='!';
+
+// --- Update (increment / decrement) ---
+token PlusPlus='++' MinusMinus='--';
+
+// --- Skip tokens ---
+token LineComment BlockComment Whitespace;
+
+skip LineComment BlockComment Whitespace;
+
+//==============================================================================
+// Start rule
+//==============================================================================
+start translation_unit;
+
+
+//==============================================================================
+// Top-level
+//==============================================================================
+
+/// A translation unit is a sequence of top-level items. Each item is one
+/// of: class specifier, rule block, function definition, function forward
+/// declaration, plain declaration, or a free statement (allowed at file
+/// scope for top-level rule bodies that consist of a single statement).
+translation_unit: top_level_item*;
+
+/// Top-level item disambiguation. We use ordered choice so that the
+/// parser commits to the first branch whose syntax matches. This is
+/// how we resolve the classical "type vs expression" ambiguity (the
+/// C typedef problem) without semantic actions.
+///
+/// The first three branches start with a distinctive keyword and are
+/// fully LL(1). The remaining branches overlap in their first sets
+/// (any of them can start with a primitive type keyword), so we
+/// order them: try `function_or_forward_declaration` first, then
+/// `declaration`, and finally fall back to `statement`.
+top_level_item^:
+  rule_definition
+/ include_directive
+/ preproc_if
+/ preproc_elif
+/ preproc_else
+/ preproc_endif
+/ preproc_def
+/ function_definition_rule
+/ forward_declaration_rule
+/ declaration
+/ statement
+/ class_specifier
+;
+
+
+//==============================================================================
+// Include directive
+//==============================================================================
+
+/// `include "path/to/file.xs";` — the XS-native way to pull in another
+/// script. This is a real XS language feature, not a C preprocessor
+/// directive. We model it as a top-level item only; in-function
+/// includes are not supported (the engine does not allow them anyway).
+include_directive: 'include' StringLiteral ';';
+
+
+//==============================================================================
+// C preprocessor (Limitation 5 fix — Path 2 defensive)
+//
+// 116 retail + mod files use `#if`/`#elif`/`#else`/`#endif` (mostly for
+// difficulty-based conditional compilation and include guards). The
+// grammar-level approach (matching tree-sitter) preserves all branches in
+// the AST; the LSP does NOT evaluate conditions, just keeps every code
+// path so symbol extraction sees symbols from every branch the user might
+// edit.
+//
+// All forms start with `#` at the start of a line; this is unambiguous
+// since no other `top_level_item` alternative starts with `Hash`.
+//==============================================================================
+
+preproc_def:    '#' PreprocDefine Identifier @preproc_def;
+preproc_if:     '#' 'if' preproc_expr @preproc_if;
+preproc_elif:   '#' PreprocElif preproc_expr @preproc_elif;
+preproc_else:   '#' PreprocElse @preproc_else;
+preproc_endif:  '#' PreprocEndif @preproc_endif;
+
+/// A preprocessor expression. Supports the C-style `defined(NAME)`
+/// predicate (used in include guards) plus the usual binary operators,
+/// parenthesization, and engine constants (treated as `Identifier`s).
+///
+/// Example: `defined(BIOME_INCLUDE) == false`
+preproc_expr:
+  preproc_or_expr
+;
+preproc_or_expr:
+  preproc_and_expr ('||' preproc_and_expr)*
+;
+preproc_and_expr:
+  preproc_eq_expr ('&&' preproc_eq_expr)*
+;
+preproc_eq_expr:
+  preproc_rel_expr (('==' | '!=') preproc_rel_expr)*
+;
+preproc_rel_expr:
+  preproc_add_expr (('<' | '>' | '<=' | '>=') preproc_add_expr)*
+;
+preproc_add_expr:
+  preproc_mul_expr (?t ('+' | '-') preproc_mul_expr)*
+;
+preproc_mul_expr:
+  preproc_unary_expr (?t ('*' | '/' | '%') preproc_unary_expr)*
+;
+preproc_unary_expr:
+  '!' preproc_unary_expr
+| preproc_primary
+;
+preproc_primary:
+  PreprocDefined '(' Identifier ')' @preproc_defined
+| '(' preproc_expr ')'
+| IntConst
+| FloatConst
+| Identifier
+;
+
+
+//==============================================================================
+// Class specifier
+//==============================================================================
+
+/// `class Name { member* }` — XS classes are record-like: they hold
+/// fields and method definitions. Class declarations at top level act
+/// as type definitions; methods inside a class have a `class_owner`
+/// context (handled by symbol extraction, not the grammar).
+///
+/// The trailing `;` is required (the previous optional `;` triggered
+/// an E014 LL(1) conflict in option because Semi appeared in the
+/// FOLLOW set; the engine tolerates the no-semicolon form only in
+/// specific ports we don't need to model).
+// MIGRATION 2026-07-03: trailing `;` removed — real XS does not terminate
+// class definitions with `;` (see openspec/changes/2026-07-03-fix-class-
+// specifier-no-trailing-semi/proposal.md for the survey evidence). The
+// PoC grammar previously required `;` and produced 149 spurious "invalid
+// syntax, expected: ';'" diagnostics on `bo_system_internal.xs` alone.
+class_specifier: 'class' Identifier '{' class_member* '}';
+
+/// One member of a class. Members can be field declarations (with an
+/// initializer), function forward declarations, or function definitions
+/// (a.k.a. methods). The disambiguator is the same as at the top level:
+/// the first token after the declaration specifiers.
+class_member^:
+  function_definition_rule
+/ forward_declaration_rule
+/ field_declaration
+;
+
+/// `int x = 0;` or `int[] mPlans = default;` — a class field. Unlike
+/// top-level declarations, fields may omit the initializer (XS allows
+/// `int x;` inside a class body, although at file scope the
+/// `int x = ...;` form is required).
+field_declaration: declaration_specifiers declarator ['=' expression] ';';
+
+
+//==============================================================================
+// Rule definition
+//==============================================================================
+
+/// `rule name modifier* { body }` — the XS per-tick entry point.
+/// Modifiers are `minInterval N`, `maxInterval N`, `minIntervalMS N`,
+/// `maxIntervalMS N`, `priority N`, `highFrequency`, `active`,
+/// `inactive`, `runImmediately`, or `group name`. Each appears on its
+/// own line, but the grammar doesn't enforce newlines (lexical
+/// whitespace is already skipped).
+rule_definition:
+  'rule' Identifier rule_modifier* compound_statement
+;
+
+/// One rule-block modifier. The grammar is open-ended: any number of
+/// these may follow the rule name, in any order. In practice the
+/// shipped scripts always write `minInterval N\nactive\n{...}` or
+/// `minInterval N\ninactive\n{...}`.
+rule_modifier^:
+  'minInterval' IntConst
+| 'maxInterval' IntConst
+| 'minIntervalMS' IntConst
+| 'maxIntervalMS' IntConst
+| 'priority' IntConst
+| 'highFrequency'
+| 'active'
+| 'inactive'
+| 'runImmediately'
+| 'group' Identifier
+;
+
+
+//==============================================================================
+// Function or forward declaration
+//
+// This is the section that fixes the tree-sitter ERROR-node workaround
+// in `src/symbols.rs:159-162`. The tree-sitter grammar has no dedicated
+// rule for `void bar(int x = -1);` (no body), so the existing LSP has
+// to recover forward declarations from ERROR nodes. Here we make them
+// first-class: the same header `declaration_specifiers declarator` is
+// followed by one of three suffixes (`{ body }`, `= init ;`, or `;`),
+// and each suffix starts with a distinct token, making this LL(1).
+//==============================================================================
+
+/// The combined rule for `void foo() {}` (definition),
+/// `void foo();` (forward decl), and `void foo = expr;` (rare:
+/// function-pointer-typed variable). The disambiguator is the first
+/// token after the declarator.
+///
+/// Note: we do NOT attempt to parse `void foo = ...;` (no parentheses)
+/// as a function pointer variable because the LL(1) check would
+/// conflict with the forward-declaration case `void foo;`. Real XS
+/// code always uses the parenthesized form `void(int) callback` for
+/// function-pointer-typed variables.
+// `function_or_forward_declaration` was split into `function_definition_rule`
+// and `forward_declaration_rule` (defined near `block_item^`) to avoid
+// E028 nested-ordered-choice errors when this pattern appears inside
+// another ordered-choice rule. The definitions above are kept removed;
+// the helper rules live near `block_item^` so all block-related rules
+// are colocated.
+
+
+//==============================================================================
+// Declaration specifiers and declarators
+//==============================================================================
+
+/// A sequence of storage-class specifiers, type qualifiers, and a
+/// single type specifier. The type specifier is mandatory; modifiers
+/// can appear in any order before and after the type. In XS, only
+/// `const`, `extern`, `static`, `mutable`, and `ref` are valid
+/// modifiers (no `volatile`, `restrict`, `_Atomic`, etc.).
+declaration_specifiers:
+  (storage_class_specifier | type_qualifier)*
+  type_specifier
+  (storage_class_specifier | type_qualifier)*
+;
+
+/// A storage-class specifier. In XS, only `extern`, `static`, and
+/// `mutable` are recognized.
+storage_class_specifier: 'extern' | 'static' | 'mutable';
+
+/// A type qualifier. XS has only `const` and `ref` (the latter is
+/// for reference parameters, e.g. `ref int x`).
+type_qualifier: 'const' | 'ref';
+
+/// A type specifier. This is the canonical "is this a type?" decision
+/// point — which is exactly the disambiguation we cannot make in LL(1)
+/// without symbol-table information. We accept any Identifier as a
+/// user-defined type. The conflict with expressions is resolved at the
+/// call site (the `top_level_item` and `block_item` rules) via ordered
+/// A type specifier as it appears in a declaration.
+///
+/// POCTYPE-LIMITATION: function-pointer types (`void(int)`) are NOT
+/// type_specifier alternatives in this PoC. Function-pointer types
+/// only appear as parameter types in `parameter_declaration` (see
+/// `function_pointer_type` below). The form `void(int) callback = ...;`
+/// for declaring a function-pointer-typed variable is not modeled;
+/// users must wrap such declarations in a class or typedef-equivalent.
+type_specifier^:
+  array_or_primitive_type
+| Identifier @type_identifier
+;
+
+/// Either an array type (`int[]`) or a bare primitive type (`int`).
+/// Combined into a single alternative because both start with the
+/// primitive type keyword tokens.
+array_or_primitive_type^: primitive_type ['[' ']'];
+
+/// A primitive type token. Note that `string` is a keyword but is also
+/// a common user-identifier; the lexer should prefer the keyword match
+/// at the longest-prefix level.
+primitive_type: 'void' | 'int' | 'bool' | 'float' | 'string' | 'vector';
+
+// `array_type` is no longer used because `array_or_primitive_type`
+// now inlines the optional `[]` suffix. The rule is kept here as a
+// comment for reference; uncomment if you need it elsewhere.
+// array_type: primitive_type '[' ']';
+
+// `function_pointer_type` is currently unused in the PoC because
+// parameter_declaration was simplified. The rule is kept here as a
+// comment for reference; uncomment and wire up if function-pointer
+// parameters are needed.
+// function_pointer_type: (primitive_type | Identifier) '(' [parameter_list] ')';
+
+/// A declarator. XS has no pointer declarators, so this is just a
+/// `direct_declarator`, plus the function-pointer-typed form for
+/// variable declarations like `void() gFoo` and
+/// `bool(int, int, int) gBar`.
+///
+/// The function-pointer form is tried FIRST via ordered choice so
+/// that `void(int) gFoo = ...;` parses as a function-pointer-typed
+/// variable declaration rather than as a (silly) call expression.
+/// For `name(args)` (a regular function-call-style declarator), the
+/// function-pointer form fails on the missing identifier after `)`
+/// and the parser falls back to `direct_declarator`.
+///
+/// LIMITATION: when a user type name appears twice in a row
+/// (e.g. `BOSystem myBOSystem = ...;` or `BOSystem myBOSystem;`),
+/// the parser cannot tell which is the type and which is the name
+/// without symbol-table knowledge. The function-pointer form is
+/// tried first, then the bare-identifier form; if both match, the
+/// first one wins. For `BOSystem myBOSystem;` the parser
+/// incorrectly treats `BOSystem` as the whole declarator and
+/// reports `myBOSystem;` as the next statement. A real implementation
+/// would use semantic actions (`ParserCallbacks::predicate_*`) to
+/// consult the symbol table here.
+declarator^: direct_declarator;
+
+/// A direct declarator: an identifier, optionally with a parameter
+/// list (for functions) or a parenthesized declarator (for
+/// function-pointer-typed parameters, see `parameter_declaration`).
+///
+/// The two Identifier-prefixed forms are grouped inside `( ... )` so
+/// the parent alternation sees them as one alternative starting with
+/// Identifier. Inside the group we use `|` (alternation, not ordered
+/// choice) because both inner alternatives consume the Identifier and
+/// then decide based on whether `(` follows.
+direct_declarator^:
+  Identifier
+    (
+      '(' [parameter_list] ')' @function_declarator
+    | @identifier_declarator
+    )
+| '(' declarator ')' @paren_declarator
+;
+
+
+//==============================================================================
+// Parameter lists
+//==============================================================================
+
+/// A parameter list: `()` or `(p1, p2, ..., pN)`. XS supports default
+/// values per parameter.
+parameter_list: parameter (',' parameter)* ;
+
+/// One parameter. XS supports default values and the function-pointer
+/// type pattern (`void(int) callback`).
+parameter: parameter_declaration;
+
+/// A single parameter declaration.
+///
+/// The tricky case is the function-pointer parameter, e.g.
+/// `void(int) callback` or `bool(ref StrategyData) mUpdateFunc`.
+/// Both forms start with a type specifier, but the function-pointer
+/// form is followed by `(` (the parameter list of the function type)
+/// while the regular form is followed by an `Identifier` (the
+/// parameter name). That makes the disambiguation LL(1).
+///
+/// The leading `[type_qualifier]` was removed — it triggered an E014
+/// LL(1) conflict because `const`/`ref` can also start the inner
+/// declaration_specifiers (which already handles type qualifiers via
+/// its own `(storage_class | type_qualifier)*` chain).
+parameter_declaration:
+  declaration_specifiers
+  (
+    '(' [parameter_list] ')' Identifier ['=' expression] @function_pointer_param
+  | Identifier ['=' expression] @regular_param
+  )
+;
+
+
+//==============================================================================
+// Declaration
+//==============================================================================
+
+/// A top-level (or block-scope) variable declaration. Every XS
+/// variable is initialized at the point of declaration — `int x;`
+/// with no initializer is invalid at the top level. (Class fields
+/// are a separate rule above.)
+///
+/// MIGRATION:
+///   * Limitation 7 fix: multi-declarator lists are now supported
+///     (`int x, y, z;`) via the `init_declarator_list` rule.
+///   * Limitation 1 (function-pointer-typed variables) is NOT
+///     yet supported here. The cleanest fix requires either
+///     ParserCallbacks predicates (Limitation 6's TypeTable) or
+///     a lexer-level function-pointer-type token. Deferred to a
+///     follow-up PR — for now, lambdas must be assigned via:
+///       1. `void gFoo = lambda;` (PoC's behavior; the lambda
+///          is implicitly coerced to a function pointer)
+///       2. Multi-step assignment (declare then assign)
+declaration:
+  declaration_specifiers init_declarator_list ';'
+;
+
+/// A list of init declarators, separated by commas. Supports both
+/// the simple form (`int x, y, z;`) and the initializer form
+/// (`int x = 1, y = 2, z = 3;`).
+///
+/// Limitation 7 fix: same structural pattern as the PoC's
+/// already-working `parameter_list` and `argument_list`. The
+/// FOLLOW set is `;` (never `,`), so no E013 conflict.
+init_declarator_list: init_declarator (',' init_declarator)* ;
+
+/// A single init declarator: a declarator with an optional
+/// initializer.
+init_declarator: declarator ['=' expression] ;
+
+
+//==============================================================================
+// Statements
+//==============================================================================
+
+/// A statement. Each alternative starts with a distinct keyword (or
+/// the leading `{` of a compound, or the start of an expression), so
+/// this is a flat LL(1) alternation.
+///
+/// KNOWN LIMITATION: the classic if/else dangling-else disambiguation
+/// is not implemented. The `'else' branch` after an `if` body is NOT
+/// parsed here; users writing `if (a) b; else c;` will get the else
+/// body consumed by whatever follows the if (typically the next
+/// statement, which then fails to parse). To resolve dangling else
+/// without violating lelwel's no-callback-ParserCallbacks restriction
+/// would require either:
+///   * the built-in `?t` predicate (built-in but not in the user's
+///     "use only `/`, `|`, `~`" constraint), or
+///   * the full matched/unmatched statement split (per the C standard
+///     6.8.4) with a separate `unmatched_statement` rule for if-bodies.
+/// Both are deferred to the next iteration. The PoC grammar parses
+/// `if (cond) body` correctly; else-less forms are fine. For full
+/// correctness on `if/else`, the existing tree-sitter grammar (the
+/// LSP's primary parser) is the source of truth.
+statement^:
+  'if' parenthesized_expression statement @if_statement
+| 'while' parenthesized_expression statement @while_statement
+| 'for' '(' for_init ';' [expression] ';' [expression] ')' statement @for_statement
+| 'switch' parenthesized_expression '{' switch_case* '}' @switch_statement
+| 'return' [expression] ';' @return_statement
+| 'break' ';' @break_statement
+| 'continue' ';' @continue_statement
+| compound_statement
+| expression_statement
+;
+
+/// A parenthesized expression. Kept as a helper because `if`, `while`,
+/// `for`, and `switch` all share the same `(expr)` shape.
+parenthesized_expression: '(' expression ')' ;
+
+/// A for-loop initializer. XS allows either a declaration
+/// (`int i = 0`) or an expression (`i = 0`). Neither form includes
+/// the trailing `;` — that belongs to the `for` rule above.
+///
+/// MIGRATION: Limitation 2A (the declaration form) requires the
+/// same grammar restructure as Limitation 1A. Both need
+/// ParserCallbacks predicates (Limitation 6's TypeTable) for
+/// clean LL(1) disambiguation; deferred to a follow-up PR.
+/// For now, the PoC's `for (i = 0; ...)` form is used; users
+/// must declare `int i;` before the loop.
+for_init: [expression] ;
+
+/// `{ block_item* }` — a compound statement, used as the body of
+/// functions, rules, if/while/for statements, switch cases, and
+/// class members.
+compound_statement: '{' block_item* '}' ;
+
+/// One item in a block: either a function def, a declaration, or a
+/// statement.
+///
+/// All alternatives here share the same first set (any
+/// declaration_specifier token, especially Identifier), so plain
+/// alternation triggers E011 LL(1) conflicts. The grammar uses a
+/// semantic predicate (`?1`) on the declaration branch to suppress
+/// the LL(1) check and steer the parser: the predicate consults
+/// `TypeTable` and commits to the declaration form only when the
+/// leading token is a known type or declaration qualifier. Otherwise
+/// the parser falls through to `statement`.
+block_item^:
+  ?1 block_declaration_or_definition
+| statement
+;
+
+/// A block-level declaration or nested function definition.
+///
+/// When the leading token is a known type or qualifier, the parser
+/// commits to this rule. It parses the common prefix
+/// `declaration_specifiers init_declarator_list` and then dispatches
+/// on the token that follows the first declarator: a `{` starts a
+/// nested function definition, otherwise it is a declaration. The
+/// alternatives have disjoint first tokens (`{` vs `;`) so plain
+/// alternation is sufficient and avoids lelwel's nested-ordered-
+/// choice restriction.
+block_declaration_or_definition:
+  declaration_specifiers init_declarator_list
+  ('{' block_item* '}' @function_definition
+  | ';' @declaration
+  )
+;
+
+function_definition_rule: declaration_specifiers declarator '{' block_item* '}' @function_definition;
+forward_declaration_rule: declaration_specifiers declarator ';' @forward_declaration;
+
+/// An expression statement: an optional expression followed by `;`.
+/// The expression is optional to allow empty statements like `;`.
+expression_statement: [expression] ';' ;
+
+
+//==============================================================================
+// Switch / case
+//==============================================================================
+
+/// `switch (expr) { case val: ... default: ... }` — a switch
+/// statement. Each case clause is a labeled block. The `case` and
+/// `default` keywords are distinct at the lexical level, so the
+/// choice inside `switch_case` is LL(1).
+switch_case^:
+  'case' expression ':' compound_statement
+| 'default' ':' compound_statement
+;
+
+
+//==============================================================================
+// Expressions (Pratt-style direct left recursion)
+//
+// XS operator precedence (loosest to tightest):
+//   1. ||  (logical or)
+//   2. &&  (logical and)
+//   3. == !=                  (equality)
+//   4. <  >  <=  >=           (relational)
+//   5. +  -                   (additive)
+//   6. *  /  %                (multiplicative)
+//   7. -  !  ~                (unary prefix)
+//   8. ++ --                  (prefix increment / decrement)
+//   9. ()  []  .  ++ --       (postfix)
+//
+// `=` and the compound assignments are right-associative, so they
+// appear as a separate optional suffix on a `conditional_expr`
+// (lelwel's "node creation with marker" idiom).
+//==============================================================================
+
+/// A comma expression. XS inherits C's comma operator; the grammar
+/// keeps it as a top-level wrap so that `for (i = 0, j = 0; ...)`
+/// parses correctly.
+///
+/// POCTYPE-LIMITATION: chained comma expressions (`a, b, c`) are
+/// not supported in this PoC. Both forms (direct-left-recursion and
+/// Kleene-star) hit LL(1) conflicts (E012/E013). Users should use
+/// semicolons to separate statements instead. This loses support
+/// for `for (i = 0, j = 0; ...)` syntax.
+expression^: comma_expr;
+comma_expr: assignment_expr ;
+
+/// Assignment: a left-hand-side expression followed by an optional
+/// `= rhs` (or `+=` etc.). The `>` at the end is lelwel's "node
+/// creation" trick: if the optional assignment is taken, the parent
+/// rule's node is replaced with an `assignment_expr` node. If the
+/// optional is not taken, the node stays as a `conditional_expr` or
+/// whatever the inner rule produced. This avoids the
+/// "extra-wrapping" problem of `bin_expr` with `=` appended.
+assignment_expr^:
+  conditional_expr
+  [('=' | '+=' | '-=' | '*=' | '/=' | '%=') assignment_expr >]
+;
+
+/// Conditional (ternary) expression: `cond ? then : else`. The middle
+/// operand may be omitted (GNU extension), e.g. `x ?: y`.
+conditional_expr^:
+  binary_expr ['?' [expression] ':' conditional_expr >]
+;
+
+/// Binary expressions, ordered by precedence (lowest to highest).
+/// The order in this rule is significant: lelwel parses each branch
+/// in order and uses the position to assign binding power. Top
+/// branches bind loosest.
+binary_expr:
+  binary_expr '||' binary_expr @logical_or_expr
+| binary_expr '&&' binary_expr @logical_and_expr
+| binary_expr ('==' | '!=') binary_expr @equality_expr
+| binary_expr ('<' | '>' | '<=' | '>=') binary_expr @relational_expr
+| ?t binary_expr ('+' | '-') binary_expr @additive_expr
+| ?t binary_expr ('*' | '/' | '%') binary_expr @multiplicative_expr
+| unary_expr
+;
+
+/// A unary expression: a prefix operator applied to a unary or
+/// postfix expression. XS has `-`, `!`, `~`, `++`, `--` as unary
+/// prefix ops.
+unary_expr:
+  ('++' | '--') unary_expr @pre_inc_or_dec_expr
+| ('-' | '!' | '~') unary_expr @unary_op_expr
+| postfix_expr
+;
+
+/// A postfix expression: a primary expression optionally followed
+/// by `.field`, `[index]`, `(args)`, `++`, or `--`. Lambdas are
+/// NOT postfix — they are primaries (they start with `[`, not with
+/// a primary followed by `[`).
+postfix_expr:
+  postfix_expr '.' Identifier @field_expr
+| ?t postfix_expr '[' expression ']' @subscript_expr
+| ?t postfix_expr '(' [argument_list] ')' @call_expr
+| ?t postfix_expr '++' @post_inc_expr
+| ?t postfix_expr '--' @post_dec_expr
+| primary_expr
+;
+
+/// A primary expression: literals, identifiers, parenthesized
+/// expressions, `new`, lambdas, and the `default` placeholder.
+/// Lambdas come first because they start with `[` (an `LBrak`
+/// token), which is a unique first token and would otherwise
+/// collide with the subscript path above.
+primary_expr^:
+  '[' ']' '(' [parameter_list] ')' ['->' type_specifier] compound_statement @lambda_expr
+| 'new' type_specifier '(' [argument_list] ')' @new_expr
+| 'vector' '(' [argument_list] ')' @vector_literal
+| '(' expression ')' @paren_expr
+| 'default' @default_expr
+| IntConst @int_literal
+| FloatConst @float_literal
+| StringLiteral @string_literal
+| 'true' | 'TRUE' @true_literal
+| 'false' | 'FALSE' @false_literal
+| 'null' | 'NULL' | 'nullptr' @null_literal
+| Identifier @identifier_expr
+;
+
+/// A comma-separated list of call arguments. Like parameter lists,
+/// arguments may include default values.
+argument_list: argument (',' argument)* ;
+
+/// A single argument to a function call.
+argument: expression ;
+
+
+//==============================================================================
+// End of xs.llw
+//==============================================================================
