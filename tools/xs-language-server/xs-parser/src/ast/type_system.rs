@@ -1,4 +1,4 @@
-use crate::ast::spanned::Spanned;
+use crate::ast::spanned::{Parenthesized, Spanned};
 use crate::parser::{Cst, Node, NodeRef, Rule, Span};
 use crate::lexer::Token;
 
@@ -63,12 +63,25 @@ impl Type {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionPointerType {
+    /// Return type of the function-pointer signature.
+    pub ret: Box<TypeSpecifier>,
+    /// Parameter types of the function-pointer signature (names are
+    /// not required in XS function-pointer signatures).
+    pub params: Parenthesized<Vec<TypeSpecifier>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeSpecifier {
     pub ty: Type,
     /// `true` when this type was written with a trailing `[]` (e.g.
     /// `int[]`). The array decoration is stored on the specifier rather
     /// than folded into `Type` to keep the enum simple.
     pub is_array: bool,
+    /// If present, this specifier denotes a function-pointer type;
+    /// `ty` is the return type and `params` holds the parameter types.
+    pub fn_pointer: Option<FunctionPointerType>,
     pub span: Span,
 }
 
@@ -91,6 +104,7 @@ impl TypeSpecifier {
             return Some(Self {
                 ty: Type::Class(Identifier::new(text.to_string(), span.clone())),
                 is_array: false,
+                fn_pointer: None,
                 span,
             });
         }
@@ -103,6 +117,7 @@ impl TypeSpecifier {
                 return Some(Self {
                     ty: Type::Class(Identifier::new(text.to_string(), span.clone())),
                     is_array: false,
+                    fn_pointer: None,
                     span,
                 });
             }
@@ -142,6 +157,7 @@ impl TypeSpecifier {
         Some(Self {
             ty: Type::from_token_by_text(text)?,
             is_array: false,
+            fn_pointer: None,
             span: token,
         })
     }
@@ -166,6 +182,7 @@ impl TypeSpecifier {
         Some(Self {
             ty: ty?,
             is_array,
+            fn_pointer: None,
             span: cst.span(node),
         })
     }

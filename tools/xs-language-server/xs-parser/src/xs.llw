@@ -350,13 +350,6 @@ type_qualifier: 'const' | 'ref';
 /// user-defined type. The conflict with expressions is resolved at the
 /// call site (the `top_level_item` and `block_item` rules) via ordered
 /// A type specifier as it appears in a declaration.
-///
-/// POCTYPE-LIMITATION: function-pointer types (`void(int)`) are NOT
-/// type_specifier alternatives in this PoC. Function-pointer types
-/// only appear as parameter types in `parameter_declaration` (see
-/// `function_pointer_type` below). The form `void(int) callback = ...;`
-/// for declaring a function-pointer-typed variable is not modeled;
-/// users must wrap such declarations in a class or typedef-equivalent.
 type_specifier^:
   array_or_primitive_type
 | Identifier @type_identifier
@@ -455,7 +448,7 @@ parameter_declaration:
   declaration_specifiers
   (
     '(' [parameter_list] ')' Identifier ['=' expression] @function_pointer_param
-  | Identifier ['=' expression] @regular_param
+  | [Identifier] ['=' expression] @regular_param
   )
 ;
 
@@ -480,8 +473,19 @@ parameter_declaration:
 ///       1. `void gFoo = lambda;` (PoC's behavior; the lambda
 ///          is implicitly coerced to a function pointer)
 ///       2. Multi-step assignment (declare then assign)
+/// A function-pointer-typed variable declaration such as
+/// `void(int) cb = nullptr;` or `bool(int, int) gBar;`.
+/// This is handled as a dedicated top-level/block rule instead of a
+/// general type_specifier alternative because in parameter contexts
+/// `void(int)` must parse as the return type of a function-pointer
+/// parameter, not as the type of a regular parameter.
+function_pointer_declaration:
+  primitive_type '(' [parameter_list] ')' Identifier ['=' expression] ';' @function_pointer_declaration
+;
+
 declaration:
-  declaration_specifiers init_declarator_list ';'
+  ?1 function_pointer_declaration
+| declaration_specifiers init_declarator_list ';'
 ;
 
 /// A list of init declarators, separated by commas. Supports both
@@ -574,7 +578,8 @@ block_item^:
 /// alternation is sufficient and avoids lelwel's nested-ordered-
 /// choice restriction.
 block_declaration_or_definition:
-  declaration_specifiers init_declarator_list
+  ?1 function_pointer_declaration
+| declaration_specifiers init_declarator_list
   ('{' block_item* '}' @function_definition
   | ';' @declaration
   )

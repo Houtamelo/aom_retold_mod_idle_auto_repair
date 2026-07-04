@@ -1818,7 +1818,7 @@ mod tests {
                 assert_eq!(l.params.inner.items.items.len(), 1);
                 match &l.params.inner.items.items[0].0.inner {
                     crate::ast::parameter::ParameterInner::RegularParam(rp) => {
-                        assert_eq!(rp.name.node, "x");
+                        assert_eq!(rp.name.as_ref().expect("param name").node, "x");
                     }
                     other => panic!("expected RegularParam, got {:?}", other),
                 }

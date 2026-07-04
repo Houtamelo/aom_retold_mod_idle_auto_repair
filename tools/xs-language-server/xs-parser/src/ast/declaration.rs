@@ -1,6 +1,6 @@
 use crate::ast::cst_helpers::{child_by_rule, child_by_token, children_by_rule, only_child};
 use crate::ast::spanned::{CommaSeparatedList, Parenthesized};
-use crate::ast::type_system::{DeclarationSpecifiers, Identifier, TypeSpecifier};
+use crate::ast::type_system::{DeclarationSpecifiers, FunctionPointerType, Identifier, TypeSpecifier};
 use crate::parser::{Cst, Node, NodeRef, Rule, Span};
 use crate::lexer::Token;
 use crate::ast::expr::Expr;
@@ -20,6 +20,14 @@ pub struct Declaration {
 
 impl Declaration {
     pub fn from_cst(cst: &Cst, node: NodeRef) -> Option<Self> {
+        if cst.match_rule(node, Rule::FunctionPointerDeclaration) {
+            return Self::from_function_pointer_declaration(cst, node);
+        }
+        if cst.match_rule(node, Rule::Declaration) {
+            if let Some(fp) = cst.children(node).find(|c| cst.match_rule(*c, Rule::FunctionPointerDeclaration)) {
+                return Self::from_function_pointer_declaration(cst, fp);
+            }
+        }
         if !cst.match_rule(node, Rule::Declaration) {
             return None;
         }
@@ -52,6 +60,87 @@ impl Declaration {
         Some(Self {
             decl_specs: decl_specs?,
             init_declarator_list: init_declarator_list?,
+            semi,
+            span: cst.span(node),
+        })
+    }
+
+    /// Synthesize a `Declaration` from a `Rule::FunctionPointerDeclaration`
+    /// node (`void(int) cb = nullptr;`). The primitive return type and the
+    /// parenthesized parameter list are folded into the declaration
+    /// specifier's `fn_pointer` field.
+    fn from_function_pointer_declaration(cst: &Cst, node: NodeRef) -> Option<Self> {
+        let prim_node = cst.children(node).find(|c| cst.match_rule(*c, Rule::PrimitiveType))?;
+        let mut ret_ty = TypeSpecifier::from_primitive_type(cst, prim_node)?;
+        let open = cst
+            .children(node)
+            .find_map(|c| cst.match_token(c, Token::LPar).map(|(_, s)| s))?;
+        let close = cst
+            .children(node)
+            .find_map(|c| cst.match_token(c, Token::RPar).map(|(_, s)| s))?;
+        let param_types: Vec<TypeSpecifier> = cst
+            .children(node)
+            .find(|c| cst.match_rule(*c, Rule::ParameterList))
+            .and_then(|n| crate::ast::parameter::ParameterList::from_cst(cst, n))
+            .map(|list| list.items.iter().map(|p| p.decl_specs.ty.clone()).collect())
+            .unwrap_or_default();
+        ret_ty.fn_pointer = Some(FunctionPointerType {
+            ret: Box::new(ret_ty.clone()),
+            params: Parenthesized::new(open, param_types, close),
+            span: cst.span(node),
+        });
+        ret_ty.span = cst.span(node);
+
+        let decl_specs = DeclarationSpecifiers {
+            storage: Vec::new(),
+            ty: ret_ty,
+            type_quals: Vec::new(),
+            span: cst.span(node),
+        };
+
+        let (name_text, name_span) = cst
+            .children(node)
+            .find_map(|c| cst.match_token(c, Token::Identifier))?;
+        let name = Identifier::new(name_text.to_string(), name_span.clone());
+        let declarator = Declarator {
+            direct: DirectDeclarator::IdentDeclarator(IdentifierDeclarator {
+                name: name.clone(),
+                span: name_span.clone(),
+            }),
+            span: name_span.clone(),
+        };
+
+        let initializer = cst
+            .children(node)
+            .find(|c| cst.match_token(*c, Token::Assign).is_some())
+            .map(|assign| {
+                let eq_span = cst.match_token(assign, Token::Assign).unwrap().1;
+                let expr_node = cst
+                    .children(node)
+                    .skip_while(|c| *c != assign)
+                    .nth(1)
+                    .expect("expression after '='");
+                (eq_span, UnparsedExpr(expr_node))
+            });
+
+        let semi = cst
+            .children(node)
+            .find_map(|c| cst.match_token(c, Token::Semi).map(|(_, s)| s))
+            .unwrap_or_else(|| {
+                let end = cst.span(node).end;
+                end..end
+            });
+
+        let init = InitDeclarator {
+            declarator,
+            initializer,
+            trailing_comma: None,
+            span: name_span.start..semi.end,
+        };
+
+        Some(Self {
+            decl_specs,
+            init_declarator_list: InitDeclaratorList { items: vec![init] },
             semi,
             span: cst.span(node),
         })
@@ -443,7 +532,23 @@ impl ParameterDeclaration {
             return Self::from_regular_param_body(cst, node);
         }
         if cst.match_rule(node, Rule::FunctionPointerParam) {
-            return Self::from_function_pointer_param_body(cst, node);
+            let ret_ty = cst
+                .children(node)
+                .find(|c| cst.match_rule(*c, Rule::DeclarationSpecifiers))
+                .and_then(|n| DeclarationSpecifiers::from_cst(cst, n))
+                .map(|ds| ds.ty)?;
+            let fp = Self::function_pointer_param_from_body(cst, node, ret_ty)?;
+            let span = cst.span(node);
+            return Some(Self {
+                decl_specs: DeclarationSpecifiers {
+                    storage: Vec::new(),
+                    ty: fp.fn_type.0.clone(),
+                    type_quals: Vec::new(),
+                    span: span.clone(),
+                },
+                inner: ParameterInner::FunctionPointerParam(fp),
+                span,
+            });
         }
         if !cst.match_rule(node, Rule::ParameterDeclaration) {
             return None;
@@ -458,8 +563,9 @@ impl ParameterDeclaration {
                 continue;
             }
             if cst.match_rule(child, Rule::FunctionPointerParam) {
+                let ret_ty = decl_specs.as_ref()?.ty.clone();
                 inner = Some(ParameterInner::FunctionPointerParam(
-                    FunctionPointerParam::from_cst(cst, child)?,
+                    Self::function_pointer_param_from_body(cst, child, ret_ty)?,
                 ));
                 continue;
             }
@@ -515,7 +621,7 @@ impl ParameterDeclaration {
         Some(Self {
             decl_specs: decl_specs?,
             inner: ParameterInner::RegularParam(RegularParam {
-                name: name?,
+                name,
                 default,
                 span: span.clone(),
             }),
@@ -523,12 +629,14 @@ impl ParameterDeclaration {
         })
     }
 
-    /// Extract a `ParameterDeclaration` from a `Rule::FunctionPointerParam`
-    /// body node. The grammar permits function-pointer-type parameters,
-    /// but no real XS code uses them (per the migration survey), so this
-    /// path is best-effort.
-    fn from_function_pointer_param_body(cst: &Cst, fp_param: NodeRef) -> Option<Self> {
-        let mut ty: Option<TypeSpecifier> = None;
+    /// Build a `FunctionPointerParam` from a `Rule::FunctionPointerParam`
+    /// body node given the already-extracted return type. The return type
+    /// lives in the parent `ParameterDeclaration`'s `declaration_specifiers`.
+    fn function_pointer_param_from_body(
+        cst: &Cst,
+        fp_param: NodeRef,
+        ret_ty: TypeSpecifier,
+    ) -> Option<FunctionPointerParam> {
         let mut open: Option<Span> = None;
         let mut close: Option<Span> = None;
         let mut params_node: Option<NodeRef> = None;
@@ -541,10 +649,6 @@ impl ParameterDeclaration {
             .position(|c| cst.match_token(*c, Token::Assign).is_some());
 
         for (i, child) in children.iter().enumerate() {
-            if cst.match_rule(*child, Rule::TypeSpecifier) && ty.is_none() {
-                ty = TypeSpecifier::from_cst(cst, *child);
-                continue;
-            }
             if cst.match_rule(*child, Rule::ParameterList) && params_node.is_none() {
                 params_node = Some(*child);
                 continue;
@@ -578,24 +682,10 @@ impl ParameterDeclaration {
         let params = params_node
             .and_then(|n| ParameterList::from_cst(cst, n))
             .unwrap_or_else(ParameterList::empty);
-        let ty = ty?;
-        let open = open?;
-        let close = close?;
-        let name = name?;
-        let inner = ParameterInner::FunctionPointerParam(FunctionPointerParam {
-            fn_type: (ty.clone(), Parenthesized::new(open, params, close)),
-            name,
+        Some(FunctionPointerParam {
+            fn_type: (ret_ty, Parenthesized::new(open?, params, close?)),
+            name: name?,
             default,
-            span: span.clone(),
-        });
-        Some(Self {
-            decl_specs: DeclarationSpecifiers {
-                storage: vec![],
-                ty,
-                type_quals: vec![],
-                span: span.clone(),
-            },
-            inner,
             span,
         })
     }
@@ -689,7 +779,9 @@ impl FunctionPointerParam {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RegularParam {
-    pub name: Identifier,
+    /// Parameter name. `None` for unnamed function-pointer signature
+    /// parameters such as `void(int)`.
+    pub name: Option<Identifier>,
     pub default: Option<(Span, UnparsedExpr)>,
     pub span: Span,
 }
@@ -721,7 +813,7 @@ impl RegularParam {
         }
 
         Some(Self {
-            name: name?,
+            name,
             default,
             span: cst.span(node),
         })
@@ -885,6 +977,7 @@ impl Argument {
 mod tests {
     use super::*;
     use crate::ast::cst_helpers::{child_by_rule, is_skip_token, only_child};
+    use crate::ast::type_table::TypeTable;
     use crate::parser::Parser;
 
     fn parse<'a>(source: &'a str) -> Cst<'a> {
@@ -954,7 +1047,9 @@ mod tests {
                 let params = fd.params.as_ref().expect("params");
                 assert_eq!(params.inner.items.items.len(), 1);
                 match &params.inner.items.items[0].0.inner {
-                    ParameterInner::RegularParam(rp) => assert_eq!(rp.name.node, "x"),
+                    ParameterInner::RegularParam(rp) => {
+                        assert_eq!(rp.name.as_ref().expect("param name").node, "x");
+                    }
                     other => panic!("expected RegularParam, got {:?}", other),
                 }
             }
@@ -1041,5 +1136,90 @@ mod tests {
     fn function_pointer_param_recognized() {
         let cst = parse("void foo(void(int) cb) = 0;");
         let _ = cst;
+    }
+
+    #[test]
+    fn block_comment_edge_cases_lex_cleanly_lambda_d_05() {
+        let sources = [
+            "/* */ int x;",
+            "/**/ int x;",
+            "/* * */ int x;",
+            "/*\n*/ int x;",
+            "/* multi\nline\ncomment */ int x;",
+        ];
+        for source in sources {
+            let (cst, diags) = {
+                let mut diags = vec![];
+                let cst = Parser::new_with_context(source, &mut diags, TypeTable::with_primitives())
+                    .parse(&mut diags);
+                (cst, diags)
+            };
+            assert!(diags.is_empty(), "{} produced diagnostics: {:?}", source, diags);
+            let _ = cst;
+        }
+    }
+
+    #[test]
+    fn function_pointer_variable_decl_extracts_fn_pointer_type() {
+        use crate::ast::type_system::Type;
+        let decl = parse_declaration("void(int) cb = nullptr;");
+        assert_eq!(decl.decl_specs.ty.ty, Type::Void);
+        assert!(decl.decl_specs.ty.fn_pointer.is_some(), "expected function-pointer type");
+        let fp = decl.decl_specs.ty.fn_pointer.as_ref().unwrap();
+        assert_eq!(fp.params.inner.len(), 1);
+        assert_eq!(fp.params.inner[0].ty, Type::Int);
+        let init = &decl.init_declarator_list.items[0];
+        match &init.declarator.direct {
+            DirectDeclarator::IdentDeclarator(id) => assert_eq!(id.name.node, "cb"),
+            other => panic!("expected identifier declarator, got {:?}", other),
+        }
+    }
+
+    fn first_function_param(cst: &Cst<'_>) -> ParameterDeclaration {
+        let first = first_decl(cst);
+        let fd = crate::ast::top_level::FunctionDefinition::from_cst(cst, first)
+            .expect("function definition");
+        match &fd.declarator.direct {
+            DirectDeclarator::FunctionDeclarator(fnd) => {
+                let params = fnd.params.as_ref().expect("params");
+                assert_eq!(params.inner.items.items.len(), 1);
+                params.inner.items.items[0].0.clone()
+            }
+            other => panic!("expected function declarator, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parameter_with_function_pointer_default_extracts_lambda_d_03() {
+        use crate::ast::type_system::Type;
+        let cst = parse("void foo(void(int) cb = [](int x) {}) {}");
+        let param = first_function_param(&cst);
+        assert_eq!(param.decl_specs.ty.ty, Type::Void);
+        match &param.inner {
+            ParameterInner::FunctionPointerParam(fp) => {
+                assert_eq!(fp.name.node, "cb");
+                assert_eq!(fp.fn_type.1.inner.items.items.len(), 1);
+                assert_eq!(fp.fn_type.1.inner.items.items[0].0.decl_specs.ty.ty, Type::Int);
+                assert!(fp.default.is_some(), "expected default lambda");
+            }
+            other => panic!("expected FunctionPointerParam, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parameter_with_function_pointer_default_extracts_nullptr_lambda_d_04() {
+        use crate::ast::type_system::Type;
+        let cst = parse("void foo(void(int) cb = nullptr) {}");
+        let param = first_function_param(&cst);
+        assert_eq!(param.decl_specs.ty.ty, Type::Void);
+        match &param.inner {
+            ParameterInner::FunctionPointerParam(fp) => {
+                assert_eq!(fp.name.node, "cb");
+                assert_eq!(fp.fn_type.1.inner.items.items.len(), 1);
+                assert_eq!(fp.fn_type.1.inner.items.items[0].0.decl_specs.ty.ty, Type::Int);
+                assert!(fp.default.is_some(), "expected default nullptr");
+            }
+            other => panic!("expected FunctionPointerParam, got {:?}", other),
+        }
     }
 }

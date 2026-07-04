@@ -853,7 +853,7 @@ fn param_from_declaration(param: &ParameterDeclaration, cst: &Cst<'_>, source: &
     match &param.inner {
         ParameterInner::RegularParam(RegularParam { name, default, .. }) => Param {
             ty: format_type(&param.decl_specs),
-            name: name.node.clone(),
+            name: name.as_ref().map_or_else(String::new, |n| n.node.clone()),
             default: default_expr_text(default.as_ref(), cst, source),
             is_ref: param.decl_specs.is_ref(),
         },

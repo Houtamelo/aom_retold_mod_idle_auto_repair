@@ -115,7 +115,11 @@ impl<'a> IdentifierWalker<'a> {
                 if let Some(pl) = &fd.params {
                     for (param, _) in &pl.inner.items.items {
                         match &param.inner {
-                            ParameterInner::RegularParam(r) => self.push(&r.name),
+                            ParameterInner::RegularParam(r) => {
+                                if let Some(name) = &r.name {
+                                    self.push(name);
+                                }
+                            }
                             ParameterInner::FunctionPointerParam(fp) => self.push(&fp.name),
                         }
                         if let Some(expr) = param.default_expr(self.cst) {
@@ -349,7 +353,11 @@ impl<'a> IdentifierAtFinder<'a> {
                 if let Some(pl) = &fd.params {
                     for (param, _) in &pl.inner.items.items {
                         match &param.inner {
-                            ParameterInner::RegularParam(r) => self.consider(&r.name),
+                            ParameterInner::RegularParam(r) => {
+                                if let Some(name) = &r.name {
+                                    self.consider(name);
+                                }
+                            }
                             ParameterInner::FunctionPointerParam(fp) => self.consider(&fp.name),
                         }
                         if let Some(expr) = param.default_expr(self.cst) {

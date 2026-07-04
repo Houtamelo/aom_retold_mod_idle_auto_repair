@@ -211,7 +211,7 @@ fn validate_parameter(
 
 fn param_name(param: &ParameterDeclaration) -> Option<&xs_parser::ast::Identifier> {
     match &param.inner {
-        ParameterInner::RegularParam(r) => Some(&r.name),
+        ParameterInner::RegularParam(r) => r.name.as_ref(),
         ParameterInner::FunctionPointerParam(fp) => Some(&fp.name),
     }
 }
@@ -304,6 +304,7 @@ fn is_scalar_type(ty: &TypeSpecifier) -> bool {
             ty: xs_parser::ast::type_system::TypeSpecifier {
                 ty: ty.ty.clone(),
                 is_array: false,
+                fn_pointer: None,
                 span: ty.span.clone(),
             },
             type_quals: vec![],

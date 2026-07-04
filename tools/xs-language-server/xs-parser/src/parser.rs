@@ -19,6 +19,16 @@ pub type Diagnostic = codespan_reporting::diagnostic::Diagnostic<()>;
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
 impl<'a> Parser<'a> {
+    /// Returns `true` when the current token is a primitive return type
+    /// immediately followed by `(`, indicating a function-pointer
+    /// variable declaration.
+    fn function_pointer_branch_applies(&self) -> bool {
+        matches!(
+            self.current,
+            Token::Void | Token::Int | Token::Bool | Token::Float | Token::StringKw | Token::Vector
+        ) && self.peek(1) == Token::LPar
+    }
+
     /// Returns `true` when the current token starts a declaration or
     /// nested function definition. Used by both `block_item` and
     /// `for_init` predicates to disambiguate declaration forms from
@@ -67,6 +77,14 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     /// resolves the type-vs-expression ambiguity.
     fn predicate_for_init_1(&self) -> bool {
         self.current_starts_declaration()
+    }
+
+    fn predicate_declaration_1(&self) -> bool {
+        self.function_pointer_branch_applies()
+    }
+
+    fn predicate_block_declaration_or_definition_1(&self) -> bool {
+        self.function_pointer_branch_applies()
     }
 }
 
