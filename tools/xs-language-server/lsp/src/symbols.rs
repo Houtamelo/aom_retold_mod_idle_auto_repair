@@ -148,6 +148,38 @@ pub fn build_symbol_table(source: &str) -> SymbolTable {
     build_symbol_table_from_tu(&cst, &tu, source)
 }
 
+/// Extract user-defined class names from source via a lightweight line scan.
+///
+/// Walking the typed AST for class definitions can miss classes that follow a
+/// class body with unsupported constructs, because parser recovery may resync
+/// past the remaining top-level items. A `class <Identifier>` declaration is
+/// always a top-level keyword followed by an identifier on the same line, so a
+/// regex-free scan is robust and cheap.
+pub fn extract_class_names(source: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for line in source.lines() {
+        let after_leading_ws = line.trim_start();
+        // Match `class` as a standalone keyword at the start of a logical line.
+        if let Some(after_class) = after_leading_ws.strip_prefix("class") {
+            if after_class.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let rest = after_class.trim_start();
+            if rest.is_empty() {
+                continue;
+            }
+            let name = rest
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or("");
+            if !name.is_empty() {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    names
+}
+
 /// Build a symbol table that includes local variable declarations inside
 /// function and block bodies, in addition to top-level symbols.
 pub fn build_full_symbol_table(source: &str) -> SymbolTable {

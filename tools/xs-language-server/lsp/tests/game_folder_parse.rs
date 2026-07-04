@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use tower_lsp_server::ls_types::{DiagnosticSeverity, Uri};
-use xs_language_server::diagnostics::{DiagnosticCategory, collect_all, collect_diagnostics};
+use xs_language_server::diagnostics::{DiagnosticCategory, collect_all, collect_diagnostics_with_types};
 use xs_language_server::engine_api::EngineApi;
 use xs_language_server::merged_view::MergedView;
 use xs_language_server::semantic::VirtualProject as SemProject;
@@ -172,16 +172,39 @@ fn parse_every_game_folder_file_completes_without_unexpected_errors() {
     );
 
     let mut total_symbols = 0usize;
-    let mut total_error_diagnostics = 0usize;
     let mut error_files: Vec<(PathBuf, usize)> = Vec::new();
 
+    // First pass: collect symbols and every user-defined class name.
+    // Class-typed local declarations like `BOSystem myBO = ...;` only parse
+    // correctly when the parser's `TypeTable` knows the identifier is a type.
+    // We scan source text rather than walking the typed AST because class
+    // bodies containing unsupported constructs can cause parser recovery to
+    // drop later classes in the same file.
+    let mut class_names = HashSet::new();
+    for path in &files {
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => panic!("failed to read {path:?}: {e}"),
+        };
+        let table = symbols::build_symbol_table(&source);
+        total_symbols += table.symbols.len();
+        class_names.extend(symbols::extract_class_names(&source));
+    }
+
+    let mut game_types = xs_parser::ast::TypeTable::with_primitives();
+    for name in &class_names {
+        game_types.insert_class(name);
+    }
+
+    // Second pass: parse each file with the workspace class names seeded.
+    let mut total_error_diagnostics = 0usize;
     for path in &files {
         let source = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => panic!("failed to read {path:?}: {e}"),
         };
 
-        let parse_diags = collect_diagnostics(&source);
+        let parse_diags = collect_diagnostics_with_types(&source, game_types.clone());
         let errors = parse_diags
             .iter()
             .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
@@ -190,9 +213,6 @@ fn parse_every_game_folder_file_completes_without_unexpected_errors() {
             error_files.push((path.clone(), errors));
         }
         total_error_diagnostics += errors;
-
-        let table = symbols::build_symbol_table(&source);
-        total_symbols += table.symbols.len();
     }
 
     println!(

@@ -21,18 +21,47 @@ use crate::{
 };
 
 /// Consume `lelwel` parser diagnostics and convert them to LSP diagnostics.
+///
+/// This entry point only knows the built-in primitive XS types. For
+/// workspace-aware parsing that recognizes user-defined classes such as
+/// `BOSystem`, use [`collect_diagnostics_with_types`].
 pub fn collect_diagnostics(source: &str) -> Vec<Diagnostic> {
+    collect_diagnostics_with_types(source, xs_parser::ast::TypeTable::with_primitives())
+}
+
+/// Parse `source` with a caller-supplied type table and return LSP diagnostics.
+pub fn collect_diagnostics_with_types(
+    source: &str,
+    types: xs_parser::ast::TypeTable,
+) -> Vec<Diagnostic> {
     let mut parse_diags = Vec::new();
-    let _cst = xs_parser::parser::Parser::new_with_context(
-        source,
-        &mut parse_diags,
-        xs_parser::ast::TypeTable::with_primitives(),
-    )
-    .parse(&mut parse_diags);
+    let _cst = xs_parser::parser::Parser::new_with_context(source, &mut parse_diags, types)
+        .parse(&mut parse_diags);
     parse_diags
         .into_iter()
         .map(|d| xs_diagnostic_to_lsp(source, &d))
         .collect()
+}
+
+/// Build a `TypeTable` seeded with primitives plus every class name visible
+/// across the semantic project.
+///
+/// Class definitions are top-level constructs, but parser recovery inside a
+/// class body can cause the typed AST to drop later classes in the same file.
+/// We therefore scan each file's source with the lightweight extractor from
+/// `symbols::extract_class_names`, which captures every `class <Identifier>`
+/// declaration regardless of whether the body parsed cleanly.
+fn type_table_with_project_classes(project: Option<&VirtualProject>) -> xs_parser::ast::TypeTable {
+    let mut types = xs_parser::ast::TypeTable::with_primitives();
+    let Some(project) = project else { return types };
+    for file in project.files.values() {
+        for name in crate::symbols::extract_class_names(&file.source) {
+            if !types.is_type(&name) {
+                types.insert_class(&name);
+            }
+        }
+    }
+    types
 }
 
 fn xs_diagnostic_to_lsp(source: &str, d: &xs_parser::parser::Diagnostic) -> Diagnostic {
@@ -77,7 +106,8 @@ pub fn collect_all(
     let current_uri = current_file.and_then(|p| Uri::from_file_path(p));
 
     if let Some(uri) = &current_uri {
-        let parse_diags = collect_diagnostics(source);
+        let types = type_table_with_project_classes(project);
+        let parse_diags = collect_diagnostics_with_types(source, types);
         if !parse_diags.is_empty() {
             diags.entry(uri.clone()).or_default().extend(parse_diags);
         }
@@ -317,5 +347,51 @@ mod tests {
                 d.message
             );
         }
+    }
+
+    #[test]
+    fn class_typed_local_parses_without_diagnostic() {
+        let mut types = xs_parser::ast::TypeTable::with_primitives();
+        types.insert_class("Foo");
+        let diags = super::collect_diagnostics_with_types("void bar() { Foo f; }\n", types);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for known class-typed local, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn class_typed_local_init_parses_without_diagnostic() {
+        let mut types = xs_parser::ast::TypeTable::with_primitives();
+        types.insert_class("Foo");
+        let diags = super::collect_diagnostics_with_types("void bar() { Foo f = -1; }\n", types);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for known class-typed local with init, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn unknown_class_typed_local_still_emits_error() {
+        let diags = super::collect_diagnostics("void bar() { Foo f; }\n");
+        assert!(
+            diags.iter().any(|d| matches!(d.severity, Some(DiagnosticSeverity::ERROR))),
+            "expected ERROR diagnostic for unknown class-typed local, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn class_name_does_not_override_primitive() {
+        let mut types = xs_parser::ast::TypeTable::with_primitives();
+        types.insert_class("int");
+        let diags = super::collect_diagnostics_with_types("void bar() { int x = 0; }\n", types);
+        assert!(
+            diags.is_empty(),
+            "primitive 'int' should still parse when a class of the same name is inserted, got: {:?}",
+            diags
+        );
     }
 }
