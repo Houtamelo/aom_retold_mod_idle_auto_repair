@@ -404,3 +404,65 @@ followed by `.` followed by `)`.
 - `int_literal_unchanged`
 
 **Retail diagnostics**: 187 -> **141** (additional 46 reduction, 25%).
+
+---
+
+## Batch 4: PR-K through PR-O (continued session)
+
+After the 141 -> 75 transition, the remaining gaps were tackled one at a time with strict TDD discipline. Each PR added a focused test file in `lsp/tests/` that fails RED before the change and passes GREEN after.
+
+### PR-K: function-pointer-typed class fields
+- Grammar: added `function_pointer_field_declaration` rule, restructured `class_member^` to dispatch on `?1` predicate first then fall through to `class_member_regular` (which keeps the original ordered choice for function-definition / forward-declaration / field).
+- AST: added `ParameterInner::LeadingArrayParam` precursor infrastructure (the next PR uses it).
+- Test: `lsp/tests/fn_pointer_field_repro.rs` (9 tests, 7 new + 2 regression guards).
+- Threshold: 75 -> 54 (-21, -28%).
+
+### PR-L: block comments with star runs
+- Lexer: replaced the no-backtracking block-comment regex (which couldn't match `*****...*****/`) with a logos `?regex` callback that scans for the first `*/` byte pair. Logos does not support non-greedy quantifiers, hence the callback.
+- Test: `lsp/tests/block_comment_stars_repro.rs` (4 tests, all new).
+- Threshold: 141 -> 75 (-66, -47%) when applied to the post-PR-E baseline (PR-K hadn't landed yet at the time of the comment fix in this session's ordering).
+- Side effect: chairon.xs regression test went from 1 symbol to 2 (postInit + preInit) — proves the comment is now properly tokenized.
+
+### PR-M: extern function-pointer-typed top-level declarations
+- Grammar: extended `function_pointer_declaration` to accept optional `['extern']` prefix.
+- Parser predicate: extended `function_pointer_branch_applies` to recognize `extern` followed by `primitive_type` followed by `(` via peek(1) and peek(2).
+- Test: `lsp/tests/extern_fn_pointer_repro.rs` (4 tests, 2 new + 2 regression guards).
+- Threshold: 54 -> 50 (-4, -7%).
+
+### PR-N: leading-array-decorated parameters
+- Grammar: extended `parameter_declaration` inner alternative with `?t '[' ']' Identifier @leading_array_param`. Needed for `ref HuntData[] candidates` patterns in Biome.xs.
+- AST: added `ParameterInner::LeadingArrayParam(RegularParam)` variant; updated 4 LSP call sites (definition_check, references x2 + ParameterDefaultExpr, symbols, typecheck).
+- Test: `lsp/tests/ref_user_array_param_repro.rs` (5 tests, 3 new + 2 regression guards).
+- Threshold: 50 -> 12 (-38, -76%).
+
+### PR-O: do-while loops + trailing-comma in argument lists
+- Grammar: added `do statement 'while' '(' expression ')' ';'` to `statement^` (the comment in xs.llw previously said "no do { } while()" was intentional); extended `argument_list` with `?1` parser-callback predicate on the iteration's leading `,` to disambiguate "separator that starts a new argument" from "trailing comma" — the predicate returns true only when the next token can start an argument.
+- Lexer: added `Do` token.
+- Test: `lsp/tests/do_while_repro.rs` (7 tests, 4 new + 3 regression guards), `lsp/tests/trailing_comma_repro.rs` (4 tests, 2 new + 2 regression guards).
+- Threshold: 12 -> **0** (-12, -100%).
+
+### Final state (PR-A through PR-O)
+
+| Metric | Baseline | After PR-E | **After PR-O** |
+| --- | ---: | ---: | ---: |
+| Retail ERROR diagnostics | 181,473 | 1,108 | **0** |
+| Reduction from baseline | — | 99.4% | **100.0%** |
+| Distance from 1,730 threshold | +179,743 | -622 | **-1,730** (1,730 below) |
+| Per-file cap (100) violations | many | 0 | **0** |
+| Unit tests passing | — | 276 | **317** |
+
+The retail AoM:R game folder (302 .xs files, 8,537 symbols) now parses with **zero ERROR diagnostics**. The 1,730-error budget is completely unused.
+
+### TDD discipline
+
+Every PR in batches 2-4 has a matching test file in `lsp/tests/`:
+- `*_repro.rs` for grammar/parser changes
+- Inline `#[test]` functions in the same crate for lexer unit tests (token recognition)
+
+Each test goes through a strict RED -> GREEN cycle:
+1. Write the test that captures the desired behavior.
+2. Run `cargo test` to confirm it fails (RED).
+3. Make the minimal grammar/lexer/parser change to make it pass.
+4. Re-run to confirm GREEN + no regressions.
+
+The pre-existing flake `test_builtin_type_emits_engine_modifier` and `test_mod_overlay_resolves_to_mod_file` (both race-condition flakes that pass in isolation) are unchanged.
