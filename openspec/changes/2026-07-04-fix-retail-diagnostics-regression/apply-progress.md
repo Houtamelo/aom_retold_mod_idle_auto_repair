@@ -169,7 +169,46 @@ This is close to the expected ~2,500 reduction for class-typed locals. The remai
 - Boundary: this batch starts from the post-PR-B baseline (4,782 errors) and ends with the class-name wiring commit.
 - Review budget impact: small — focused LSP-only change, ~120 lines.
 
+## PR-B and PR-D records (added 2026-07-04)
+
+### PR-B: for_init declaration form (Limitation 2A)
+
+- Extended `for_init` grammar rule to accept `declaration_specifiers init_declarator_list` via a predicate.
+- Wired `ParserCallbacks` / `TypeTable` predicate (`predicate_for_init_1`) for LL(1) disambiguation.
+- Updated `Declaration::from_cst` to tolerate the omitted trailing `;` in for-init declarations.
+- Added xs-parser unit tests for int, bool, class-typed, and expression forms.
+- Added LSP integration test asserting zero ERROR parse diagnostics for a `for (int i = 0; ...)` snippet.
+- Commit: `37df803 fix(xs-parser): support declaration form in for-init (Limitation 2A)`
+- Retail diagnostics: 14,643 → 4,782 (9,861 reduction).
+
+### PR-D: lambdas + function-pointer-typed variables + comments
+
+- Added standalone `lambda_expr` rule and typed AST `Expr::Lambda` variant.
+- Added function-pointer variable declarations and parameter defaults (Limitation 1B partial).
+- Commit: `1cef4c9 fix(xs-parser): extract lambdas as standalone lambda_expr rule and typed AST`
+- Commit: `e6e42db fix(xs-parser): support function-pointer variable declarations and parameter defaults`
+- New integration test: `lsp/tests/lambda_default_repro.rs` (real retail snippet).
+- Retail diagnostics: 4,782 → 2,137 (2,645 additional reduction).
+
+## Current State (after PR-A + PR-B + PR-C + PR-D)
+
+| Metric                              | Baseline | After PR-A | After PR-B | After PR-C | After PR-D | Threshold |
+| ----------------------------------- | --------:| ----------:| ----------:| ----------:| ----------:| ---------:|
+| Retail ERROR diagnostics            | 181,473  | 14,643     | 4,782      | 2,367      | **2,137**  | 1,730     |
+| Reduction from baseline             | —        | 92%        | 97.4%      | 98.7%      | **98.8%**  | —         |
+| Distance from threshold             | +179,743 | +12,913    | +3,052     | +637       | **+407**   | —         |
+
+**Files modified across all 4 PRs**:
+- `tools/xs-language-server/xs-parser/src/lexer.rs` — comment regexes, bitwise tokens
+- `tools/xs-language-server/xs-parser/src/xs.llw` — else branch, for_init decl, lambda_expr, function-pointer params
+- `tools/xs-language-server/xs-parser/src/parser.rs` — predicate wiring
+- `tools/xs-language-server/xs-parser/src/ast/*.rs` — AST extensions (If::Else, ForInit::Decl, Expr::Lambda, etc.)
+- `tools/xs-language-server/lsp/src/diagnostics.rs` — TypeTable seeding
+- `tools/xs-language-server/lsp/src/symbols.rs` — extract_class_names
+- `tools/xs-language-server/lsp/tests/*.rs` — integration tests
+
 ## Status
 
-5 / 7 phases complete.  
-Ready for verify on the PR-C slice, or continue with Phase 6 / Phase 7 in the next apply batch.
+**5 / 7 phases complete.** PR-D lambdas + function-pointer landed; remaining gap (407 over threshold) requires PR-E for the `}` cascade targets and other unidentified constructs.
+
+Ready for PR-E (the 71 cascade targets + remaining grammar gaps) or to push for review of current state.
