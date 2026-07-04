@@ -930,6 +930,8 @@ pub enum BinaryOp {
     Gt,
     Leq,
     Geq,
+    BitAnd,
+    BitOr,
     Add,
     Sub,
     Mul,
@@ -944,6 +946,7 @@ impl BinaryOp {
             Rule::LogicalAndExpr => Self::LogicalAnd,
             Rule::EqualityExpr => Self::Eq, // default; refined below
             Rule::RelationalExpr => Self::Lt, // default; refined below
+            Rule::BitwiseExpr => Self::BitAnd, // default; refined below
             Rule::AdditiveExpr => Self::Add, // default; refined below
             Rule::MultiplicativeExpr => Self::Mul, // default; refined below
             _ => return None,
@@ -976,6 +979,12 @@ impl BinaryOp {
                 })
                 .or_else(|| {
                     cst.match_token(c, Token::Geq).map(|(_, s)| (BinaryOp::Geq, s))
+                })
+                .or_else(|| {
+                    cst.match_token(c, Token::Amp).map(|(_, s)| (BinaryOp::BitAnd, s))
+                })
+                .or_else(|| {
+                    cst.match_token(c, Token::Pipe).map(|(_, s)| (BinaryOp::BitOr, s))
                 })
                 .or_else(|| {
                     cst.match_token(c, Token::Plus).map(|(_, s)| (BinaryOp::Add, s))
@@ -1018,6 +1027,7 @@ impl BinaryExpr {
             | Rule::LogicalAndExpr
             | Rule::EqualityExpr
             | Rule::RelationalExpr
+            | Rule::BitwiseExpr
             | Rule::AdditiveExpr
             | Rule::MultiplicativeExpr => {
                 // Children of the wrapper: `binary_expr + op + binary_expr`
@@ -1061,6 +1071,14 @@ impl BinaryExpr {
                         .or_else(|| {
                             cst.match_token(c, Token::Geq)
                                 .map(|(_, s)| (BinaryOp::Geq, s))
+                        })
+                        .or_else(|| {
+                            cst.match_token(c, Token::Amp)
+                                .map(|(_, s)| (BinaryOp::BitAnd, s))
+                        })
+                        .or_else(|| {
+                            cst.match_token(c, Token::Pipe)
+                                .map(|(_, s)| (BinaryOp::BitOr, s))
                         })
                         .or_else(|| {
                             cst.match_token(c, Token::Plus)
@@ -1634,6 +1652,42 @@ mod tests {
             Expr::Binary(b) => {
                 assert_eq!(b.op, BinaryOp::LogicalOr);
             }
+            other => panic!("expected Binary, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bitwise_and_parses() {
+        let cst = parse("int x = a & b;");
+        let inner = init_comma_expr(&cst);
+        match Expr::from_cst(&cst, inner).expect("Expr") {
+            Expr::Binary(b) => {
+                assert_eq!(b.op, BinaryOp::BitAnd);
+                assert_eq!(b.op_span, 10..11);
+            }
+            other => panic!("expected Binary, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bitwise_or_parses() {
+        let cst = parse("int x = a | b;");
+        let inner = init_comma_expr(&cst);
+        match Expr::from_cst(&cst, inner).expect("Expr") {
+            Expr::Binary(b) => {
+                assert_eq!(b.op, BinaryOp::BitOr);
+                assert_eq!(b.op_span, 10..11);
+            }
+            other => panic!("expected Binary, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bitwise_and_logical_and_stay_distinct() {
+        let cst = parse("bool b = a && b;");
+        let inner = init_comma_expr(&cst);
+        match Expr::from_cst(&cst, inner).expect("Expr") {
+            Expr::Binary(b) => assert_eq!(b.op, BinaryOp::LogicalAnd),
             other => panic!("expected Binary, got {:?}", other),
         }
     }

@@ -189,6 +189,10 @@ pub enum Token {
     AndAnd,
     #[token("||")]
     OrOr,
+    #[token("&")]
+    Amp,
+    #[token("|")]
+    Pipe,
     #[token("~")]
     Tilde,
     #[token("!")]
@@ -197,9 +201,9 @@ pub enum Token {
     PlusPlus,
     #[token("--")]
     MinusMinus,
-    #[regex(r"//[^\n]*", logos::skip, allow_greedy = true)]
+    #[regex(r"//[^\n]*", allow_greedy = true)]
     LineComment,
-    #[regex(r"/\*([^*]|\*+[^*/])*\*/", logos::skip)]
+    #[regex(r"/\*([^*]|\*+[^*/])*\*/")]
     BlockComment,
     #[regex(r"[ \t\n\r\f]+")]
     Whitespace,

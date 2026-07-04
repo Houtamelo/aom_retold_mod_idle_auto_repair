@@ -100,7 +100,7 @@ token Assign='=' PlusAssign='+=' MinusAssign='-=' StarAssign='*='
 //  rule.)
 token Plus='+' Minus='-' Star='*' Slash='/' Percent='%'
       Eq='==' Neq='!=' Lt='<' Gt='>' Leq='<=' Geq='>='
-      AndAnd='&&' OrOr='||' Tilde='~' Excl='!';
+      AndAnd='&&' OrOr='||' Amp='&' Pipe='|' Tilde='~' Excl='!';
 
 // --- Update (increment / decrement) ---
 token PlusPlus='++' MinusMinus='--';
@@ -653,6 +653,7 @@ binary_expr:
 | binary_expr '&&' binary_expr @logical_and_expr
 | binary_expr ('==' | '!=') binary_expr @equality_expr
 | binary_expr ('<' | '>' | '<=' | '>=') binary_expr @relational_expr
+| binary_expr ('&' | '|') binary_expr @bitwise_expr
 | ?t binary_expr ('+' | '-') binary_expr @additive_expr
 | ?t binary_expr ('*' | '/' | '%') binary_expr @multiplicative_expr
 | unary_expr
