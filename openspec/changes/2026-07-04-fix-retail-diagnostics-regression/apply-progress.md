@@ -304,3 +304,20 @@ largest single-PR drop since the project began; 99.83% from the 181,473
 baseline).
 
 **Test counts after PR-G**: 268 passed / 1 failed (pre-existing flake).
+
+## PR-H record (added 2026-07-04, after "all gaps closed" — investigation + small reduction)
+
+### PR-H: Unary `+` and `-` in preprocessor expressions
+
+- **Grammar change** (`xs.llw`): `preproc_unary_expr` now accepts a
+  single `'+'` or `'-'` prefix before a unary expression. Previously
+  only `'!'` was accepted as a unary operator in preproc contexts.
+- **Cascade effect**: retail XS uses `#if (a == -1)` inside function
+  bodies for include guards and value checks. Without unary `-`,
+  the parser rejected the `#if`/`#elif` and cascaded errors through
+  the rest of the function.
+- **TDD suite** (`lsp/tests/preproc_unary_neg_repro.rs`): 5 tests
+  covering unary minus at top, in equality, in elif branches, in
+  complex expressions, and unary plus.
+
+**Retail diagnostics**: 317 -> **307** (additional 10 reduction).

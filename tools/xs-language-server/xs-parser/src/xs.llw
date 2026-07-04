@@ -213,6 +213,7 @@ preproc_mul_expr:
 ;
 preproc_unary_expr:
   '!' preproc_unary_expr
+| ('+' | '-') preproc_unary_expr
 | preproc_primary
 ;
 preproc_primary:
