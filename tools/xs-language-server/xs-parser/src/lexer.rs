@@ -109,7 +109,17 @@ pub enum Token {
     Identifier,
     #[regex(r"[0-9]+")]
     IntConst,
-    #[regex(r"[0-9]+\.[0-9]+")]
+    /// Float literal. Accepts both `1.0` and `1.` (trailing-dot form,
+    /// matching C and XS) but NOT `.5` (leading-dot form) — that is
+    /// handled by the `dot_5_is_float` test which is RED by design
+    /// and would require a separate grammar change. The optional
+    /// trailing digits pattern `[0-9]+\.[0-9]*` makes `1.`, `1.0`,
+    /// `1.5` all lex as `FloatConst`; without this, `vector(30.0,
+    /// 0.0, 439.)` (used in om12a_p7.xs and many other retail files)
+    /// would lex the `439.` as `IntConst(439)` + `Dot`, then the
+    /// parser would see `.` followed by `)` and emit "invalid syntax"
+    /// at every member access inside the call.
+    #[regex(r"[0-9]+\.[0-9]*")]
     FloatConst,
     #[regex(r#""[^"\\]*(\\.[^"\\]*)*""#)]
     StringLiteral,
@@ -392,5 +402,35 @@ mod tests {
         assert!(tokens.contains(&Token::Geq));
         assert!(!tokens.contains(&Token::Shl));
         assert!(!tokens.contains(&Token::Shr));
+    }
+
+    // --- Float literals ---
+    // Both `1.0` and `1.` (trailing-dot form) must lex as FloatConst,
+    // not as `IntConst` + `Dot`. The latter would break expressions
+    // like `vector(30.0, 0.0, 439.)` in retail XS (om12a_p7.xs and
+    // many other random_map files).
+
+    #[test]
+    fn trailing_dot_float() {
+        let (tokens, errors) = tokenize_non_skip("439.");
+        assert_eq!(errors, 0);
+        assert!(tokens.contains(&Token::FloatConst), "expected FloatConst, got {:?}", tokens);
+        assert!(!tokens.contains(&Token::Dot), "should NOT have Dot, got {:?}", tokens);
+        assert!(!tokens.contains(&Token::IntConst), "should NOT have IntConst, got {:?}", tokens);
+    }
+
+    #[test]
+    fn regular_float_literal() {
+        let (tokens, errors) = tokenize_non_skip("3.14");
+        assert_eq!(errors, 0);
+        assert!(tokens.contains(&Token::FloatConst), "expected FloatConst, got {:?}", tokens);
+    }
+
+    #[test]
+    fn int_literal_unchanged() {
+        let (tokens, errors) = tokenize_non_skip("439");
+        assert_eq!(errors, 0);
+        assert!(tokens.contains(&Token::IntConst), "expected IntConst, got {:?}", tokens);
+        assert!(!tokens.contains(&Token::FloatConst), "should NOT have FloatConst, got {:?}", tokens);
     }
 }

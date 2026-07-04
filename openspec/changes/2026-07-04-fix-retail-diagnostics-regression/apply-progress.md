@@ -373,3 +373,34 @@ declarator position, not the type position.
 - `user_class_array_in_function_body`: scope test
 
 **Retail diagnostics**: 307 -> **187** (additional 120 reduction, 39%).
+
+## PR-J record (added 2026-07-04, after "all gaps closed" — trailing-dot float)
+
+### PR-J: Trailing-dot float literals (`1.` as float, not int+dot)
+
+The lexer float regex was `[0-9]+\.[0-9]+` which required at least one
+digit after the decimal point. This caused `439.` to lex as
+`IntConst(439) + Dot` (member access), which broke any expression
+ending in a trailing-dot float. The retail pattern
+`createDefendPlanForPoint("...", vector(30.0, 0.0, 439.), 20)` (used
+in om12a_p7.xs and many other random_map files) triggered a cascade
+of ~12 errors per call site because the parser saw `IntConst(439)`
+followed by `.` followed by `)`.
+
+**Lexer change** (`xs-parser/src/lexer.rs`):
+- `FloatConst` regex: `[0-9]+\.[0-9]+` → `[0-9]+\.[0-9]*` (optional
+  trailing digits, matching C and XS semantics).
+
+**TDD suite** (`lsp/tests/float_literal_repro.rs`):
+- `trailing_dot_is_float`: `439.` → FloatConst
+- `regular_float_still_works`: `439.0` → FloatConst (regression)
+- `int_still_works`: `439` → IntConst (regression)
+- `dot_5_is_float`: leading-dot form (deferred — retail doesn't use it)
+- `vector_with_trailing_dot`: `439.;` → FloatConst + Semi
+
+**Lexer unit tests** (3 new in `src/lexer.rs`):
+- `trailing_dot_float`
+- `regular_float_literal`
+- `int_literal_unchanged`
+
+**Retail diagnostics**: 187 -> **141** (additional 46 reduction, 25%).
