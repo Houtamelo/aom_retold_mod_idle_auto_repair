@@ -212,3 +212,38 @@ This is close to the expected ~2,500 reduction for class-typed locals. The remai
 **5 / 7 phases complete.** PR-D lambdas + function-pointer landed; remaining gap (407 over threshold) requires PR-E for the `}` cascade targets and other unidentified constructs.
 
 Ready for PR-E (the 71 cascade targets + remaining grammar gaps) or to push for review of current state.
+
+## PR-E record (added 2026-07-04)
+
+### PR-E: rule-body preprocessor + ^= bitwise + switch refactor
+
+- **`rule_preproc_directive` rule in xs.llw**: accepts `#if`/`#elif`/`#else`/`#endif`/`#define` between a rule's name and its body. Retail files like `om04_p2.xs` use `rule bronzeWall inactive #if (cond) minInterval 600 #elif ... #endif { ... }`.
+- **Bitwise `^` token + `&=`/`|=`/`^=` assignment operators**: completes the bitwise grammar from PR-A. Retail uses `a ^= b` and other xor patterns.
+- **Switch statement refactor**: replaced dedicated `switch_case` rule with labeled statements. `SwitchStatement.cases: Braced<Vec<SwitchCase>>` → `body: CompoundStatement`. Case labels are now ordinary `case x:` / `default:` statements. Accepts the consecutive labels and nested compound bodies used by retail XS without dedicated switch-case AST.
+- Updated LSP callers (semantic_tokens, definition_check, references, symbols, typecheck) to use the new `body.items.inner` shape.
+
+**Commits**:
+- `eea1b71` — fix(xs-parser): preprocessor-in-rule-body + ^= bitwise + switch labeled statements (PR-E core)
+- `f10f6c2` — fix(xs-lsp): update callers to use SwitchStatement.body instead of .cases
+
+**Retail diagnostics**: 2,137 → **1,108** (additional 1,029 reduction).
+
+## Final State (after PR-A + PR-B + PR-C + PR-D + PR-E)
+
+| Metric                              | Baseline | After PR-A | After PR-B | After PR-C | After PR-D | After PR-E | Threshold |
+| ----------------------------------- | --------:| ----------:| ----------:| ----------:| ----------:| ----------:| ---------:|
+| Retail ERROR diagnostics            | 181,473  | 14,643     | 4,782      | 2,367      | 2,137      | **1,108**  | 1,730     |
+| Reduction from baseline             | —        | 92%        | 97.4%      | 98.7%      | 98.8%      | **99.4%**  | —         |
+| Distance from threshold             | +179,743 | +12,913    | +3,052     | +637       | +407       | **-622**   | —         |
+| Per-file cap (100) violations       | —        | many       | many       | 2          | 2          | **0**      | 0         |
+
+**Total commits in `2026-07-04-fix-retail-diagnostics-regression`**: 8 (PR-A through PR-E plus artifact commits).
+
+**Test counts after PR-E**: 259 unit tests pass / 1 fails (pre-existing `test_builtin_type_emits_engine_modifier` flake, was already broken before any fix).
+
+**Threshold test passes** against the real game folder with `AOMR_GAME_PATH=/home/houtamelo/.steam/steam/steamapps/common/Age of Mythology Retold/`.
+
+## Status
+
+**5 / 7 phases complete.** All real grammar gaps closed. The downgrade-insurance "phase 7" was explicitly rejected as cheating. Phase 6 (function-pointer-typed variable defaults) was completed as part of PR-D. No more changes planned for this change folder.
+
