@@ -2,10 +2,10 @@ use crate::ast::cst_helpers::{child_by_rule, is_skip_token};
 use crate::ast::declaration::{Declaration, Declarator, UnparsedExpr};
 use crate::ast::expr::Expr;
 use crate::ast::preproc::{PreprocDef, PreprocElif, PreprocElse, PreprocEndif, PreprocIf};
-use crate::ast::spanned::{Braced, Spanned};
+use crate::ast::spanned::{Braced, Parenthesized, Spanned};
 use crate::ast::statement::{
-    BlockItem, BlockItemList, BreakStatement, CompoundStatement, ContinueStatement,
-    ExpressionStatement, ReturnStatement,
+    parenthesized_expr_parts, BlockItem, BlockItemList, BreakStatement, CompoundStatement,
+    ContinueStatement, ExpressionStatement, IfStatement, ReturnStatement, Statement, StmtSpanned,
 };
 use crate::ast::type_system::{DeclarationSpecifiers, Identifier};
 use crate::parser::{Cst, Node, NodeRef, Rule, Span};
@@ -592,6 +592,13 @@ fn extract_block_items(
             i = next;
             continue;
         }
+        if cst.match_token(child, Token::If).is_some() {
+            if let Some((item, next)) = classify_bare_if(cst, &children, i) {
+                items.push(item);
+                i = next;
+                continue;
+            }
+        }
         // Unknown — skip to avoid infinite loop.
         i += 1;
     }
@@ -745,6 +752,93 @@ fn bare_continue(cst: &Cst, children: &[NodeRef], start: usize) -> (BlockItem, u
         })),
         consumed,
     )
+}
+
+/// Classify a bare `if` token sequence starting at `children[start]`.
+///
+/// The grammar's `statement^` rule emits `if` / `while` / etc. as bare
+/// tokens rather than wrapped `Rule::IfStatement` nodes in the PoC, so
+/// function-body extraction recovers the `Statement::If` shape from the
+/// token stream. The optional `else` branch is detected by looking for a
+/// `PreprocElse` token immediately after the `then` body.
+fn classify_bare_if(
+    cst: &Cst,
+    children: &[NodeRef],
+    start: usize,
+) -> Option<(BlockItem, usize)> {
+    let if_node = *children.get(start)?;
+    let (_, if_span) = cst.match_token(if_node, Token::If)?;
+
+    let paren_idx = children[start + 1..]
+        .iter()
+        .position(|c| {
+            !is_skip_token(cst, *c) && cst.match_rule(*c, Rule::ParenthesizedExpression)
+        })
+        .map(|p| start + 1 + p)?;
+    let (open, expr, close) = parenthesized_expr_parts(cst, children[paren_idx])?;
+    let cond = Parenthesized::new(open, expr, close);
+
+    let (then, mut next) = parse_bare_statement_after(cst, children, paren_idx + 1)?;
+
+    let mut else_: Option<Box<Statement>> = None;
+    let else_idx = children[next..]
+        .iter()
+        .position(|c| !is_skip_token(cst, *c))
+        .map(|p| next + p)
+        .and_then(|idx| {
+            cst.match_token(children[idx], Token::PreprocElse)
+                .map(|_| idx)
+        });
+    if let Some(idx) = else_idx {
+        if let Some((else_stmt, after_else)) = parse_bare_statement_after(cst, children, idx + 1) {
+            else_ = Some(Box::new(else_stmt));
+            next = after_else;
+        }
+    }
+
+    let span_end = else_.as_ref().map_or(then.span().end, |e| e.span().end);
+    let if_stmt = IfStatement {
+        cond,
+        then: Box::new(then),
+        else_,
+        span: if_span.start..span_end,
+    };
+    Some((BlockItem::Statement(Statement::If(if_stmt)), next))
+}
+
+/// Parse a bare statement starting somewhere after `start` in the
+/// children slice. This is a best-effort fallback used by
+/// `classify_bare_if` for `then` and `else` bodies.
+fn parse_bare_statement_after(
+    cst: &Cst,
+    children: &[NodeRef],
+    start: usize,
+) -> Option<(Statement, usize)> {
+    for i in start..children.len() {
+        let child = children[i];
+        if is_skip_token(cst, child) {
+            continue;
+        }
+        // Nested bare `if`.
+        if cst.match_token(child, Token::If).is_some() {
+            if let Some((item, next)) = classify_bare_if(cst, children, i) {
+                if let BlockItem::Statement(stmt) = item {
+                    return Some((stmt, next));
+                }
+            }
+            return None;
+        }
+        // Rule-wrapped statement shape.
+        if matches!(cst.get(child), Node::Rule(_, _)) {
+            if let Some(stmt) = Statement::from_cst(cst, child) {
+                return Some((stmt, i + 1));
+            }
+            if let Some(cs) = CompoundStatement::from_cst(cst, child) {
+                return Some((Statement::Compound(cs), i + 1));
+            }
+        }
+    }
+    None
 }
 
 // Helper: expose `children_by_rule` for callers that may need it in

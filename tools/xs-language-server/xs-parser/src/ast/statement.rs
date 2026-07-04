@@ -197,17 +197,16 @@ impl IfStatement {
         let cond = Parenthesized::new(open, expr, close);
         // The then-body: first statement-like child after the paren.
         let then = first_statement_after(cst, node, paren_node)?;
-        // Optional else_: pair of `Else` + statement-like child.
-        //
-        // NOTE: The current PoC grammar does NOT model `else` (see
-        // `xs.llw` lines 503-518 — the dangling-else limitation). The
-        // lexer matches `else` as `PreprocElse` in statement context,
-        // but we deliberately ignore it here because the parent
-        // grammar rule never produces a meaningful `else_` body. The
-        // code path is kept correct for a grammar that fixes it.
-        let else_: Option<Box<Statement>> = None;
-        let then_span_end = then.span().end;
-        let span = if_span.start..then_span_end;
+        // The optional `else` branch. The lexer maps the `else`
+        // keyword to `Token::PreprocElse` in both preprocessor and
+        // statement contexts, so we look for that token inside the
+        // wrapper and extract the first statement that follows it.
+        let else_: Option<Box<Statement>> = cst
+            .children(node)
+            .find(|c| cst.match_token(*c, Token::PreprocElse).is_some())
+            .and_then(|else_tok| first_statement_after(cst, node, else_tok).map(Box::new));
+        let span_end = else_.as_ref().map_or_else(|| then.span().end, |e| e.span().end);
+        let span = if_span.start..span_end;
         Some(Self {
             cond,
             then: Box::new(then),
@@ -607,7 +606,7 @@ pub enum SwitchLabel {
 // ---- helpers ----
 
 /// Splits a `Rule::ParenthesizedExpression` node into (open, expr, close).
-fn parenthesized_expr_parts(
+pub(crate) fn parenthesized_expr_parts(
     cst: &Cst,
     node: NodeRef,
 ) -> Option<(Span, UnparsedExpr, Span)> {
@@ -891,6 +890,44 @@ mod tests {
         match BlockItem::from_cst(&cst, first) {
             Some(BlockItem::ForwardDeclaration(_)) => {}
             other => panic!("expected ForwardDeclaration, got {:?}", other),
+        }
+    }
+
+    fn first_if_in_function(cst: &Cst) -> IfStatement {
+        let first = first_non_skip(cst);
+        let fd = crate::ast::top_level::FunctionDefinition::from_cst(cst, first)
+            .expect("function definition");
+        assert_eq!(fd.body.inner.len(), 1);
+        match &fd.body.inner[0] {
+            BlockItem::Statement(Statement::If(if_stmt)) => if_stmt.clone(),
+            other => panic!("expected If statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn if_statement_without_else() {
+        let cst = parse("void f() { if (a) {} }");
+        let if_stmt = first_if_in_function(&cst);
+        assert!(if_stmt.else_.is_none());
+    }
+
+    #[test]
+    fn if_statement_with_else() {
+        let cst = parse("void f() { if (a) {} else {} }");
+        let if_stmt = first_if_in_function(&cst);
+        assert!(if_stmt.else_.is_some());
+    }
+
+    #[test]
+    fn if_statement_else_if_chain() {
+        let cst = parse("void f() { if (a) {} else if (b) {} else {} }");
+        let outer = first_if_in_function(&cst);
+        assert!(outer.else_.is_some(), "outer if should have an else branch");
+        match outer.else_.as_ref().unwrap().as_ref() {
+            Statement::If(inner) => {
+                assert!(inner.else_.is_some(), "inner if should also have an else branch");
+            }
+            other => panic!("expected nested If in else branch, got {:?}", other),
         }
     }
 }

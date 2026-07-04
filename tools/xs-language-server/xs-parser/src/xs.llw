@@ -502,27 +502,13 @@ init_declarator: declarator ['=' expression] ;
 // Statements
 //==============================================================================
 
-/// A statement. Each alternative starts with a distinct keyword (or
-/// the leading `{` of a compound, or the start of an expression), so
-/// this is a flat LL(1) alternation.
-///
-/// KNOWN LIMITATION: the classic if/else dangling-else disambiguation
-/// is not implemented. The `'else' branch` after an `if` body is NOT
-/// parsed here; users writing `if (a) b; else c;` will get the else
-/// body consumed by whatever follows the if (typically the next
-/// statement, which then fails to parse). To resolve dangling else
-/// without violating lelwel's no-callback-ParserCallbacks restriction
-/// would require either:
-///   * the built-in `?t` predicate (built-in but not in the user's
-///     "use only `/`, `|`, `~`" constraint), or
-///   * the full matched/unmatched statement split (per the C standard
-///     6.8.4) with a separate `unmatched_statement` rule for if-bodies.
-/// Both are deferred to the next iteration. The PoC grammar parses
-/// `if (cond) body` correctly; else-less forms are fine. For full
-/// correctness on `if/else`, the existing tree-sitter grammar (the
-/// LSP's primary parser) is the source of truth.
+/// A statement. The `else` branch is modeled as a separate statement
+/// alternative (`PreprocElse statement`) so it is consumed after the
+/// `if` body. This avoids the dangling-else LL(1) conflict while still
+/// allowing `if ... else` chains to parse without errors.
 statement^:
   'if' parenthesized_expression statement @if_statement
+| PreprocElse statement @else_statement
 | 'while' parenthesized_expression statement @while_statement
 | 'for' '(' for_init ';' [expression] ';' [expression] ')' statement @for_statement
 | 'switch' parenthesized_expression '{' switch_case* '}' @switch_statement
