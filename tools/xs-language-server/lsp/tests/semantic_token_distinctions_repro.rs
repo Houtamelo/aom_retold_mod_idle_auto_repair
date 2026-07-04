@@ -81,7 +81,11 @@ fn rule_reference_emits_rule_token_type() {
     let ws = workspace::Workspace::new(tmp.path().to_path_buf());
     let project = workspace::VirtualProject::default();
     let engine = no_engine_api();
-    let source = "rule myRule() {}\nvoid caller() { myRule(); }";
+    // XS rule definitions require the form `rule <name> <modifiers> { body }`
+    // (no parens after the name). The body `myRule` then becomes reachable
+    // through the symbol table; the `myRule()` activation in caller() is the
+    // identifier reference we expect to tokenize as 'rule'.
+    let source = "rule myRule\ninactive\n{\n}\nvoid caller() { myRule(); }";
     let tokens = compute_for(source, None, &engine, &ws, &project);
 
     let rule_tokens: Vec<_> = tokens

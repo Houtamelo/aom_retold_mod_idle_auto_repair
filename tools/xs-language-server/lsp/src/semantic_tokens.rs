@@ -654,7 +654,21 @@ fn visit_expr(
                         ) {
                             tokens.push(token);
                         }
+                    } else {
+                        // Field call with non-field inner postfix: still tokenize the
+                        // call target so plain identifiers like `myRule()` get their
+                        // owning symbol's token type (rule / function / etc.).
+                        visit_expr(
+                            cst, source, &pfe.target, current_file, own_table, merged, engine,
+                            workspace, project, member_index, tokens,
+                        );
                     }
+                } else {
+                    // Plain call `foo(...)` — visit the target so `foo` gets a token.
+                    visit_expr(
+                        cst, source, &pfe.target, current_file, own_table, merged, engine,
+                        workspace, project, member_index, tokens,
+                    );
                 }
                 if let Some(args) = &call.args {
                     for (arg, _) in &args.items.items {
