@@ -20,5 +20,8 @@ name = "test_parse"
 [[example]]
 name = "diag_cst"
 
+[[example]]
+name = "outlier_breakdown"
+
 [build-dependencies]
 lelwel = "0.10"

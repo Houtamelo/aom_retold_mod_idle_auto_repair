@@ -55,7 +55,7 @@ pub use top_level::{
 pub use statement::{
     BlockItem, BlockItemList, BreakStatement, CompoundStatement, ContinueStatement,
     ExpressionStatement, ForInit, ForStatement, IfStatement, ReturnStatement, StmtSpanned,
-    SwitchCase, SwitchLabel, SwitchStatement, WhileStatement,
+    SwitchStatement, WhileStatement,
 };
 
 pub use cst_helpers::{

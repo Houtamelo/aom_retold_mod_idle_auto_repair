@@ -347,11 +347,16 @@ impl ForStatement {
     }
 }
 
-/// A `switch` statement: `switch (cond) { case* }`.
+/// A `switch` statement: `switch (cond) { body }`.
+///
+/// The body is parsed as a generic compound statement, with `case` and
+/// `default` labels modeled as labeled statements. This keeps the typed
+/// AST simple while accepting the consecutive labels and nested compound
+/// bodies used by retail XS.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SwitchStatement {
     pub cond: Parenthesized<UnparsedExpr>,
-    pub cases: Braced<Vec<SwitchCase>>,
+    pub body: CompoundStatement,
     pub span: Span,
 }
 
@@ -373,28 +378,13 @@ impl SwitchStatement {
         let (open, expr, close) = parenthesized_expr_parts(cst, paren_node)?;
         let cond = Parenthesized::new(open, expr, close);
 
-        let lbrace = cst
+        let body_node = cst
             .children(node)
-            .find_map(|c| cst.match_token(c, Token::LBrace).map(|(_, s)| s))?;
-        let rbrace = cst
-            .children(node)
-            .find_map(|c| cst.match_token(c, Token::RBrace).map(|(_, s)| s))?;
+            .find(|c| cst.match_rule(*c, Rule::CompoundStatement))?;
+        let body = CompoundStatement::from_cst(cst, body_node)?;
 
-        let case_nodes = cst
-            .children(node)
-            .filter(|c| cst.match_rule(*c, Rule::SwitchCase))
-            .collect::<Vec<_>>();
-        let cases = case_nodes
-            .iter()
-            .filter_map(|n| SwitchCase::from_cst(cst, *n))
-            .collect();
-
-        let span = switch_span.start..rbrace.end;
-        Some(Self {
-            cond,
-            cases: Braced::new(lbrace, cases, rbrace),
-            span,
-        })
+        let span = switch_span.start..body.span.end;
+        Some(Self { cond, body, span })
     }
 }
 
@@ -554,53 +544,6 @@ impl ForInit {
             None => Some(Self::Empty),
         }
     }
-}
-
-/// One `case` or `default` clause inside a `switch`.
-///
-/// Wraps `Rule::SwitchCase`. The grammar uses `^` (ordered choice)
-/// for this rule, so the wrapper is collapsed and a switch_case node
-/// only appears if the parser successfully reduced it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SwitchCase {
-    pub label: SwitchLabel,
-    pub body: CompoundStatement,
-    pub span: Span,
-}
-
-impl SwitchCase {
-    pub fn from_cst(cst: &Cst, node: NodeRef) -> Option<Self> {
-        if !cst.match_rule(node, Rule::SwitchCase) {
-            return None;
-        }
-        let label = if cst
-            .children(node)
-            .any(|c| cst.match_token(c, Token::Case).is_some())
-        {
-            let expr_node = cst
-                .children(node)
-                .find(|c| matches!(cst.get(*c), Node::Rule(_, _)))?;
-            SwitchLabel::Case(UnparsedExpr(expr_node))
-        } else {
-            SwitchLabel::Default
-        };
-        let body_node = cst
-            .children(node)
-            .find(|c| cst.match_rule(*c, Rule::CompoundStatement))?;
-        let body = CompoundStatement::from_cst(cst, body_node)?;
-        Some(Self {
-            label,
-            body,
-            span: cst.span(node),
-        })
-    }
-}
-
-/// A switch-case label: `case EXPR:` or `default:`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SwitchLabel {
-    Case(UnparsedExpr),
-    Default,
 }
 
 // ---- helpers ----
@@ -966,22 +909,6 @@ mod tests {
         assert!(Statement::from_cst(&cst, first).is_none());
     }
 
-    #[test]
-    fn switch_label_default_when_no_case_keyword() {
-        let cst = parse("switch (x) { default: z; }");
-        // PoC doesn't parse this — return None and confirm.
-        let sc_node = cst
-            .children(crate::parser::NodeRef::ROOT)
-            .find(|c| cst.match_rule(*c, Rule::SwitchCase));
-        assert!(sc_node.is_none());
-    }
-
-    #[test]
-    fn switch_case_returns_none_for_unrelated_node() {
-        let cst = parse("int x;");
-        let first = first_non_skip(&cst);
-        assert!(SwitchCase::from_cst(&cst, first).is_none());
-    }
 
     #[test]
     fn statement_dispatch_returns_none_for_unrelated_node() {
@@ -1040,4 +967,5 @@ mod tests {
             other => panic!("expected nested If in else branch, got {:?}", other),
         }
     }
+
 }

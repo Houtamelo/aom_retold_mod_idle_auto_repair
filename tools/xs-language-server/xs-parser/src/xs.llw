@@ -90,7 +90,8 @@ token LPar='(' RPar=')' LBrace='{' RBrace='}' LBrak='[' RBrak=']'
 
 // --- Assignment operators (right-associative chain) ---
 token Assign='=' PlusAssign='+=' MinusAssign='-=' StarAssign='*='
-      SlashAssign='/=' PercentAssign='%=';
+      SlashAssign='/=' PercentAssign='%='
+      AmpAssign='&=' PipeAssign='|=' XorAssign='^=';
 
 // --- Binary / unary operators ---
 // (Bitwise `&` and `^` are not part of XS in the scripts we model; the
@@ -100,7 +101,7 @@ token Assign='=' PlusAssign='+=' MinusAssign='-=' StarAssign='*='
 //  rule.)
 token Plus='+' Minus='-' Star='*' Slash='/' Percent='%'
       Eq='==' Neq='!=' Lt='<' Gt='>' Leq='<=' Geq='>='
-      AndAnd='&&' OrOr='||' Amp='&' Pipe='|' Tilde='~' Excl='!';
+      AndAnd='&&' OrOr='||' Amp='&' Pipe='|' Caret='^' Tilde='~' Excl='!';
 
 // --- Update (increment / decrement) ---
 token PlusPlus='++' MinusMinus='--';
@@ -270,7 +271,7 @@ field_declaration: declaration_specifiers declarator ['=' expression] ';';
 /// own line, but the grammar doesn't enforce newlines (lexical
 /// whitespace is already skipped).
 rule_definition:
-  'rule' Identifier rule_modifier* compound_statement
+  'rule' Identifier (rule_modifier | rule_preproc_directive)* compound_statement
 ;
 
 /// One rule-block modifier. The grammar is open-ended: any number of
@@ -288,6 +289,21 @@ rule_modifier^:
 | 'inactive'
 | 'runImmediately'
 | 'group' Identifier
+;
+
+/// Preprocessor directive accepted between a rule's name and its body.
+/// The outer rule consumes the leading '#' so the branch alternatives have
+/// disjoint first sets. The inner markers reuse the top-level preprocessor
+/// rule kinds so the typed AST can reuse the same extraction helpers.
+rule_preproc_directive:
+  '#'
+  (
+    'if' preproc_expr @preproc_if
+  | PreprocElif preproc_expr @preproc_elif
+  | PreprocElse @preproc_else
+  | PreprocEndif @preproc_endif
+  | PreprocDefine Identifier @preproc_def
+  )
 ;
 
 
@@ -510,12 +526,19 @@ init_declarator: declarator ['=' expression] ;
 /// alternative (`PreprocElse statement`) so it is consumed after the
 /// `if` body. This avoids the dangling-else LL(1) conflict while still
 /// allowing `if ... else` chains to parse without errors.
+///
+/// `case` and `default` labels are modeled as ordinary labeled statements.
+/// This is coarser than a separate switch-case AST, but it accepts the
+/// consecutive labels and compound bodies used by retail XS without
+/// requiring a dedicated switch-case disambiguation rule.
 statement^:
-  'if' parenthesized_expression statement @if_statement
+  ?1 'default' ':' statement @default_statement
+| 'case' expression ':' statement @case_statement
+| 'if' parenthesized_expression statement @if_statement
 | PreprocElse statement @else_statement
 | 'while' parenthesized_expression statement @while_statement
 | 'for' '(' for_init ';' [expression] ';' [expression] ')' statement @for_statement
-| 'switch' parenthesized_expression '{' switch_case* '}' @switch_statement
+| 'switch' parenthesized_expression compound_statement @switch_statement
 | 'return' [expression] ';' @return_statement
 | 'break' ';' @break_statement
 | 'continue' ';' @continue_statement
@@ -597,14 +620,6 @@ expression_statement: [expression] ';' ;
 // Switch / case
 //==============================================================================
 
-/// `switch (expr) { case val: ... default: ... }` — a switch
-/// statement. Each case clause is a labeled block. The `case` and
-/// `default` keywords are distinct at the lexical level, so the
-/// choice inside `switch_case` is LL(1).
-switch_case^:
-  'case' expression ':' compound_statement
-| 'default' ':' compound_statement
-;
 
 
 //==============================================================================
@@ -647,7 +662,7 @@ comma_expr: assignment_expr ;
 /// "extra-wrapping" problem of `bin_expr` with `=` appended.
 assignment_expr^:
   conditional_expr
-  [('=' | '+=' | '-=' | '*=' | '/=' | '%=') assignment_expr >]
+  [('=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&=' | '|=' | '^=') assignment_expr >]
 ;
 
 /// Conditional (ternary) expression: `cond ? then : else`. The middle
@@ -665,7 +680,7 @@ binary_expr:
 | binary_expr '&&' binary_expr @logical_and_expr
 | binary_expr ('==' | '!=') binary_expr @equality_expr
 | binary_expr ('<' | '>' | '<=' | '>=') binary_expr @relational_expr
-| binary_expr ('&' | '|') binary_expr @bitwise_expr
+ | binary_expr ('&' | '|' | '^') binary_expr @bitwise_expr
 | ?t binary_expr ('+' | '-') binary_expr @additive_expr
 | ?t binary_expr ('*' | '/' | '%') binary_expr @multiplicative_expr
 | unary_expr

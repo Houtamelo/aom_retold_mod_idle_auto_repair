@@ -1167,6 +1167,7 @@ mod tests {
         assert!(!has_error_descendant(&cst, first));
     }
 
+
     #[test]
     fn rule_definition_extracts_retail_snippet_s_rbe_06() {
         // Excerpt from game/ai/core/economy/economic_units.xs::deleteExcessGatherers,

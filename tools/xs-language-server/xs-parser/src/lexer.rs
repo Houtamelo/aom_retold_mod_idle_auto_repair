@@ -163,6 +163,12 @@ pub enum Token {
     SlashAssign,
     #[token("%=")]
     PercentAssign,
+    #[token("&=")]
+    AmpAssign,
+    #[token("|=")]
+    PipeAssign,
+    #[token("^=")]
+    XorAssign,
     #[token("+")]
     Plus,
     #[token("-")]
@@ -193,6 +199,8 @@ pub enum Token {
     Amp,
     #[token("|")]
     Pipe,
+    #[token("^")]
+    Caret,
     #[token("~")]
     Tilde,
     #[token("!")]
@@ -232,4 +240,101 @@ pub fn tokenize(
         spans.push(span);
     }
     (tokens, spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: tokenize `source` and return the vector of non-skip/Error tokens
+    /// together with a count of lexer errors.
+    fn tokenize_non_skip(source: &str) -> (Vec<Token>, usize) {
+        let mut diags = Vec::new();
+        let (tokens, _spans) = tokenize(source, &mut diags);
+        let error_count = tokens.iter().filter(|t| **t == Token::Error).count();
+        let filtered: Vec<_> = tokens
+            .into_iter()
+            .filter(|t| !matches!(t, Token::Whitespace | Token::LineComment | Token::BlockComment | Token::EOF))
+            .collect();
+        (filtered, error_count)
+    }
+
+    #[test]
+    fn block_comment_with_multiple_stars() {
+        let source = "/***** Increase army sizes *****/\nint x = 1;";
+        let (tokens, errors) = tokenize_non_skip(source);
+        assert_eq!(errors, 0, "block comment with repeated stars should lex cleanly");
+        assert!(tokens.contains(&Token::Int));
+        assert!(tokens.contains(&Token::Identifier));
+        assert!(tokens.contains(&Token::IntConst));
+    }
+
+    #[test]
+    fn block_comment_multiline_preserve_offsets() {
+        let source = "/* line1\n * line2\n */\nint y = 2;";
+        let (tokens, errors) = tokenize_non_skip(source);
+        assert_eq!(errors, 0, "multi-line block comment should lex cleanly");
+        assert!(tokens.contains(&Token::Int));
+        assert!(tokens.contains(&Token::IntConst));
+    }
+
+    #[test]
+    fn block_comment_empty() {
+        let source = "/**/\nint z = 3;";
+        let (tokens, errors) = tokenize_non_skip(source);
+        assert_eq!(errors, 0, "empty block comment should lex cleanly");
+        assert!(tokens.contains(&Token::Int));
+    }
+
+    #[test]
+    fn adjacent_block_comments_parsed_separately() {
+        let source = "/* a */ /* b */ int w = 4;";
+        let (tokens, errors) = tokenize_non_skip(source);
+        assert_eq!(errors, 0, "adjacent block comments should produce two skip tokens");
+        assert!(tokens.contains(&Token::Int));
+        assert!(tokens.contains(&Token::IntConst));
+    }
+
+    #[test]
+    fn debug_godpowers_header() {
+        let source = "//==============================================================================\n/* godpowers.xs\n\n   This file contains all logic for the management of god powers.\n\n*/\n//==============================================================================";
+        let mut diags = Vec::new();
+        let (tokens, spans) = tokenize(source, &mut diags);
+        eprintln!("diags: {:?}", diags);
+        for (t, s) in tokens.iter().zip(spans.iter()) {
+            eprintln!("{:?} @ {}..{}: {:?}", t, s.start, s.end, &source[s.clone()]);
+        }
+    }
+
+    #[test]
+    fn block_comments_do_not_merge_across_code() {
+        let source = "/* preInit() */\nvoid preInit()\n{\n}\n/* postInit() */\nvoid postInit()\n{\n}";
+        let mut diags = Vec::new();
+        let (tokens, spans) = tokenize(source, &mut diags);
+        assert!(diags.is_empty(), "source with two block comments should lex without errors");
+        let comment_spans: Vec<_> = tokens
+            .iter()
+            .zip(spans.iter())
+            .filter(|(t, _)| **t == Token::BlockComment)
+            .map(|(_, s)| s.clone())
+            .collect();
+        assert_eq!(
+            comment_spans.len(),
+            2,
+            "expected two separate block comment tokens, got {:?}",
+            comment_spans
+        );
+        // Each comment should be short; a greedy regex would merge them into one
+        // span covering the whole file.
+        assert!(
+            comment_spans[0].end - comment_spans[0].start < 20,
+            "first block comment span unexpectedly long: {:?}",
+            comment_spans[0]
+        );
+        assert!(
+            comment_spans[1].end - comment_spans[1].start < 20,
+            "second block comment span unexpectedly long: {:?}",
+            comment_spans[1]
+        );
+    }
 }

@@ -969,6 +969,7 @@ pub enum BinaryOp {
     Leq,
     Geq,
     BitAnd,
+    BitXor,
     BitOr,
     Add,
     Sub,
@@ -1020,6 +1021,9 @@ impl BinaryOp {
                 })
                 .or_else(|| {
                     cst.match_token(c, Token::Amp).map(|(_, s)| (BinaryOp::BitAnd, s))
+                })
+                .or_else(|| {
+                    cst.match_token(c, Token::Caret).map(|(_, s)| (BinaryOp::BitXor, s))
                 })
                 .or_else(|| {
                     cst.match_token(c, Token::Pipe).map(|(_, s)| (BinaryOp::BitOr, s))
@@ -1113,6 +1117,10 @@ impl BinaryExpr {
                         .or_else(|| {
                             cst.match_token(c, Token::Amp)
                                 .map(|(_, s)| (BinaryOp::BitAnd, s))
+                        })
+                        .or_else(|| {
+                            cst.match_token(c, Token::Caret)
+                                .map(|(_, s)| (BinaryOp::BitXor, s))
                         })
                         .or_else(|| {
                             cst.match_token(c, Token::Pipe)

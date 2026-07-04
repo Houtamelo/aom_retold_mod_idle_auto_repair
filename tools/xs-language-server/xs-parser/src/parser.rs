@@ -86,6 +86,11 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_block_declaration_or_definition_1(&self) -> bool {
         self.function_pointer_branch_applies()
     }
+
+    /// Semantic predicate for the `?1 'default' ':' statement` branch of `statement^`.
+    fn predicate_statement_1(&self) -> bool {
+        self.current == Token::DefaultKw && self.peek(1) == Token::Colon
+    }
 }
 
 #[cfg(test)]
