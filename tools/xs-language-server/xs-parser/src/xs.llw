@@ -247,16 +247,41 @@ preproc_primary:
 // specifier-no-trailing-semi/proposal.md for the survey evidence). The
 // PoC grammar previously required `;` and produced 149 spurious "invalid
 // syntax, expected: ';'" diagnostics on `bo_system_internal.xs` alone.
+// (See `class_member` for the dispatching rule that detects
+// function-pointer-typed fields first, then falls through to the
+// regular `class_member_regular` rule.)
 class_specifier: 'class' Identifier '{' class_member* '}';
 
 /// One member of a class. Members can be field declarations (with an
 /// initializer), function forward declarations, or function definitions
 /// (a.k.a. methods). The disambiguator is the same as at the top level:
 /// the first token after the declaration specifiers.
+///
+/// `?1 function_pointer_field_declaration` is tried first via
+/// the `?1` predicate (which commits the parser to the
+/// function-pointer-typed field form when current is a primitive
+/// type and the next token is `(`). Otherwise the parser falls
+/// through to `class_member_regular`, which uses ordered choice to
+/// disambiguate between function definitions, forward declarations,
+/// and regular fields.
 class_member^:
+  ?1 function_pointer_field_declaration
+| class_member_regular
+;
+
+class_member_regular^:
   function_definition_rule
 / forward_declaration_rule
 / field_declaration
+;
+
+/// A function-pointer-typed class field such as
+/// `void(int) mWaveStartCallback = attackWaveDefaultCallback;` or
+/// `bool(ref StrategyData) mUpdateFunc = [](ref StrategyData data) -> bool { ... };`.
+/// This is the class-member analog of the top-level
+/// `function_pointer_declaration` rule.
+function_pointer_field_declaration:
+  primitive_type '(' [parameter_list] ')' Identifier ['=' expression] ';' @function_pointer_field_declaration
 ;
 
 /// `int x = 0;` or `int[] mPlans = default;` — a class field. Unlike
@@ -372,8 +397,17 @@ type_qualifier: 'const' | 'ref';
 /// user-defined type. The conflict with expressions is resolved at the
 /// call site (the `top_level_item` and `block_item` rules) via ordered
 /// A type specifier as it appears in a declaration.
+///
+/// PR-K addition: `function_pointer_type` is now a valid type
+/// specifier so that class fields like
+///   `void(int) onPlanCreate = [](int planID = -1) {};`
+/// can be parsed. The function-pointer form starts with a primitive
+/// type, so it overlaps with `array_or_primitive_type`'s first set.
+/// The `?t` predicate on the function-pointer alternative commits
+/// the parser to that branch only when the next token after the
+/// primitive type is `(` (followed by a `)` later).
 type_specifier^:
-  array_or_primitive_type
+  ?t array_or_primitive_type
 | Identifier @type_identifier
 ;
 
@@ -386,6 +420,16 @@ type_specifier^:
 /// `Type[] name` for user-defined array types like
 /// `ConstraintParameters[] vConstraints`).
 array_or_primitive_type^: primitive_type [?t '[' ']'];
+
+/// A function-pointer type: `ReturnType '(' [parameter_list] ')'.
+/// Used in class field declarations and (eventually) in parameter
+/// lists. The first token is always a primitive type keyword
+/// (`void`, `int`, etc.), so the alternative's first set overlaps
+/// with `array_or_primitive_type`. The `?t` predicate at the call
+/// site (`type_specifier`) resolves the conflict by trying the
+/// function-pointer form and falling back to the bare primitive
+/// form on failure.
+function_pointer_type: primitive_type '(' [parameter_list] ')' @function_pointer_type;
 
 /// A primitive type token. Note that `string` is a keyword but is also
 /// a common user-identifier; the lexer should prefer the keyword match

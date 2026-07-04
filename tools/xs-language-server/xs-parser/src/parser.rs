@@ -91,6 +91,25 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_statement_1(&self) -> bool {
         self.current == Token::DefaultKw && self.peek(1) == Token::Colon
     }
+
+    /// Semantic predicate for the function-pointer-field branch of
+    /// `class_member^`. Returns `true` when the current token is a
+    /// primitive type and the next token is `(` — i.e. the start of
+    /// `void(int) field = ...;` or `bool(ref X) field = ...;`.
+    ///
+    /// Without this, the parser falls through to `field_declaration`,
+    /// which parses `void(int) field` as `void` (type) + `(int)`
+    /// (parenthesized declarator) + `field` (stray identifier) and
+    /// then chokes on the missing `=` or `;`.
+    fn predicate_class_member_1(&self) -> bool {
+        if !matches!(
+            self.current,
+            Token::Void | Token::Int | Token::Bool | Token::Float | Token::StringKw | Token::Vector
+        ) {
+            return false;
+        }
+        self.peek(1) == Token::LPar
+    }
 }
 
 #[cfg(test)]
