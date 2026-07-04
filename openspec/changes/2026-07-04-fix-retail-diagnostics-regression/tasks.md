@@ -24,8 +24,10 @@
 - [x] Map bitwise operators in `BinaryOp` and add unit tests.
 
 ## Phase 5: Seed workspace class names into `TypeTable`
-- [ ] Update `lsp/src/diagnostics.rs` to pass engine/class names to `TypeTable::with_primitives()`.
-- [ ] Verify `BOSystem myBO = ...;` style declarations resolve.
+- [x] Update `lsp/src/diagnostics.rs` to accept a caller-supplied `TypeTable` and seed it with workspace class names in `collect_all`.
+- [x] Add `symbols::extract_class_names` for robust class-name extraction when typed-AST recovery drops later classes.
+- [x] Update `lsp/tests/game_folder_parse.rs` to seed the retail parse pass with all game-folder class names.
+- [x] Verify `BOSystem myBO = ...;` and `Strategy inactiveStrategy;` style declarations resolve.
 
 ## Phase 6: Function-pointer-typed variables
 - [ ] Add grammar support for `void(int) foo = ...;` declarations.

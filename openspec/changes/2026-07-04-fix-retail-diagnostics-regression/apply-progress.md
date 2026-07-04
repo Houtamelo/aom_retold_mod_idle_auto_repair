@@ -107,10 +107,56 @@ None — implementation matches `spec-for-init-decl.md`.
 - `Declaration::from_cst` was made tolerant of missing semicolons because `for_init_declaration` intentionally omits the trailing `;` (it is consumed by the parent `for` rule). This fallback only applies to for-init declarations; normal declarations still require a `;` at the grammar level.
 - The grammar uses a helper rule `for_init_declaration` with a `@declaration` marker so the `ForInit` wrapper keeps its existing `Rule::ForInit` kind while containing a `Rule::Declaration` child. This avoids touching the LSP/semantic layers in a pure parser PR.
 
+## PR-C: Seed workspace class names into `TypeTable`
+
+- Commit: `TBD`
+- Files changed:
+  - `tools/xs-language-server/lsp/src/diagnostics.rs`
+  - `tools/xs-language-server/lsp/src/symbols.rs`
+  - `tools/xs-language-server/lsp/tests/game_folder_parse.rs`
+  - `openspec/changes/2026-07-04-fix-retail-diagnostics-regression/tasks.md`
+
+### Implementation
+
+- Added `collect_diagnostics_with_types(source, types)` so callers can supply a seeded `TypeTable`.
+- Kept `collect_diagnostics(source)` as a backward-compatible wrapper that only knows primitives.
+- `collect_all` now builds a `TypeTable` with primitives plus every class name found in the semantic `VirtualProject`.
+- Added `symbols::extract_class_names(source)` (regex-free line scan) because parser recovery inside class bodies can drop later classes from the typed AST, making `SymbolTable` class enumeration incomplete.
+- The retail integration test pre-scans the game folder for class names and seeds the per-file diagnostic pass.
+
+### Test counts
+
+| Suite | Before | After |
+|-------|--------|-------|
+| xs-parser unit tests | 186 | 186 |
+| lsp lib unit tests | 192 | 196 |
+
+The `semantic_tokens_repro::test_builtin_type_emits_engine_modifier` integration test is a pre-existing failure unrelated to this parser change.
+
+### Retail diagnostic count
+
+- Before PR-C: 4,782 ERROR parse diagnostics
+- After PR-C: 2,367 ERROR parse diagnostics
+- Reduction: 2,415
+
+This is close to the expected ~2,500 reduction for class-typed locals. The remaining ~2,367 errors are driven by:
+- Lambda expressions (`[...](...) {}` in defaults/assignments)
+- Function-pointer-typed variables/parameters (`void(int) foo = ...`)
+- The 71 `}` cascade points whose root cause is in PR-D territory
+
+### Deviations from spec
+
+| Spec recommendation | Implementation | Rationale |
+|---------------------|----------------|-----------|
+| Use `Workspace::SymbolTable` to enumerate class names. | Used `symbols::extract_class_names` (source scan) because class bodies containing unsupported constructs cause parser recovery to elide later classes from the typed AST. | Produces the complete class-name set the predicate needs. |
+
+### Notes
+
+- Primitive type names are never overridden by class names: `TypeTable::is_type` checks primitives first and we skip inserting names that already resolve as primitives.
+- Class-typed locals with and without initializer now parse cleanly when the class name is seeded.
+
 ## Remaining Tasks
 
-- [ ] **Phase 5: Seed workspace class names into `TypeTable`**
-  - Update `lsp/src/diagnostics.rs` to pass class names to `TypeTable::with_primitives()`.
 - [ ] **Phase 6 (deferred): Function-pointer-typed variables** (`void(int) foo = ...;`)
 - [ ] **Phase 7 (insurance): Downgrade honest limitations to WARNING**
   - Guarantees the 1,730 threshold cannot be breached by design gaps.
@@ -119,11 +165,11 @@ None — implementation matches `spec-for-init-decl.md`.
 ## Workload / PR Boundary
 
 - Mode: chained PRs (proposal §Phased PR strategy).
-- Current work unit: PR-A through PR-B — comment regexes, `else`, bitwise tokens, and `for_init` declaration form.
-- Boundary: this batch starts from the post-Phase-4 baseline and ends with the four parser commits above.
-- Review budget impact: small — each commit is focused, and the combined user-facing diff is under 300 lines.
+- Current work unit: PR-C — seed workspace class names into `TypeTable`.
+- Boundary: this batch starts from the post-PR-B baseline (4,782 errors) and ends with the class-name wiring commit.
+- Review budget impact: small — focused LSP-only change, ~120 lines.
 
 ## Status
 
-4 / 7 phases complete.  
-Ready for verify on the PR-A/PR-B slice, or continue with Phase 5 in the next apply batch.
+5 / 7 phases complete.  
+Ready for verify on the PR-C slice, or continue with Phase 6 / Phase 7 in the next apply batch.
