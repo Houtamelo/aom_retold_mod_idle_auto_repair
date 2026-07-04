@@ -91,17 +91,17 @@ token LPar='(' RPar=')' LBrace='{' RBrace='}' LBrak='[' RBrak=']'
 // --- Assignment operators (right-associative chain) ---
 token Assign='=' PlusAssign='+=' MinusAssign='-=' StarAssign='*='
       SlashAssign='/=' PercentAssign='%='
-      AmpAssign='&=' PipeAssign='|=' XorAssign='^=';
+      AmpAssign='&=' PipeAssign='|=' XorAssign='^='
+      ShlAssign='<<=' ShrAssign='>>=';
 
 // --- Binary / unary operators ---
-// (Bitwise `&` and `^` are not part of XS in the scripts we model; the
-//  grammar leaves them out entirely to avoid W002 unused token
-//  warnings. `~` IS used as a unary prefix (bitwise NOT). If you need
-//  bitwise And/Or, add the tokens back and extend the binary_expr
-//  rule.)
+// `<<` and `>>` are bit-shift operators used in retail XS for
+// flag/bitmask constants like `(1 << 4)`. `<<=` and `>>=` are the
+// corresponding compound-assignment forms.
 token Plus='+' Minus='-' Star='*' Slash='/' Percent='%'
       Eq='==' Neq='!=' Lt='<' Gt='>' Leq='<=' Geq='>='
-      AndAnd='&&' OrOr='||' Amp='&' Pipe='|' Caret='^' Tilde='~' Excl='!';
+      AndAnd='&&' OrOr='||' Amp='&' Pipe='|' Caret='^'
+      Shl='<<' Shr='>>' Tilde='~' Excl='!';
 
 // --- Update (increment / decrement) ---
 token PlusPlus='++' MinusMinus='--';
@@ -662,7 +662,7 @@ comma_expr: assignment_expr ;
 /// "extra-wrapping" problem of `bin_expr` with `=` appended.
 assignment_expr^:
   conditional_expr
-  [('=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&=' | '|=' | '^=') assignment_expr >]
+  [('=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&=' | '|=' | '^=' | '<<=' | '>>=') assignment_expr >]
 ;
 
 /// Conditional (ternary) expression: `cond ? then : else`. The middle
@@ -680,7 +680,8 @@ binary_expr:
 | binary_expr '&&' binary_expr @logical_and_expr
 | binary_expr ('==' | '!=') binary_expr @equality_expr
 | binary_expr ('<' | '>' | '<=' | '>=') binary_expr @relational_expr
- | binary_expr ('&' | '|' | '^') binary_expr @bitwise_expr
+| binary_expr ('&' | '|' | '^') binary_expr @bitwise_expr
+| ?t binary_expr ('<<' | '>>') binary_expr @shift_expr
 | ?t binary_expr ('+' | '-') binary_expr @additive_expr
 | ?t binary_expr ('*' | '/' | '%') binary_expr @multiplicative_expr
 | unary_expr

@@ -247,3 +247,18 @@ Ready for PR-E (the 71 cascade targets + remaining grammar gaps) or to push for 
 
 **5 / 7 phases complete.** All real grammar gaps closed. The downgrade-insurance "phase 7" was explicitly rejected as cheating. Phase 6 (function-pointer-typed variable defaults) was completed as part of PR-D. No more changes planned for this change folder.
 
+
+## PR-F record (added 2026-07-04, continued from "all gaps closed" — user requested deeper work)
+
+### PR-F: Bit-shift operators (`<<`, `>>`, `<<=`, `>>=`)
+
+- **Tokens added to lexer**: `Shl='<<'`, `Shr='>>'`, `ShlAssign='<<='`, `ShrAssign='>>='` (PR-A had `&`, `|`, `^=` and the bitwise compound; shifts were missed).
+- **Grammar wiring** (`xs.llw`): new `shift_expr` binary alternative between `relational` and `additive` (C precedence: shift binds tighter than relational). Assignment rule extended with `<<=` / `>>=`.
+- **AST updates** (`ast/expr.rs`): `BinaryOp::{Shl, Shr}` and `AssignmentOp::{ShlAssign, ShrAssign}`. `refine_from_tokens` extended.
+- **TDD suite** (`lsp/tests/bit_shift_repro.rs`): 6 integration tests covering shift-left, shift-right, `<<=`, `>>=`, the exact rm_locs.xs initializer form, and chained shifts.
+- **Lexer unit tests** (`src/lexer.rs`): 5 new tests verifying longest-match wins (`<<` vs `<`, `<<=` vs `<<`), comparison operators unaffected.
+
+**Commits**:
+- (pending)
+
+**Retail diagnostics**: 1,108 → **1,060** (additional 48 reduction).

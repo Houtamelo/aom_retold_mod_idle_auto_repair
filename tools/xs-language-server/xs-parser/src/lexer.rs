@@ -169,6 +169,14 @@ pub enum Token {
     PipeAssign,
     #[token("^=")]
     XorAssign,
+    #[token("<<=")]
+    ShlAssign,
+    #[token(">>=")]
+    ShrAssign,
+    #[token("<<")]
+    Shl,
+    #[token(">>")]
+    Shr,
     #[token("+")]
     Plus,
     #[token("-")]
@@ -336,5 +344,53 @@ mod tests {
             "second block comment span unexpectedly long: {:?}",
             comment_spans[1]
         );
+    }
+
+    // --- Bit-shift operators ---
+    // Logos uses longest-prefix matching, so `<<=` / `>>=` / `<<` / `>>`
+    // must lex as their multi-char form, not as two consecutive `<`/`>`
+    // tokens.
+
+    #[test]
+    fn shift_left_lexes_as_shl() {
+        let (tokens, errors) = tokenize_non_skip("1 << 4");
+        assert_eq!(errors, 0);
+        assert!(tokens.contains(&Token::Shl), "expected Shl token, got {:?}", tokens);
+        assert!(!tokens.contains(&Token::Lt), "should NOT have a bare Lt token, got {:?}", tokens);
+    }
+
+    #[test]
+    fn shift_right_lexes_as_shr() {
+        let (tokens, errors) = tokenize_non_skip("8 >> 1");
+        assert_eq!(errors, 0);
+        assert!(tokens.contains(&Token::Shr), "expected Shr token, got {:?}", tokens);
+        assert!(!tokens.contains(&Token::Gt), "should NOT have a bare Gt token, got {:?}", tokens);
+    }
+
+    #[test]
+    fn shift_left_assign_lexes_as_shl_assign() {
+        let (tokens, errors) = tokenize_non_skip("a <<= 2");
+        assert_eq!(errors, 0);
+        assert!(tokens.contains(&Token::ShlAssign), "expected ShlAssign token, got {:?}", tokens);
+    }
+
+    #[test]
+    fn shift_right_assign_lexes_as_shr_assign() {
+        let (tokens, errors) = tokenize_non_skip("b >>= 3");
+        assert_eq!(errors, 0);
+        assert!(tokens.contains(&Token::ShrAssign), "expected ShrAssign token, got {:?}", tokens);
+    }
+
+    #[test]
+    fn comparison_operators_still_work() {
+        // Make sure adding Shl/Shr didn't break single-char <, >, <=, >=
+        let (tokens, errors) = tokenize_non_skip("a < b; a > b; a <= b; a >= b;");
+        assert_eq!(errors, 0);
+        assert!(tokens.contains(&Token::Lt));
+        assert!(tokens.contains(&Token::Gt));
+        assert!(tokens.contains(&Token::Leq));
+        assert!(tokens.contains(&Token::Geq));
+        assert!(!tokens.contains(&Token::Shl));
+        assert!(!tokens.contains(&Token::Shr));
     }
 }

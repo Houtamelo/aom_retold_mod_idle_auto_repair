@@ -971,6 +971,8 @@ pub enum BinaryOp {
     BitAnd,
     BitXor,
     BitOr,
+    Shl,
+    Shr,
     Add,
     Sub,
     Mul,
@@ -986,6 +988,7 @@ impl BinaryOp {
             Rule::EqualityExpr => Self::Eq, // default; refined below
             Rule::RelationalExpr => Self::Lt, // default; refined below
             Rule::BitwiseExpr => Self::BitAnd, // default; refined below
+            Rule::ShiftExpr => Self::Shl, // default; refined below
             Rule::AdditiveExpr => Self::Add, // default; refined below
             Rule::MultiplicativeExpr => Self::Mul, // default; refined below
             _ => return None,
@@ -1027,6 +1030,12 @@ impl BinaryOp {
                 })
                 .or_else(|| {
                     cst.match_token(c, Token::Pipe).map(|(_, s)| (BinaryOp::BitOr, s))
+                })
+                .or_else(|| {
+                    cst.match_token(c, Token::Shl).map(|(_, s)| (BinaryOp::Shl, s))
+                })
+                .or_else(|| {
+                    cst.match_token(c, Token::Shr).map(|(_, s)| (BinaryOp::Shr, s))
                 })
                 .or_else(|| {
                     cst.match_token(c, Token::Plus).map(|(_, s)| (BinaryOp::Add, s))
@@ -1251,6 +1260,8 @@ pub enum AssignmentOp {
     StarAssign,
     SlashAssign,
     PercentAssign,
+    ShlAssign,
+    ShrAssign,
 }
 
 impl AssignmentOp {
@@ -1262,6 +1273,8 @@ impl AssignmentOp {
             Token::StarAssign => Self::StarAssign,
             Token::SlashAssign => Self::SlashAssign,
             Token::PercentAssign => Self::PercentAssign,
+            Token::ShlAssign => Self::ShlAssign,
+            Token::ShrAssign => Self::ShrAssign,
             _ => return None,
         })
     }
