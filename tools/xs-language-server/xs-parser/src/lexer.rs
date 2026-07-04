@@ -229,11 +229,38 @@ pub enum Token {
     MinusMinus,
     #[regex(r"//[^\n]*", allow_greedy = true)]
     LineComment,
-    #[regex(r"/\*([^*]|\*+[^*/])*\*/")]
+    #[regex(r"/\*", block_comment_callback)]
     BlockComment,
     #[regex(r"[ \t\n\r\f]+")]
     Whitespace,
     Error,
+}
+
+/// Advances a logos `Lexer` past the closing `*/` of a block comment.
+///
+/// Logos does not support non-greedy quantifiers (`*?`), so a regex
+/// like `r"/\\*[\\s\\S]*?\\*/"` would be interpreted greedily and eat
+/// the wrong `*/` (the last one in the file). Instead, the regex
+/// `r"/\\*"` matches the opening, and this callback scans the
+/// remainder for the first `*/` byte pair, bumping the lexer past it.
+/// If no closing `*/` exists before EOF, the callback skips the
+/// remainder so the parser does not hang.
+fn block_comment_callback(lex: &mut logos::Lexer<'_, Token>) -> logos::Filter<()> {
+    let bytes = lex.remainder().as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+            lex.bump(i + 2);
+            return logos::Filter::Emit(());
+        }
+        i += 1;
+    }
+    // Unterminated comment: consume the rest of the source so the parser
+    // can make forward progress. A diagnostic for the missing `*/` is the
+    // caller's responsibility.
+    let len = bytes.len();
+    lex.bump(len);
+    logos::Filter::Emit(())
 }
 
 // TODO: extend tokenization (e.g. check for mismatched parentheses)
