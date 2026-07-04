@@ -281,6 +281,37 @@ impl Declarator {
     pub fn from_inline_children(cst: &Cst, children: &[NodeRef]) -> Option<Self> {
         let first = *children.first()?;
 
+        // Leading array declarator: '[' ']' Identifier
+        // (the C99 GCC-extension form used in retail XS for user-
+        // defined array types like `ConstraintParameters[] vConstraints`).
+        if cst.match_token(first, Token::LBrak).is_some() {
+            // Find the matching RBrak.
+            let close_idx = children
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find_map(|(i, c)| cst.match_token(*c, Token::RBrak).map(|(_, s)| (i, s)))?;
+            let _close_span = cst.match_token(children[close_idx.0], Token::RBrak)?.1;
+            // The next non-skip token should be the Identifier (the
+            // name of the variable being declared).
+            let name_idx = children
+                .iter()
+                .enumerate()
+                .skip(close_idx.0 + 1)
+                .find_map(|(i, c)| cst.match_token(*c, Token::Identifier).map(|(_, s)| (i, s)))?;
+            let (name_text, name_span) = cst.match_token(children[name_idx.0], Token::Identifier)?;
+            let open_span = cst.match_token(first, Token::LBrak)?.1;
+            let close_span = cst.match_token(children[close_idx.0], Token::RBrak)?.1;
+            let span = open_span.start..name_span.end;
+            return Some(Self {
+                direct: DirectDeclarator::ArrayDeclarator(ArrayDeclarator {
+                    base: Identifier::new(name_text.to_string(), name_span.clone()),
+                    span: span.clone(),
+                }),
+                span,
+            });
+        }
+
         // Paren declarator: '(' ... ')'
         if cst.match_token(first, Token::LPar).is_some() {
             // For now, model the simple case where the inner is a plain identifier.
@@ -312,6 +343,34 @@ impl Declarator {
 
         // Identifier-based declarator
         let (name_text, name_span) = cst.match_token(first, Token::Identifier)?;
+
+        // Look for '[' after the name for an array declarator (e.g.
+        // `int[] vConstraints`). Must be checked BEFORE the function
+        // declarator because both can be followed by content; the
+        // '[' vs '(' first token is what distinguishes them.
+        let lbrak_pos = children
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(i, c)| cst.match_token(*c, Token::LBrak).map(|(_, s)| (i, s)));
+
+        if let Some((lbrak_idx, open_span)) = lbrak_pos {
+            // Find matching RBrak after the LBrak.
+            let close_idx = children
+                .iter()
+                .enumerate()
+                .skip(lbrak_idx + 1)
+                .find_map(|(i, c)| cst.match_token(*c, Token::RBrak).map(|(_, s)| (i, s)))?;
+            let close_span = cst.match_token(children[close_idx.0], Token::RBrak)?.1;
+            let span = name_span.start..close_span.end;
+            return Some(Self {
+                direct: DirectDeclarator::ArrayDeclarator(ArrayDeclarator {
+                    base: Identifier::new(name_text.to_string(), name_span.clone()),
+                    span: span.clone(),
+                }),
+                span,
+            });
+        }
 
         // Look for '(' after the name for a function declarator.
         let lpar_pos = children
@@ -366,6 +425,7 @@ impl Declarator {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DirectDeclarator {
     FunctionDeclarator(FunctionDeclarator),
+    ArrayDeclarator(ArrayDeclarator),
     IdentDeclarator(IdentifierDeclarator),
     ParenDeclarator(ParenDeclarator),
 }
@@ -377,6 +437,10 @@ impl DirectDeclarator {
         if cst.match_rule(node, Rule::FunctionDeclarator) {
             let fd = FunctionDeclarator::from_cst(cst, node)?;
             return Some(DirectDeclarator::FunctionDeclarator(fd));
+        }
+        if cst.match_rule(node, Rule::ArrayDeclarator) {
+            let ad = ArrayDeclarator::from_cst(cst, node)?;
+            return Some(DirectDeclarator::ArrayDeclarator(ad));
         }
         if cst.match_rule(node, Rule::IdentifierDeclarator) {
             let id = IdentifierDeclarator::from_cst(cst, node)?;
@@ -447,6 +511,41 @@ impl FunctionDeclarator {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArrayDeclarator {
+    pub base: Identifier,
+    pub span: Span,
+}
+
+/// `name[]` — a declarator that wraps an identifier in array brackets,
+/// e.g. `ConstraintParameters[] vConstraints` or `int[] x`. Used to
+/// model XS user-defined array types (Limitation 8 fix: previously
+/// only `int[]` and other primitive arrays were supported, but retail
+/// uses `ConstraintParameters[]`, `int[]`, `float[]`, etc. with
+/// both primitive and user-defined element types).
+///
+/// The `[]` is "empty" in XS — no size expression. C-style
+/// `int[5]` would be a separate `SizedArrayDeclarator` variant if the
+/// engine ever supports it.
+impl ArrayDeclarator {
+    /// Legacy: when `Rule::ArrayDeclarator` is a wrapper node.
+    /// In the current grammar the parser produces inline content —
+    /// use `Declarator::from_inline` instead.
+    pub fn from_cst(cst: &Cst, node: NodeRef) -> Option<Self> {
+        if !cst.match_rule(node, Rule::ArrayDeclarator) {
+            return None;
+        }
+        let ident_node = cst
+            .children(node)
+            .find(|c| cst.match_token(*c, Token::Identifier).is_some())?;
+        let (text, span) = cst.match_token(ident_node, Token::Identifier)?;
+        Some(Self {
+            base: Identifier::new(text.to_string(), span),
+            span: cst.span(node),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdentifierDeclarator {
     pub name: Identifier,
     pub span: Span,
@@ -488,29 +587,6 @@ impl ParenDeclarator {
             inner: Box::new(decl),
             span: cst.span(node),
         })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ArrayDeclarator {
-    pub base: Box<DirectDeclarator>,
-    pub span: Span,
-}
-
-// XS has no real `[]` subscript on declarators; the production in the
-// grammar (via `array_or_primitive_type`) puts the brackets on the type
-// instead. `ArrayDeclarator` is kept as a placeholder for future
-// extensions.
-#[allow(dead_code)]
-impl ArrayDeclarator {
-    pub fn empty(span: Span) -> Self {
-        Self {
-            base: Box::new(DirectDeclarator::IdentDeclarator(IdentifierDeclarator {
-                name: Identifier::new(String::new(), 0..0),
-                span: 0..0,
-            })),
-            span,
-        }
     }
 }
 

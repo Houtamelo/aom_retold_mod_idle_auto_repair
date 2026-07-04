@@ -821,6 +821,7 @@ fn format_primitive_or_class(ty: &Type) -> String {
 fn name_from_declarator(direct: &DirectDeclarator) -> Option<&Identifier> {
     match direct {
         DirectDeclarator::IdentDeclarator(id) => Some(&id.name),
+        DirectDeclarator::ArrayDeclarator(ad) => Some(&ad.base),
         DirectDeclarator::FunctionDeclarator(fd) => Some(&fd.base),
         DirectDeclarator::ParenDeclarator(pd) => name_from_declarator(&pd.inner.direct),
     }

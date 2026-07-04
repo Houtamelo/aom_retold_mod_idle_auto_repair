@@ -44,6 +44,7 @@ fn parse_typed(source: &str) -> Option<(Cst<'_>, TranslationUnit)> {
 fn base_name(direct: &xs_parser::ast::DirectDeclarator) -> &xs_parser::ast::Identifier {
     match direct {
         xs_parser::ast::DirectDeclarator::IdentDeclarator(id) => &id.name,
+        xs_parser::ast::DirectDeclarator::ArrayDeclarator(ad) => &ad.base,
         xs_parser::ast::DirectDeclarator::FunctionDeclarator(fd) => &fd.base,
         xs_parser::ast::DirectDeclarator::ParenDeclarator(pd) => base_name(&pd.inner.direct),
     }

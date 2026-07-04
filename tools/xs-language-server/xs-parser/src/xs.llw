@@ -379,8 +379,13 @@ type_specifier^:
 
 /// Either an array type (`int[]`) or a bare primitive type (`int`).
 /// Combined into a single alternative because both start with the
-/// primitive type keyword tokens.
-array_or_primitive_type^: primitive_type ['[' ']'];
+/// primitive type keyword tokens. The `?t` predicate on the
+/// trailing `['[' ']']` option suppresses the E014 LL(1) conflict
+/// that arises from the `direct_declarator` rule's
+/// `'[' ']' Identifier` alternative (the C99 GCC-extension form
+/// `Type[] name` for user-defined array types like
+/// `ConstraintParameters[] vConstraints`).
+array_or_primitive_type^: primitive_type [?t '[' ']'];
 
 /// A primitive type token. Note that `string` is a keyword but is also
 /// a common user-identifier; the lexer should prefer the keyword match
@@ -423,20 +428,42 @@ primitive_type: 'void' | 'int' | 'bool' | 'float' | 'string' | 'vector';
 declarator^: direct_declarator;
 
 /// A direct declarator: an identifier, optionally with a parameter
-/// list (for functions) or a parenthesized declarator (for
+/// list (for functions), an array decoration (e.g. `int[]` or
+/// `MyClass[]`), or a parenthesized declarator (for
 /// function-pointer-typed parameters, see `parameter_declaration`).
 ///
-/// The two Identifier-prefixed forms are grouped inside `( ... )` so
-/// the parent alternation sees them as one alternative starting with
-/// Identifier. Inside the group we use `|` (alternation, not ordered
-/// choice) because both inner alternatives consume the Identifier and
-/// then decide based on whether `(` follows.
+/// XS supports both array-decoration positions:
+///   * `int[] vConstraints` — `[]` BEFORE the name (C99 GCC extension,
+///     used by retail XS for user-defined array types)
+///   * `int vConstraints[]` — `[]` AFTER the name (C standard, also
+///     used by retail XS for primitive arrays)
+/// The grammar supports the BEFORE form explicitly; the AFTER form
+/// would need a recursive `direct_declarator '[' ']'` alternative
+/// (and is left as a future extension if retail ever needs it).
+///
+/// The three Identifier-prefixed forms are grouped inside `( ... )`
+/// so the parent alternation sees them as one alternative starting
+/// with Identifier. Inside the group we use `|` (alternation, not
+/// ordered choice) because each inner alternative consumes the
+/// Identifier and then decides based on whether `(` or `[` follows
+/// (or nothing, for the bare-identifier form). The first sets of
+/// the three inner alternatives are `(`/`[`/empty, which are
+/// disjoint, so the LL(1) check is satisfied.
+///
+/// The `?t` predicate on the `'[' ']' Identifier` alternative
+/// suppresses an E014 conflict with `array_or_primitive_type`'s
+/// optional `['[' ']']` (which is at the type level, not the
+/// declarator level). The predicate commits the parser to the
+/// leading-array form only when the next token is `[` and the
+/// following one is `]`.
 direct_declarator^:
   Identifier
     (
       '(' [parameter_list] ')' @function_declarator
+    | '[' ']' @array_declarator
     | @identifier_declarator
     )
+| ?t '[' ']' Identifier @leading_array_declarator
 | '(' declarator ')' @paren_declarator
 ;
 

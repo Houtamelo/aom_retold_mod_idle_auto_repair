@@ -532,6 +532,7 @@ impl DirectDeclaratorBasics for xs_parser::ast::DirectDeclarator {
     fn base(&self) -> &Identifier {
         match self {
             xs_parser::ast::DirectDeclarator::IdentDeclarator(id) => &id.name,
+            xs_parser::ast::DirectDeclarator::ArrayDeclarator(ad) => &ad.base,
             xs_parser::ast::DirectDeclarator::FunctionDeclarator(fd) => &fd.base,
             xs_parser::ast::DirectDeclarator::ParenDeclarator(pd) => pd.inner.direct.base(),
         }

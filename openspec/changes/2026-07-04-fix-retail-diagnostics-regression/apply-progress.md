@@ -321,3 +321,55 @@ baseline).
   complex expressions, and unary plus.
 
 **Retail diagnostics**: 317 -> **307** (additional 10 reduction).
+
+## PR-I record (added 2026-07-04, after "all gaps closed" — array declarator grammar gap)
+
+### PR-I: Array declarator for user-defined types
+
+Retail XS uses `ConstraintParameters[] vConstraints = default;` in
+rm_forests.xs (and many other random_map files). The grammar
+previously only supported `int[]` via `array_or_primitive_type` —
+the `[]` was part of the TYPE, not the declarator. This meant
+user-defined array types failed because the `[]` was at the
+declarator position, not the type position.
+
+**Two sub-fixes**:
+
+1. **Trailing `[]` after Identifier in declarator** (the standard
+   C form, e.g. `int x[]`). Added `'[' ']' @array_declarator` as
+   an inner alternative of the Identifier-prefixed form in
+   `direct_declarator`.
+
+2. **Leading `[]` before Identifier in declarator** (the C99
+   GCC-extension form, e.g. `ConstraintParameters[] vConstraints`).
+   Added `?t '[' ']' Identifier @leading_array_declarator` as a
+   top-level alternative in `direct_declarator`. The `?t` predicate
+   suppresses the E014 conflict with `array_or_primitive_type`'s
+   optional `['[' ']']`.
+
+3. **`?t` predicate on `array_or_primitive_type` optional**.
+   Added `primitive_type [?t '[' ']']` to suppress the same E014
+   conflict from the opposite direction.
+
+**AST changes**:
+- New `ArrayDeclarator` struct (replaces a placeholder that was
+  already there with the right name but wrong shape).
+- New `DirectDeclarator::ArrayDeclarator` variant.
+- `DirectDeclarator::from_cst` extended.
+- `Declarator::from_inline_children` extended with:
+  - Leading array form: `['[' ']' Identifier]`
+  - Trailing array form: `Identifier '[' ']'`
+- LSP callers updated: `base_name` in `definition_check.rs`,
+  `DirectDeclaratorBasics` in `references.rs`, and
+  `name_from_declarator` in `symbols.rs` all now match the new
+  variant.
+
+**TDD suite** (`lsp/tests/array_user_type_repro.rs`):
+- `primitive_array_still_works`: regression test for `int[]`
+- `user_class_array`: `ConstraintParameters[] vConstraints = default;`
+- `user_class_array_no_initializer`: `ConstraintParameters[] vConstraints;`
+- `user_class_array_with_default_initializer`: the exact rm_forests.xs pattern
+- `multiple_user_class_arrays`: 3 consecutive array declarations
+- `user_class_array_in_function_body`: scope test
+
+**Retail diagnostics**: 307 -> **187** (additional 120 reduction, 39%).
