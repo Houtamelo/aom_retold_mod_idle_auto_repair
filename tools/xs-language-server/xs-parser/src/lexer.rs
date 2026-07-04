@@ -197,7 +197,9 @@ pub enum Token {
     PlusPlus,
     #[token("--")]
     MinusMinus,
+    #[regex(r"//[^\n]*", logos::skip, allow_greedy = true)]
     LineComment,
+    #[regex(r"/\*([^*]|\*+[^*/])*\*/", logos::skip)]
     BlockComment,
     #[regex(r"[ \t\n\r\f]+")]
     Whitespace,
