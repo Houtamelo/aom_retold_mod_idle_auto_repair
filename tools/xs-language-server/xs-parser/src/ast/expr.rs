@@ -25,9 +25,9 @@
 //
 // Pass 3 (T12) — see expr T12 section appended below.
 
-use crate::ast::cst_helpers::{is_skip_token, only_child};
-use crate::ast::spanned::Braced;
-use crate::ast::statement::BlockItemList;
+use crate::ast::cst_helpers::{child_by_rule, child_by_token, is_skip_token, only_child};
+use crate::ast::spanned::{Braced, Bracketed, Parenthesized};
+use crate::ast::statement::{BlockItemList, CompoundStatement};
 use crate::ast::type_system::{Identifier, TypeSpecifier};
 use crate::parser::{Cst, Node, NodeRef, Rule, Span};
 use crate::lexer::Token;
@@ -555,7 +555,12 @@ impl VectorLiteral {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LambdaExpr {
-    pub params: Option<crate::ast::spanned::Parenthesized<crate::ast::parameter::ParameterList>>,
+    /// Capture list between `[` and `]`. XS lambdas in the shipped
+    /// scripts use empty capture lists (`[]`), so the inner vector is
+    /// currently always empty; the field is kept for forward
+    /// compatibility with richer capture syntax.
+    pub captures: Bracketed<Vec<Identifier>>,
+    pub params: crate::ast::spanned::Parenthesized<crate::ast::parameter::ParameterList>,
     pub ret_type: Option<TypeSpecifier>,
     pub body: Braced<BlockItemList>,
     pub span: Span,
@@ -563,11 +568,44 @@ pub struct LambdaExpr {
 
 impl LambdaExpr {
     pub fn from_cst(cst: &Cst, node: NodeRef) -> Option<Self> {
-        // The current PoC grammar does not parse lambdas (it emits
-        // ERROR subtrees — see `examples/diag_cst.rs`). The code path
-        // is kept correct for a grammar that fixes it.
-        let _ = (cst, node);
-        None
+        if !cst.match_rule(node, Rule::LambdaExpr) {
+            return None;
+        }
+
+        let children: Vec<_> = cst.children(node).collect();
+
+        let lbrak = child_by_token(cst, node, Token::LBrak)?;
+        let rbrak = child_by_token(cst, node, Token::RBrak)?;
+        let captures = Bracketed::new(lbrak, Vec::new(), rbrak);
+
+        let lpar_idx = children
+            .iter()
+            .position(|c| cst.match_token(*c, Token::LPar).is_some())?;
+        let rpar_idx = children
+            .iter()
+            .position(|c| cst.match_token(*c, Token::RPar).is_some())?;
+        let lpar = child_by_token(cst, node, Token::LPar)?;
+        let rpar = child_by_token(cst, node, Token::RPar)?;
+        let params_inner = children[lpar_idx + 1..rpar_idx]
+            .iter()
+            .find(|c| cst.match_rule(**c, Rule::ParameterList))
+            .and_then(|n| crate::ast::parameter::ParameterList::from_cst(cst, *n))
+            .unwrap_or_else(crate::ast::parameter::ParameterList::empty);
+        let params = Parenthesized::new(lpar, params_inner, rpar);
+
+        let ret_type = child_by_rule(cst, node, Rule::TypeSpecifier)
+            .and_then(|n| TypeSpecifier::from_cst(cst, n));
+
+        let body_node = child_by_rule(cst, node, Rule::CompoundStatement)?;
+        let body = CompoundStatement::from_cst(cst, body_node)?;
+
+        Some(Self {
+            captures,
+            params,
+            ret_type,
+            body: body.items,
+            span: cst.span(node),
+        })
     }
 }
 
@@ -1765,6 +1803,43 @@ mod tests {
                 assert_eq!(lit.value, "5");
             }
             other => panic!("expected Comma or IntLiteral, got {:?}", other),
+        }
+    }
+
+    // -------- PR-D: lambda expressions --------
+
+    #[test]
+    fn lambda_extracts_captures_and_params_lambda_d_01() {
+        let cst = parse("void cb = [](int x) { aiEcho(x); };");
+        let inner = init_comma_expr(&cst);
+        match Expr::from_cst(&cst, inner).expect("Expr") {
+            Expr::Lambda(l) => {
+                assert!(l.captures.inner.is_empty(), "expected empty captures");
+                assert_eq!(l.params.inner.items.items.len(), 1);
+                match &l.params.inner.items.items[0].0.inner {
+                    crate::ast::parameter::ParameterInner::RegularParam(rp) => {
+                        assert_eq!(rp.name.node, "x");
+                    }
+                    other => panic!("expected RegularParam, got {:?}", other),
+                }
+                assert_eq!(l.body.inner.len(), 1);
+            }
+            other => panic!("expected Lambda, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lambda_extracts_with_no_captures_lambda_d_02() {
+        let cst = parse("void gFoo = []() {};");
+        let inner = init_comma_expr(&cst);
+        match Expr::from_cst(&cst, inner).expect("Expr") {
+            Expr::Lambda(l) => {
+                assert!(l.captures.inner.is_empty());
+                assert!(l.params.inner.is_empty());
+                assert!(l.body.inner.is_empty());
+                assert!(l.ret_type.is_none());
+            }
+            other => panic!("expected Lambda, got {:?}", other),
         }
     }
 }

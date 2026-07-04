@@ -693,8 +693,10 @@ postfix_expr:
 /// Lambdas come first because they start with `[` (an `LBrak`
 /// token), which is a unique first token and would otherwise
 /// collide with the subscript path above.
+lambda_expr: '[' ']' '(' [parameter_list] ')' ['->' type_specifier] compound_statement ;
+
 primary_expr^:
-  '[' ']' '(' [parameter_list] ')' ['->' type_specifier] compound_statement @lambda_expr
+  lambda_expr
 | 'new' type_specifier '(' [argument_list] ')' @new_expr
 | 'vector' '(' [argument_list] ')' @vector_literal
 | '(' expression ')' @paren_expr
