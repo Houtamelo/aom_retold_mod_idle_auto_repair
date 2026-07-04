@@ -137,6 +137,11 @@ fn walk_declarator_defaults(
                                 walk_expr(cst, source, &expr, engine, table, merged, project, out);
                             }
                         }
+                        xs_parser::ast::ParameterInner::LeadingArrayParam(r) => {
+                            if let Some(expr) = r.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0)) {
+                                walk_expr(cst, source, &expr, engine, table, merged, project, out);
+                            }
+                        }
                     }
                 }
             }

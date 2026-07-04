@@ -121,6 +121,11 @@ impl<'a> IdentifierWalker<'a> {
                                 }
                             }
                             ParameterInner::FunctionPointerParam(fp) => self.push(&fp.name),
+                            ParameterInner::LeadingArrayParam(r) => {
+                                if let Some(name) = &r.name {
+                                    self.push(name);
+                                }
+                            }
                         }
                         if let Some(expr) = param.default_expr(self.cst) {
                             self.visit_expr(&expr);
@@ -357,6 +362,11 @@ impl<'a> IdentifierAtFinder<'a> {
                                 }
                             }
                             ParameterInner::FunctionPointerParam(fp) => self.consider(&fp.name),
+                            ParameterInner::LeadingArrayParam(r) => {
+                                if let Some(name) = &r.name {
+                                    self.consider(name);
+                                }
+                            }
                         }
                         if let Some(expr) = param.default_expr(self.cst) {
                             self.visit_expr(&expr);
@@ -549,6 +559,9 @@ impl ParameterDefaultExpr for ParameterDeclaration {
             ParameterInner::RegularParam(r) => r.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0)),
             ParameterInner::FunctionPointerParam(fp) => {
                 fp.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0))
+            }
+            ParameterInner::LeadingArrayParam(r) => {
+                r.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0))
             }
         }
     }

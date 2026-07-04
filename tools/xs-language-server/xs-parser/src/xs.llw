@@ -536,11 +536,26 @@ parameter: parameter_declaration;
 /// The leading `[type_qualifier]` was removed — it triggered an E014
 /// LL(1) conflict because `const`/`ref` can also start the inner
 /// declaration_specifiers (which already handles type qualifiers via
-/// its own `(storage_class | type_qualifier)*` chain).
+/// A single parameter declaration.
+///
+/// The disambiguation is by the first token after the declaration
+/// specifiers:
+///   * `[`  → leading array decoration (`ref HuntData[] candidates`),
+///            handled by the `?t '[' ']'` alternative
+///   * `(`  → function-pointer signature
+///            (`(int, int) name`), handled by `function_pointer_param`
+///   * any  → regular parameter (`name` or unnamed)
+///
+/// The leading-array form is needed because retail XS uses the
+/// `ref UserClass[] name` combination in Biome.xs and similar
+/// files. Without this alternative, the parser sees `ref` + a
+/// user-defined `HuntData` + `[` and cannot dispatch to any of the
+/// existing inner branches.
 parameter_declaration:
   declaration_specifiers
   (
-    '(' [parameter_list] ')' Identifier ['=' expression] @function_pointer_param
+    ?t '[' ']' Identifier ['=' expression] @leading_array_param
+  | '(' [parameter_list] ')' Identifier ['=' expression] @function_pointer_param
   | [Identifier] ['=' expression] @regular_param
   )
 ;

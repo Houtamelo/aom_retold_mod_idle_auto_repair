@@ -607,6 +607,25 @@ impl ParameterDeclaration {
         if cst.match_rule(node, Rule::RegularParam) {
             return Self::from_regular_param_body(cst, node);
         }
+        if cst.match_rule(node, Rule::LeadingArrayParam) {
+            let span = cst.span(node);
+            let regular = RegularParam::from_cst(cst, node)?;
+            return Some(Self {
+                decl_specs: DeclarationSpecifiers {
+                    storage: Vec::new(),
+                    ty: TypeSpecifier {
+                        ty: crate::ast::type_system::Type::Void,
+                        is_array: false,
+                        fn_pointer: None,
+                        span: span.clone(),
+                    },
+                    type_quals: Vec::new(),
+                    span: span.clone(),
+                },
+                inner: ParameterInner::LeadingArrayParam(regular),
+                span,
+            });
+        }
         if cst.match_rule(node, Rule::FunctionPointerParam) {
             let ret_ty = cst
                 .children(node)
@@ -647,6 +666,12 @@ impl ParameterDeclaration {
             }
             if cst.match_rule(child, Rule::RegularParam) {
                 inner = Some(ParameterInner::RegularParam(
+                    RegularParam::from_cst(cst, child)?,
+                ));
+                continue;
+            }
+            if cst.match_rule(child, Rule::LeadingArrayParam) {
+                inner = Some(ParameterInner::LeadingArrayParam(
                     RegularParam::from_cst(cst, child)?,
                 ));
             }
@@ -771,6 +796,14 @@ impl ParameterDeclaration {
 pub enum ParameterInner {
     FunctionPointerParam(FunctionPointerParam),
     RegularParam(RegularParam),
+    /// Parameter with a leading array decoration, e.g.
+    /// `ref HuntData[] candidates`. The `[]` is the leading array
+    /// form (C99 GCC extension) used by retail XS for user-defined
+    /// array types. Structurally identical to a `RegularParam` in
+    /// terms of `name` and `default`; the separate variant lets
+    /// downstream consumers tell the array case apart if they
+    /// need to.
+    LeadingArrayParam(RegularParam),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

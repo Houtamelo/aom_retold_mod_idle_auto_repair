@@ -860,6 +860,12 @@ fn param_from_declaration(param: &ParameterDeclaration, cst: &Cst<'_>, source: &
             default: default_expr_text(fp.default.as_ref(), cst, source),
             is_ref: false,
         },
+        ParameterInner::LeadingArrayParam(RegularParam { name, default, .. }) => Param {
+            ty: format!("{}[]", format_type(&param.decl_specs)),
+            name: name.as_ref().map_or_else(String::new, |n| n.node.clone()),
+            default: default_expr_text(default.as_ref(), cst, source),
+            is_ref: param.decl_specs.is_ref(),
+        },
     }
 }
 

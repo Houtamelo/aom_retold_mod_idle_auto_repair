@@ -214,6 +214,7 @@ fn param_name(param: &ParameterDeclaration) -> Option<&xs_parser::ast::Identifie
     match &param.inner {
         ParameterInner::RegularParam(r) => r.name.as_ref(),
         ParameterInner::FunctionPointerParam(fp) => Some(&fp.name),
+        ParameterInner::LeadingArrayParam(r) => r.name.as_ref(),
     }
 }
 
@@ -222,6 +223,9 @@ fn parameter_has_default(cst: &Cst<'_>, param: &ParameterDeclaration) -> bool {
         ParameterInner::RegularParam(r) => r.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0)).is_some(),
         ParameterInner::FunctionPointerParam(fp) => {
             fp.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0)).is_some()
+        }
+        ParameterInner::LeadingArrayParam(r) => {
+            r.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0)).is_some()
         }
     }
 }
