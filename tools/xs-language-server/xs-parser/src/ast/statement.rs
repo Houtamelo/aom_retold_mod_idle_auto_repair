@@ -1,5 +1,6 @@
 use crate::ast::cst_helpers::{child_by_rule, is_skip_token};
 use crate::ast::declaration::{Declaration, UnparsedExpr};
+use crate::ast::preproc::{PreprocDef, PreprocElif, PreprocElse, PreprocEndif, PreprocIf};
 use crate::ast::spanned::{Braced, Parenthesized};
 use crate::ast::top_level::{FieldDeclaration, ForwardDeclaration, FunctionDefinition};
 use crate::parser::{Cst, Node, NodeRef, Rule, Span};
@@ -17,6 +18,9 @@ use crate::lexer::Token;
 ///    reduce — the variants accept both shapes)
 /// 3. `CompoundStatement` (a `{ block_item* }` block)
 /// 4. `ExpressionStatement` (an `expr;`)
+/// 5. Preprocessor directives (`#if`/`#elif`/`#else`/`#endif`/`#define`),
+///    allowed inside function bodies (retail XS uses these for
+///    difficulty-based conditional returns and include-guard patterns).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Statement {
     If(IfStatement),
@@ -28,6 +32,11 @@ pub enum Statement {
     Continue(ContinueStatement),
     Compound(CompoundStatement),
     Expression(ExpressionStatement),
+    PreprocIf(PreprocIf),
+    PreprocElif(PreprocElif),
+    PreprocElse(PreprocElse),
+    PreprocEndif(PreprocEndif),
+    PreprocDef(PreprocDef),
 }
 
 impl Statement {
@@ -58,6 +67,21 @@ impl Statement {
         }
         if let Some(x) = ExpressionStatement::from_cst(cst, node) {
             return Some(Self::Expression(x));
+        }
+        if let Some(x) = PreprocIf::from_cst(cst, node) {
+            return Some(Self::PreprocIf(x));
+        }
+        if let Some(x) = PreprocElif::from_cst(cst, node) {
+            return Some(Self::PreprocElif(x));
+        }
+        if let Some(x) = PreprocElse::from_cst(cst, node) {
+            return Some(Self::PreprocElse(x));
+        }
+        if let Some(x) = PreprocEndif::from_cst(cst, node) {
+            return Some(Self::PreprocEndif(x));
+        }
+        if let Some(x) = PreprocDef::from_cst(cst, node) {
+            return Some(Self::PreprocDef(x));
         }
         None
     }
@@ -602,6 +626,11 @@ impl StmtSpanned for Statement {
             Statement::Continue(s) => s.span.clone(),
             Statement::Compound(s) => s.span.clone(),
             Statement::Expression(s) => s.span.clone(),
+            Statement::PreprocIf(s) => s.span.clone(),
+            Statement::PreprocElif(s) => s.span.clone(),
+            Statement::PreprocElse(s) => s.span.clone(),
+            Statement::PreprocEndif(s) => s.span.clone(),
+            Statement::PreprocDef(s) => s.span.clone(),
         }
     }
 }

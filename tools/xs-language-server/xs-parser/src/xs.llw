@@ -186,7 +186,8 @@ preproc_endif:  '#' PreprocEndif @preproc_endif;
 
 /// A preprocessor expression. Supports the C-style `defined(NAME)`
 /// predicate (used in include guards) plus the usual binary operators,
-/// parenthesization, and engine constants (treated as `Identifier`s).
+/// parenthesization, boolean literals (`true`/`false`/`TRUE`/`FALSE`),
+/// numeric literals, and engine constants (treated as `Identifier`s).
 ///
 /// Example: `defined(BIOME_INCLUDE) == false`
 preproc_expr:
@@ -220,6 +221,10 @@ preproc_primary:
 | IntConst
 | FloatConst
 | Identifier
+| 'true'
+| 'false'
+| 'TRUE'
+| 'FALSE'
 ;
 
 
@@ -531,6 +536,14 @@ init_declarator: declarator ['=' expression] ;
 /// This is coarser than a separate switch-case AST, but it accepts the
 /// consecutive labels and compound bodies used by retail XS without
 /// requiring a dedicated switch-case disambiguation rule.
+///
+/// Preprocessor directives (`#if`/`#elif`/`#else`/`#endif`/`#define`)
+/// are also accepted as statement-level alternatives via
+/// `statement_preproc_directive`. Retail XS uses these inside function
+/// bodies (e.g. `selectByDifficulty` in `utilities.xs` uses
+/// `#if (cDifficulty == 0)` to choose a default return value by
+/// difficulty). The first token is always `#`, which is disjoint from
+/// every other statement alternative, so the first sets do not conflict.
 statement^:
   ?1 'default' ':' statement @default_statement
 | 'case' expression ':' statement @case_statement
@@ -542,8 +555,27 @@ statement^:
 | 'return' [expression] ';' @return_statement
 | 'break' ';' @break_statement
 | 'continue' ';' @continue_statement
+| statement_preproc_directive
 | compound_statement
 | expression_statement
+;
+
+/// Preprocessor directive accepted as a statement. Mirrors
+/// `rule_preproc_directive` but is used in function bodies and
+/// arbitrary statement lists. The outer rule consumes the leading `#`
+/// so the inner alternatives have disjoint first sets (the second
+/// token of each preproc directive). The inner markers reuse the
+/// top-level preprocessor rule kinds so the typed AST can reuse the
+/// same extraction helpers.
+statement_preproc_directive:
+  '#'
+  (
+    'if' preproc_expr @preproc_if
+  | PreprocElif preproc_expr @preproc_elif
+  | PreprocElse @preproc_else
+  | PreprocEndif @preproc_endif
+  | PreprocDefine Identifier @preproc_def
+  )
 ;
 
 /// A parenthesized expression. Kept as a helper because `if`, `while`,

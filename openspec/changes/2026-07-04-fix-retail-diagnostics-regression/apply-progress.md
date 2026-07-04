@@ -262,3 +262,45 @@ Ready for PR-E (the 71 cascade targets + remaining grammar gaps) or to push for 
 - (pending)
 
 **Retail diagnostics**: 1,108 → **1,060** (additional 48 reduction).
+
+## PR-G record (added 2026-07-04, after "all gaps closed" — biggest single-PR drop)
+
+### PR-G: preprocessor directives in function bodies + `true`/`false` in preproc expressions
+
+This is the largest single-PR reduction since the project started: 1,060 → 317
+diagnostics (743 reduction, 70% of remaining errors).
+
+**Two sub-fixes**:
+
+1. **`statement^` accepts preproc directives** (via new
+   `statement_preproc_directive` rule, mirroring `rule_preproc_directive`).
+   Retail functions like `selectByDifficulty` in `utilities.xs` use
+   `#if (cDifficulty == 0)` inside the function body to choose a default
+   return value by difficulty. Previously the parser rejected these and
+   emitted a cascade of errors (12+ errors per function body containing
+   preproc). The new rule's first token is `Hash` (`#`), disjoint from
+   every other statement alternative, so the LL(1) check is satisfied.
+
+2. **`true`/`false`/`TRUE`/`FALSE` in preproc expressions**.
+   `preproc_primary` now accepts the four boolean keyword tokens in
+   addition to `IntConst`, `FloatConst`, and `Identifier`. The retail
+   pattern `#if (defined(FOO) == false)` (used in include guards across
+   the codebase) was rejected before because `false` was not in the
+   preproc primary's first set.
+
+**TDD suite** (`lsp/tests/preproc_in_function_body_repro.rs`):
+- `preproc_if_in_function_body`: `int main() { #if (X) return 1; #endif }` -> 0 errors
+- `preproc_if_else_in_function_body`: with `#else` branch
+- `preproc_elif_in_function_body`: `#if` / `#elif` / `#else` / `#endif` chain
+- `preproc_define_in_function_body`: `#define FOO` inside a function
+- `preproc_before_top_level_item`: include-guard pattern at file top
+- `preproc_with_false_keyword`: `#if (defined(X) == false)`
+- `preproc_with_true_keyword`: `#if (defined(X) == true)`
+- `no_leading_newline` / `with_leading_newline` / `with_leading_spaces`:
+  whitespace tolerance regressions
+
+**Retail diagnostics**: 1,060 -> **317** (additional 743 reduction, the
+largest single-PR drop since the project began; 99.83% from the 181,473
+baseline).
+
+**Test counts after PR-G**: 268 passed / 1 failed (pre-existing flake).
