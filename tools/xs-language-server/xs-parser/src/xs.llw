@@ -572,8 +572,14 @@ parameter_declaration:
 /// general type_specifier alternative because in parameter contexts
 /// `void(int)` must parse as the return type of a function-pointer
 /// parameter, not as the type of a regular parameter.
+///
+/// The optional `extern` storage-class specifier is allowed because
+/// retail XS uses `extern void() gFoo = ...;` at file scope to
+/// declare cross-script function-pointer-typed globals. The same
+/// form can also appear in block scope (handled by
+/// `block_declaration_or_definition`).
 function_pointer_declaration:
-  primitive_type '(' [parameter_list] ')' Identifier ['=' expression] ';' @function_pointer_declaration
+  ['extern'] primitive_type '(' [parameter_list] ')' Identifier ['=' expression] ';' @function_pointer_declaration
 ;
 
 declaration:

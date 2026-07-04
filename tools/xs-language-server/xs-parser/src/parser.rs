@@ -22,7 +22,22 @@ impl<'a> Parser<'a> {
     /// Returns `true` when the current token is a primitive return type
     /// immediately followed by `(`, indicating a function-pointer
     /// variable declaration.
+    ///
+    /// Matches the form `primitive_type '('`, optionally preceded by
+    /// the `extern` storage-class specifier (retail XS uses
+    /// `extern void() gFoo = ...;` at file scope). Returns `false`
+    /// for any other token so the parser falls through to the
+    /// regular `declaration_specifiers` branch.
     fn function_pointer_branch_applies(&self) -> bool {
+        if self.current == Token::Extern {
+            // `extern` may be followed by `void ( ...` — check that
+            // the token after `extern` is a primitive type and the
+            // token after that is `(`.
+            return matches!(
+                self.peek(1),
+                Token::Void | Token::Int | Token::Bool | Token::Float | Token::StringKw | Token::Vector
+            ) && self.peek(2) == Token::LPar;
+        }
         matches!(
             self.current,
             Token::Void | Token::Int | Token::Bool | Token::Float | Token::StringKw | Token::Vector
