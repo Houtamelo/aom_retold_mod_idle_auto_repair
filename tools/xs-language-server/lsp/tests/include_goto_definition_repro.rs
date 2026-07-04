@@ -7,9 +7,22 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tower_lsp_server::ls_types::Uri;
+
+/// Monotonic counter used to give every `Fixture::new` call a unique
+/// temp-dir suffix. Replaces the previous `std::process::id()` based
+/// naming, which collided across parallel tests in the same process
+/// (cargo runs integration tests in parallel by default, so two
+/// fixtures in the same test binary would `remove_dir_all` each
+/// other's directories mid-run).
+static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn next_fixture_id() -> u64 {
+    FIXTURE_COUNTER.fetch_add(1, Ordering::SeqCst)
+}
 
 // ===================================================================
 // Helpers — LSP Content-Length framing and JSON-RPC parsing
@@ -119,10 +132,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(vanilla_files: &[(&str, &str)], mod_files: &[(&str, &str)]) -> Fixture {
-        let pid = std::process::id();
+        let id = next_fixture_id();
         let tmp = std::env::temp_dir();
 
-        let game_root = tmp.join(format!("aomr_include_game_{pid}"));
+        let game_root = tmp.join(format!("aomr_include_game_{id}"));
         let _ = std::fs::remove_dir_all(&game_root);
         std::fs::create_dir_all(&game_root).expect("create temp game root");
         std::fs::copy(
@@ -136,7 +149,7 @@ impl Fixture {
         let mod_root = if mod_files.is_empty() {
             None
         } else {
-            let root = tmp.join(format!("aomr_include_mod_{pid}"));
+            let root = tmp.join(format!("aomr_include_mod_{id}"));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).expect("create temp mod root");
             write_files(&root, mod_files);

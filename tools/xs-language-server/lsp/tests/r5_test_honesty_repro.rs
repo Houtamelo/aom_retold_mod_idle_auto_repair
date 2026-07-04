@@ -8,7 +8,20 @@
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// Monotonic counter used to give every `make_temp_game_folder` call
+/// a unique temp-dir suffix. Replaces the previous
+/// `std::process::id()` based naming, which collided across parallel
+/// tests in the same process (cargo runs integration tests in
+/// parallel by default, so two fixtures in the same test binary
+/// would `remove_dir_all` each other's directories mid-run).
+static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn next_fixture_id() -> u64 {
+    FIXTURE_COUNTER.fetch_add(1, Ordering::SeqCst)
+}
 
 // ===================================================================
 // Helpers — LSP Content-Length framing and JSON-RPC parsing
@@ -233,9 +246,9 @@ fn resolve_doxygen_archive() -> std::path::PathBuf {
 }
 
 fn make_temp_game_folder() -> std::path::PathBuf {
-    let pid = std::process::id();
+    let id = next_fixture_id();
     let tmp = std::env::temp_dir();
-    let game_root = tmp.join(format!("aomr_ref_game_{pid}"));
+    let game_root = tmp.join(format!("aomr_ref_game_{id}"));
     let _ = std::fs::remove_dir_all(&game_root);
     std::fs::create_dir_all(&game_root).expect("create temp game root");
     let doxy_src = resolve_doxygen_archive();
@@ -308,7 +321,7 @@ fn read_response_with_id<R: Read>(
 /// wall-clock interval from write+flush to parsed response.
 fn measure_actual_references_response_window() -> Duration {
     let game_root = make_temp_game_folder();
-    let mod_root = std::env::temp_dir().join(format!("aomr_ref_mod_{}", std::process::id()));
+    let mod_root = std::env::temp_dir().join(format!("aomr_ref_mod_{}", next_fixture_id()));
     let _ = std::fs::remove_dir_all(&mod_root);
     let mod_dir = mod_root.join("game").join("ai").join("engine_ref_test");
     let main_path = mod_dir.join("main.xs");

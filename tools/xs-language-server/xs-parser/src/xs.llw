@@ -398,16 +398,22 @@ type_qualifier: 'const' | 'ref';
 /// call site (the `top_level_item` and `block_item` rules) via ordered
 /// A type specifier as it appears in a declaration.
 ///
-/// PR-K addition: `function_pointer_type` is now a valid type
-/// specifier so that class fields like
-///   `void(int) onPlanCreate = [](int planID = -1) {};`
-/// can be parsed. The function-pointer form starts with a primitive
-/// type, so it overlaps with `array_or_primitive_type`'s first set.
-/// The `?t` predicate on the function-pointer alternative commits
-/// the parser to that branch only when the next token after the
-/// primitive type is `(` (followed by a `)` later).
+/// Function-pointer types (`void(int)`) are NOT modeled as a
+/// `type_specifier` alternative because the function-pointer form is
+/// produced by dedicated rules at the call site where it can appear
+/// without LL(1) ambiguity:
+///   * `function_pointer_declaration` (top-level `void() gFoo = ...;`,
+///     with optional `extern` prefix)
+///   * `function_pointer_field_declaration` (class field
+///     `void(int) mFoo = ...;`)
+/// Putting `function_pointer_type` here as a third alternative would
+/// create an LL(1) conflict with `array_or_primitive_type` (both
+/// start with a primitive type keyword) and would also break the
+/// parameter path, where `void(int) cb` must parse as the return
+/// type of a function-pointer parameter, not as the type of a
+/// regular parameter.
 type_specifier^:
-  ?t array_or_primitive_type
+  array_or_primitive_type
 | Identifier @type_identifier
 ;
 
@@ -421,16 +427,6 @@ type_specifier^:
 /// `ConstraintParameters[] vConstraints`).
 array_or_primitive_type^: primitive_type [?t '[' ']'];
 
-/// A function-pointer type: `ReturnType '(' [parameter_list] ')'.
-/// Used in class field declarations and (eventually) in parameter
-/// lists. The first token is always a primitive type keyword
-/// (`void`, `int`, etc.), so the alternative's first set overlaps
-/// with `array_or_primitive_type`. The `?t` predicate at the call
-/// site (`type_specifier`) resolves the conflict by trying the
-/// function-pointer form and falling back to the bare primitive
-/// form on failure.
-function_pointer_type: primitive_type '(' [parameter_list] ')' @function_pointer_type;
-
 /// A primitive type token. Note that `string` is a keyword but is also
 /// a common user-identifier; the lexer should prefer the keyword match
 /// at the longest-prefix level.
@@ -440,8 +436,6 @@ primitive_type: 'void' | 'int' | 'bool' | 'float' | 'string' | 'vector';
 // now inlines the optional `[]` suffix. The rule is kept here as a
 // comment for reference; uncomment if you need it elsewhere.
 // array_type: primitive_type '[' ']';
-
-// `function_pointer_type` is currently unused in the PoC because
 // parameter_declaration was simplified. The rule is kept here as a
 // comment for reference; uncomment and wire up if function-pointer
 // parameters are needed.

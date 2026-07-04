@@ -228,6 +228,9 @@ fn visit_top_level_item_for_types(
         TopLevelItem::FunctionDefinition(f) => {
             visit_type_specifier(source, &f.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens);
             visit_params_for_types(source, &f.declarator.direct, current_file, own_table, merged, engine, workspace, project, tokens);
+            // Recurse into the function body so that local type
+            // specifiers (`int x = 1;` etc.) emit TYPE tokens too.
+            visit_block_items_for_types(source, &f.body.inner, current_file, own_table, merged, engine, workspace, project, tokens);
         }
         TopLevelItem::ForwardDeclaration(f) => {
             visit_type_specifier(source, &f.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens);
@@ -238,6 +241,65 @@ fn visit_top_level_item_for_types(
             visit_type_specifier(source, &d.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens);
         }
         _ => {}
+    }
+}
+
+/// Recurse into a function body to emit TYPE tokens for any
+/// type specifiers that appear in local declarations. Without this
+/// pass, a `void foo() { int x = 1; }` would emit a VARIABLE token
+/// for `x` but no TYPE token for `int` — a regression introduced
+/// when the typed-AST refactor dropped the old tree-walk.
+///
+/// The visitor is intentionally narrow: it only walks the BlockItem
+/// shape produced by the typed AST and only invokes
+/// `visit_type_specifier` on the decl_specs of declarations. Statement
+/// expressions that contain types (e.g. `(int)x`) are out of scope
+/// here — XS doesn't have C-style casts.
+fn visit_block_items_for_types(
+    source: &str,
+    items: &[xs_parser::ast::statement::BlockItem],
+    current_file: Option<&Path>,
+    own_table: &symbols::SymbolTable,
+    merged: Option<&MergedView>,
+    engine: &engine_api::SharedEngineApi,
+    workspace: &Workspace,
+    project: &VirtualProject,
+    tokens: &mut Vec<Token>,
+) {
+    use xs_parser::ast::statement::BlockItem;
+    for item in items {
+        match item {
+            BlockItem::Declaration(d) => {
+                visit_type_specifier(
+                    source, &d.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens,
+                );
+            }
+            BlockItem::FunctionDefinition(f) => {
+                visit_type_specifier(
+                    source, &f.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens,
+                );
+                visit_params_for_types(
+                    source, &f.declarator.direct, current_file, own_table, merged, engine, workspace, project, tokens,
+                );
+                visit_block_items_for_types(
+                    source, &f.body.inner, current_file, own_table, merged, engine, workspace, project, tokens,
+                );
+            }
+            BlockItem::ForwardDeclaration(f) => {
+                visit_type_specifier(
+                    source, &f.decl_specs, current_file, own_table, merged, engine, workspace, project, tokens,
+                );
+                visit_params_for_types(
+                    source, &f.declarator.direct, current_file, own_table, merged, engine, workspace, project, tokens,
+                );
+            }
+            BlockItem::Statement(_) => {
+                // Local statement expressions can contain type names
+                // (`obj.x` where x is a class field), but those go
+                // through the expression visitor, not the type
+                // visitor. Nothing to do here.
+            }
+        }
     }
 }
 
