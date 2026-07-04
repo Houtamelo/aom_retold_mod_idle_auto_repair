@@ -209,7 +209,7 @@ mod tests {
     fn test_api() -> &'static EngineApi {
         static API: OnceLock<EngineApi> = OnceLock::new();
         API.get_or_init(|| {
-            let archive = Path::new("../../docs/doxygen_retail.7z");
+            let archive = Path::new("../../../docs/doxygen_retail.7z");
             let cache_dir = TempDir::new().unwrap();
             EngineApi::load_from_archive(archive, cache_dir.path())
                 .expect("load engine API for tests")
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn load_from_archive_cold_start_hits_target_counts() {
-        let archive = Path::new("../../docs/doxygen_retail.7z");
+        let archive = Path::new("../../../docs/doxygen_retail.7z");
         let tmp = TempDir::new().unwrap();
         let cache_dir = tmp.path();
 
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn load_from_archive_warm_start_skips_extraction() {
-        let archive = Path::new("../../docs/doxygen_retail.7z");
+        let archive = Path::new("../../../docs/doxygen_retail.7z");
         let tmp = TempDir::new().unwrap();
         let cache_dir = tmp.path();
 
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn corrupt_cache_falls_back_to_re_extraction() {
-        let archive = Path::new("../../docs/doxygen_retail.7z");
+        let archive = Path::new("../../../docs/doxygen_retail.7z");
         let tmp = TempDir::new().unwrap();
         let cache_dir = tmp.path();
 

@@ -226,6 +226,7 @@ fn resolve_doxygen_archive() -> std::path::PathBuf {
     let repo_root = crate_dir
         .parent()
         .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
         .expect("repo root from CARGO_MANIFEST_DIR");
     let path = repo_root.join("docs").join("doxygen_retail.7z");
     std::fs::canonicalize(&path).unwrap_or(path)

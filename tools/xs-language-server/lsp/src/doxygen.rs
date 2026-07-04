@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn extracts_docs_doxygen_retail_counts() {
-        let archive = Path::new("../../docs/doxygen_retail.7z");
+        let archive = Path::new("../../../docs/doxygen_retail.7z");
         let data = extract_engine_api(archive).expect("extract docs/doxygen_retail.7z");
         // The archive contains 1804 function summary rows. `xsExecute` is not
         // present in the archive, so the server exposes exactly what Doxygen

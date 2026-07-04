@@ -879,6 +879,7 @@ mod tests {
             let workspace_root = manifest_dir
                 .parent()
                 .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
                 .expect("manifest inside workspace");
             let archive = workspace_root.join("docs/doxygen_retail.7z");
             let cache_dir = cache::state_cache_dir();

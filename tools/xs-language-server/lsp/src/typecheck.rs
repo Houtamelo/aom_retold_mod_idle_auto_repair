@@ -606,7 +606,7 @@ mod tests {
         static ENGINE: OnceLock<EngineApi> = OnceLock::new();
         ENGINE.get_or_init(|| {
             let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace_root = manifest_dir.parent().and_then(|p| p.parent()).unwrap();
+            let workspace_root = manifest_dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()).unwrap();
             let archive = workspace_root.join("docs/doxygen_retail.7z");
             let cache_dir = crate::cache::state_cache_dir();
             EngineApi::load_from_archive(&archive, &cache_dir).expect("load engine data from Doxygen archive")
