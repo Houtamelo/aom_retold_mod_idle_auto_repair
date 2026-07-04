@@ -234,9 +234,10 @@ fn locate_server_binary() -> std::path::PathBuf {
 /// game folder. `docs/doxygen_retail.7z` is committed in the repo.
 fn resolve_test_game_path() -> std::path::PathBuf {
     let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    // tools/xs-language-server -> tools/ -> aom_retold_mod/
+    // tools/xs-language-server/lsp -> tools/xs-language-server/ -> tools/ -> aom_retold_mod/
     let repo_root = crate_dir
         .parent()
+        .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .expect("repo root from CARGO_MANIFEST_DIR");
     let path = repo_root.join("docs");
