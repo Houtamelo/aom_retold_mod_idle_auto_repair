@@ -127,7 +127,7 @@ The plugin's `build.gradle.kts:12` picks up the version via `providers.gradlePro
    - `tools/xs-language-server/lsp/src/` — LSP handlers (symbols, semantic_tokens, references, definition_check, typecheck, diagnostics, server). Public crate name `xs_language_server`.
    - `tools/xs-language-server/xs-parser/src/` — typed AST + grammar. Public crate name `xs_parser`.
 2. `cargo build --manifest-path tools/xs-language-server/Cargo.toml` to build
-3. `cargo test --manifest-path tools/xs-language-server/Cargo.toml` for the workspace suite. As of 2026-07-03 (post-Phase 4): **157 passed / 35 environmental failures** in the LSP crate + **176 passed** in the xs-parser crate. The 35 environmental failures are cwd-relative `tools/docs/doxygen_retail.7z` lookups in some unit tests that resolve correctly only from the repo root. They are pre-existing and not regressions.
+3. `cargo test --manifest-path tools/xs-language-server/Cargo.toml` for the workspace suite. As of 2026-07-03 (post-Phase 4, after the path-fix follow-up commit 9c05a8e): **241 passed / 1 failed** in the LSP crate + **176 passed** in the xs-parser crate. The 1 remaining failure (`r5_f02_references_elapsed_measures_only_response_window`) calls the `lsp_roundtrip_test` binary which panics with "BrokenPipe" when the LSP server exits before all frames are written; this is a pre-existing bug in the roundtrip binary, not a Phase 4 regression.
 4. `cargo run --manifest-path tools/xs-language-server/Cargo.toml --bin lsp_roundtrip_test` for the end-to-end LSP message sequence (`initialize` / `initialized` / `didOpen` / `shutdown` / `exit`). Requires `AOMR_GAME_PATH` to be set to the install root.
 5. **Game folder integration test** (optional, requires the game installed):
    ```bash
