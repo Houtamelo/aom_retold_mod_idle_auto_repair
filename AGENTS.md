@@ -24,7 +24,12 @@ Five deployable mod packages live under `mod/`:
 
 ## Tooling under `tools/`
 
-- `tools/xs-language-server/` — Rust LSP server (tree-sitter + tower-lsp). The "real" language implementation for XS. Diagnoses mod scripts using a 3-source workspace: engine API extracted from `doxygen_retail.7z`, the vanilla AoM:R `game/` folder, and per-mod `game/` overlays. See `openspec/changes/archive/xs-language-server/` for the full proposal, design, specs, and implementation record.
+- `tools/xs-language-server/` — Rust LSP workspace (now `tower-lsp` + **lelwel typed AST**; tree-sitter fully dropped on 2026-07-03). Three members:
+  - `tools/xs-language-server/xs-parser/` — typed AST crate (`xs_parser`). Grammar is `src/xs.llw` (lelwel). Output: 18-variant `Expr`, `Statement`, `Declaration`, `TopLevelItem` hierarchies plus `TranslationUnit::from_cst`. 176 unit tests.
+  - `tools/xs-language-server/lsp/` — LSP server crate. Handlers walk the typed AST via `xs_parser` (path dep). 157 unit tests passing + 35 environmental failures.
+  - `tools/xs-language-server/tree-sitter-xs/` — **legacy** tree-sitter grammar. Orphaned after Phase 4 PR-C; can be deleted in a separate cleanup commit. New work targets `xs-parser/`.
+  
+  The LSP server diagnoses mod scripts using a 3-source workspace: engine API extracted from `doxygen_retail.7z`, the vanilla AoM:R `game/` folder, and per-mod `game/` overlays. See `openspec/changes/archive/2026-07-02-rich-typed-ast-layer/` for the typed AST layer change and `openspec/changes/archive/2026-07-03-2026-07-04-phase4-lsp-typed-ast-wiring/` for the LSP-wiring change.
 - `tools/intellij-xs-plugin/` — IntelliJ Platform plugin (Kotlin/Gradle) for XS. Now a thin LSP client that provides file-type registration, TextMate syntax highlighting, brace matching, and editor helpers. It also provides a settings page for the LSP server connection and can auto-detect mod roots.
 
 ## XS language reference
@@ -95,7 +100,7 @@ The plugin is now a thin LSP client. Settings live under **Settings → Language
 **Always bump `pluginVersion` in `tools/intellij-xs-plugin/gradle.properties` for any commit that affects the bundled plugin artifact.** The plugin artifact is affected by changes to **any** of:
 
 - `tools/intellij-xs-plugin/` — Kotlin sources, `plugin.xml`, `build.gradle.kts`, `gradle.properties`, `package.json`, `syntaxes/xs.tmLanguage.json`
-- `tools/xs-language-server/` — Rust sources, `tools/xs-language-server/tree-sitter-xs/` grammar, `Cargo.toml`, `Cargo.lock`
+- `tools/xs-language-server/` — Rust sources under `lsp/src/` and `xs-parser/src/`, `Cargo.toml`, `Cargo.lock`
 - `tools/intellij-xs-plugin/src/main/resources/bin/` — bundled LSP binary staging area (gitignored; replaced at build by `copyLspServerToResources`)
 
 The `copyLspServerToResources` Gradle task always picks up whatever LSP release binary is on disk. Without a version bump, two `.zip` files can have the same `pluginVersion=0.1.2` but contain different LSP binaries — users have no way to tell which is which.
@@ -116,20 +121,34 @@ The plugin's `build.gradle.kts:12` picks up the version via `providers.gradlePro
 
 ### For `tools/xs-language-server/`
 
-1. Edit Rust sources under `tools/xs-language-server/src/`
-2. `cargo build` to build
-3. `cargo test` for unit tests (252 tests as of 2026-06-30; +5 from `tests/r5_test_honesty_repro.rs` covering R5-F-01/02/03, +6 from `tests/symbols_cleanup_repro.rs` covering R1-F-01/03, +6 from `tests/forward_decl_repro.rs` covering Issue #2 forward-decl include chain, +5 from `tests/include_goto_definition_repro.rs` covering Issue #4 include-statement navigation, +6 from `tests/semantic_tokens_repro.rs` covering Issue #3 Bucket C LSP, +5 from `tests/class_extraction_repro.rs` and +4 from `tests/semantic_token_distinctions_repro.rs` finishing Issue #3 Bucket C, +7 from `tests/class_member_extraction_repro.rs` and +6 from `tests/class_member_semantic_tokens_repro.rs` extracting class fields/methods for outline + member coloring). Plugin tests: 107 (6 from `XsGotoDeclarationHandlerTest` covering Issue #1 + 1 covering Issue #4 forwarding, 7 from `XsColorSettingsPageTest` covering Issue #3 + 1 covering Issue #3c identifier-under-caret + 1 covering semantic-token color application, 9 from `XsSyntaxHighlighterTest` covering Issue #3b + 1 covering semantic-token color application, 3 from `XsTextMateIncludeKeywordTest` covering Issue #3a, 2 from `XsSemanticTokensSupportTest` covering semantic-token legend parity, 20 from `XsSemanticTokensConverterTest` + 5 from `XsLspServerDescriptorTest` covering Issue #3 Bucket C finish and the class member remainder, plus the remaining plugin baseline tests).
-4. `cargo run --bin lsp_roundtrip_test` for the end-to-end LSP message sequence
+**Rust toolchain**: this workspace requires Rust **nightly**. `tools/xs-language-server/rust-toolchain.toml` pins `channel = "nightly"`; cargo auto-activates it from anywhere in that subdirectory. Reasons: `scraper 0.27` and `fluent-uri 0.4` use `let`-chains (`if let X && let Y`), stabilized in Rust 1.88, so the system's `apt`-installed rustc 1.85 cannot compile this crate. The sandbox installs rustup + nightly system-wide via `.claude-sandbox.deps.sh`; outside the sandbox, install rustup and let `rust-toolchain.toml` do the rest.
+
+1. Edit Rust sources under:
+   - `tools/xs-language-server/lsp/src/` — LSP handlers (symbols, semantic_tokens, references, definition_check, typecheck, diagnostics, server). Public crate name `xs_language_server`.
+   - `tools/xs-language-server/xs-parser/src/` — typed AST + grammar. Public crate name `xs_parser`.
+2. `cargo build --manifest-path tools/xs-language-server/Cargo.toml` to build
+3. `cargo test --manifest-path tools/xs-language-server/Cargo.toml` for the workspace suite. As of 2026-07-03 (post-Phase 4): **157 passed / 35 environmental failures** in the LSP crate + **176 passed** in the xs-parser crate. The 35 environmental failures are cwd-relative `tools/docs/doxygen_retail.7z` lookups in some unit tests that resolve correctly only from the repo root. They are pre-existing and not regressions.
+4. `cargo run --manifest-path tools/xs-language-server/Cargo.toml --bin lsp_roundtrip_test` for the end-to-end LSP message sequence (`initialize` / `initialized` / `didOpen` / `shutdown` / `exit`). Requires `AOMR_GAME_PATH` to be set to the install root.
 5. **Game folder integration test** (optional, requires the game installed):
    ```bash
    AOMR_GAME_PATH=/path/to/Age\ of\ Mythology\ Retold \
      cargo test --manifest-path tools/xs-language-server/Cargo.toml \
        --test game_folder_parse -- --nocapture
    ```
-   Walks `game/**/*.xs` (302 parseable files, 20 binary `.xs` skipped via UTF-8 head probe), asserts no unexpected parse errors, asserts every file resolves through the `Workspace`, and asserts the semantic pipeline produces 0 unresolved-symbol diagnostics (threshold is 0 after the include-paste fix; was 5,335 before). The three tests skip cleanly if `AOMR_GAME_PATH` is not set, so plain `cargo test` on CI still passes.
+   Walks `game/**/*.xs` via the typed AST, asserts no unexpected parse errors, asserts every file resolves through the `Workspace`. After Phase 4, the test uses the typed AST's `xs_parser::Diagnostic` severity instead of tree-sitter ERROR-node counting. The test skips cleanly if `AOMR_GAME_PATH` is not set, so plain `cargo test` on CI still passes.
 6. Integration test: open the IntelliJ plugin and verify diagnostics arrive for a mod `.xs` file. The LSP writes its log to `<project>/.idea/xs-lsp.log` (stderr is redirected there — was previously merged into stdout and silently dropped).
 
 The server caches extracted engine API data under `~/.local/state/aomr_lsp/v2/` (or `~/.aomr_lsp/v2/` if `XDG_STATE_HOME` is unavailable). The cache key is the SHA-256 of `doxygen_retail.7z`; warm starts load the cached JSON directly instead of re-extracting the archive. The `v2/` schema was introduced when the legacy JSON backfill was removed in Phase 5; older `v1/` cache files are ignored.
+
+**Smoke-testing the LSP end-to-end against a synthetic file:**
+
+```bash
+AOMR_GAME_PATH="/home/houtamelo/.steam/steam/steamapps/common/Age of Mythology Retold" \
+  cargo build --release --manifest-path tools/xs-language-server/Cargo.toml --bin xs-language-server
+# Then in another shell, pipe LSP JSON-RPC frames (Content-Length framing) to the binary.
+# A round-trip test (initialize → didOpen → documentSymbol → definition → shutdown → exit)
+# confirms every typed-AST handler responds correctly.
+```
 
 ## Where to look for more
 
@@ -139,6 +158,10 @@ The server caches extracted engine API data under `~/.local/state/aomr_lsp/v2/` 
 - `openspec/config.yaml` — SDD rules, proposal/spec/design conventions, verification method.
 - `openspec/sdd-init/aom_retold_mod_idle_auto_repair.md` — full SDD-init context (stack, conventions, testing capability).
 - `openspec/changes/intellij-xs-plugin/` — completed Kotlin plugin planning (P0, P0.5, P1). P1 was fully verified (PASS, 36 tests green). P2-P5 paused in favor of the LSP pivot. The Kotlin plugin is now a thin LSP client.
-- `openspec/changes/archive/xs-language-server/` — current SDD change for the redesigned Rust LSP (Phases 1–5).
+- `openspec/changes/archive/xs-language-server/` — historical SDD changes for the original tree-sitter LSP.
+- `openspec/changes/archive/2026-07-02-rich-typed-ast-layer/` — Phase 1-3 of the tree-sitter → lelwel migration. Adds the typed AST layer (`xs-parser` crate, 176 unit tests).
+- `openspec/changes/archive/2026-07-03-fix-class-specifier-no-trailing-semi/` — small grammar fix unblocking class definitions.
+- `openspec/changes/archive/2026-07-03-fix-rule-body-extraction/` — small grammar fix unblocking rule body parsing + introducing `TypeTable` API for Phase 4.
+- `openspec/changes/archive/2026-07-03-2026-07-04-phase4-lsp-typed-ast-wiring/` — Phase 4: chained PRs (PR-A symbols.rs rewrite + xs-parser rename, PR-B handlers + span_to_range, PR-C drop tree-sitter). 9 commits on branch `xs-lsp-roundtrip-followup`.
 - `docs/` — proto_mods syntax, BANG docs, research notes, playtest records, XS language syntax notes.
 - skill: `playtest-log-analysis/` — project-local skill for parsing AI playtest logs.
