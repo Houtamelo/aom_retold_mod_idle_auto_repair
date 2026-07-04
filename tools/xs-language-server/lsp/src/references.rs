@@ -204,9 +204,7 @@ impl<'a> IdentifierWalker<'a> {
                 if let Some(e) = Expr::from_cst(self.cst, s.cond.inner.0) {
                     self.visit_expr(&e);
                 }
-                for case in &s.cases.inner {
-                    self.visit_block_items(&case.body.items.inner);
-                }
+                self.visit_block_items(&s.body.items.inner);
             }
             _ => {}
         }
@@ -464,9 +462,7 @@ impl<'a> IdentifierAtFinder<'a> {
                 if let Some(e) = Expr::from_cst(self.cst, s.cond.inner.0) {
                     self.visit_expr(&e);
                 }
-                for case in &s.cases.inner {
-                    self.visit_block_items(&case.body.items.inner);
-                }
+                self.visit_block_items(&s.body.items.inner);
             }
             _ => {}
         }

@@ -253,9 +253,7 @@ fn validate_block_items(
                 }
                 Statement::Compound(c) => validate_block_items(cst, source, &c.items.inner, out),
                 Statement::Switch(s) => {
-                    for case in &s.cases.inner {
-                        validate_block_items(cst, source, &case.body.items.inner, out);
-                    }
+                    validate_block_items(cst, source, &s.body.items.inner, out);
                 }
                 _ => {}
             },
@@ -287,9 +285,7 @@ fn validate_statement(
             validate_statement(cst, source, &f.body, out);
         }
         Statement::Switch(s) => {
-            for case in &s.cases.inner {
-                validate_block_items(cst, source, &case.body.items.inner, out);
-            }
+            validate_block_items(cst, source, &s.body.items.inner, out);
         }
         _ => {}
     }

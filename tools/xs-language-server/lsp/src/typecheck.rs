@@ -240,9 +240,7 @@ fn walk_statement(
             if let Some(e) = Expr::from_cst(cst, s.cond.inner.0) {
                 walk_expr(cst, source, &e, engine, table, merged, project, out);
             }
-            for case in &s.cases.inner {
-                walk_block_items(cst, source, &case.body.items.inner, engine, table, merged, project, out);
-            }
+            walk_block_items(cst, source, &s.body.items.inner, engine, table, merged, project, out);
         }
         _ => {}
     }

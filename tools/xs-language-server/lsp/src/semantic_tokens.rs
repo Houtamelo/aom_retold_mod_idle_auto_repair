@@ -599,12 +599,10 @@ fn visit_statement_for_exprs(
                     tokens,
                 );
             }
-            for case in &s.cases.inner {
-                visit_block_items_for_exprs(
-                    cst, source, &case.body.items.inner, current_file, own_table, merged, engine, workspace, project,
-                    member_index, tokens,
-                );
-            }
+            visit_block_items_for_exprs(
+                cst, source, &s.body.items.inner, current_file, own_table, merged, engine, workspace, project,
+                member_index, tokens,
+            );
         }
         _ => {}
     }

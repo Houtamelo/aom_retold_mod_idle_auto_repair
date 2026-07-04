@@ -518,9 +518,7 @@ fn visit_statement_for_locals(
             visit_statement_for_locals(&for_.body, cst, source, out);
         }
         Statement::Switch(switch) => {
-            for case in &switch.cases.inner {
-                extract_locals_from_block(&case.body.items.inner, cst, source, out);
-            }
+            extract_locals_from_block(&switch.body.items.inner, cst, source, out);
         }
         _ => {}
     }
@@ -672,9 +670,7 @@ fn collect_rule_registrations_in_statement(
             collect_rule_registrations_in_statement(cst, &for_.body, out);
         }
         Statement::Switch(switch) => {
-            for case in &switch.cases.inner {
-                collect_rule_registrations_in_block(cst, &case.body.items.inner, out);
-            }
+            collect_rule_registrations_in_block(cst, &switch.body.items.inner, out);
         }
         Statement::Expression(es) => {
             if let Some(e) = es.expr.as_ref().and_then(|u| Expr::from_cst(cst, u.0)) {
