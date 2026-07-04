@@ -42,10 +42,17 @@ impl Declaration {
             }
         }
 
+        // `for_init` declarations omit the trailing ';' because the
+        // parent `for` rule consumes it; fall back to a zero-width span
+        // at the node's end when no semicolon is present.
+        let semi = semi.unwrap_or_else(|| {
+            let end = cst.span(node).end;
+            end..end
+        });
         Some(Self {
             decl_specs: decl_specs?,
             init_declarator_list: init_declarator_list?,
-            semi: semi?,
+            semi,
             span: cst.span(node),
         })
     }

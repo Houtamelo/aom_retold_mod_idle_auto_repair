@@ -13,9 +13,10 @@
 - [x] Add unit tests for if/without-else, if/with-else, and if/else-if chains.
 
 ## Phase 3: `for (int i = 0; ...)` declaration form
-- [ ] Extend `for_init` at `xs.llw:550` to accept `declaration_specifiers init_declarator_list`.
-- [ ] Wire `ParserCallbacks` / `TypeTable` predicate for LL(1) disambiguation.
-- [ ] Add unit tests for declaration-form `for` loops.
+- [x] Extend `for_init` at `xs.llw:550` to accept `declaration_specifiers init_declarator_list`.
+- [x] Wire `ParserCallbacks` / `TypeTable` predicate for LL(1) disambiguation.
+- [x] Add unit tests for declaration-form `for` loops.
+- [x] Add LSP integration test asserting zero ERROR parse diagnostics for `for (int i = 0; ...)`.
 
 ## Phase 4: Bitwise `&` and `|` tokens
 - [x] Add `Amp='&'` and `Pipe='|'` tokens to `xs.llw` and `lexer.rs`.

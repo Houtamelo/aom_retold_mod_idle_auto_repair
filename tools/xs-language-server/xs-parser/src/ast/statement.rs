@@ -666,11 +666,27 @@ impl StmtSpanned for Statement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::Parser;
+    use crate::ast::type_system::Type;
+    use crate::ast::type_table::TypeTable;
+    use crate::parser::{Diagnostic, Parser};
 
     fn parse(source: &str) -> Cst<'_> {
         let mut diags = vec![];
         Parser::new(source, &mut diags).parse(&mut diags)
+    }
+
+    fn parse_with_table(source: &str, table: TypeTable) -> (Cst<'_>, Vec<Diagnostic>) {
+        let mut diags = vec![];
+        let cst = Parser::new_with_context(source, &mut diags, table).parse(&mut diags);
+        (cst, diags)
+    }
+
+    fn for_init_of(cst: &Cst) -> ForInit {
+        let node = cst
+            .children(crate::parser::NodeRef::ROOT)
+            .find(|c| cst.match_rule(*c, Rule::ForInit))
+            .expect("for_init node");
+        ForInit::from_cst(cst, node).expect("for_init extraction")
     }
 
     fn first_non_skip(cst: &Cst) -> NodeRef {
@@ -764,6 +780,100 @@ mod tests {
             .expect("for_init rule child");
         let fi = ForInit::from_cst(&cst, for_init_node).expect("for_init");
         assert!(matches!(fi, ForInit::Expression(_)));
+    }
+
+    #[test]
+    fn for_statement_extracts_int_declaration_form() {
+        let (cst, diags) = parse_with_table(
+            "for (int i = 0; i < 10; i = i + 1) { }",
+            TypeTable::with_primitives(),
+        );
+        assert!(diags.is_empty(), "expected 0 diagnostics, got {:?}", diags);
+        let fi = for_init_of(&cst);
+        match fi {
+            ForInit::Declaration(decl) => {
+                assert_eq!(decl.decl_specs.ty.ty, Type::Int);
+                assert_eq!(decl.init_declarator_list.items.len(), 1);
+                let init = &decl.init_declarator_list.items[0];
+                match &init.declarator.direct {
+                    crate::ast::declaration::DirectDeclarator::IdentDeclarator(id) => {
+                        assert_eq!(id.name.node, "i");
+                    }
+                    other => panic!("expected identifier declarator, got {:?}", other),
+                }
+                assert!(init.initializer.is_some());
+            }
+            other => panic!("expected Declaration for-init, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_statement_extracts_bool_declaration_form() {
+        let (cst, diags) = parse_with_table(
+            "for (bool done = false; ; ) { }",
+            TypeTable::with_primitives(),
+        );
+        assert!(diags.is_empty(), "expected 0 diagnostics, got {:?}", diags);
+        let fi = for_init_of(&cst);
+        match fi {
+            ForInit::Declaration(decl) => {
+                assert_eq!(decl.decl_specs.ty.ty, Type::Bool);
+                assert_eq!(decl.init_declarator_list.items.len(), 1);
+                let init = &decl.init_declarator_list.items[0];
+                match &init.declarator.direct {
+                    crate::ast::declaration::DirectDeclarator::IdentDeclarator(id) => {
+                        assert_eq!(id.name.node, "done");
+                    }
+                    other => panic!("expected identifier declarator, got {:?}", other),
+                }
+                assert!(init.initializer.is_some());
+            }
+            other => panic!("expected Declaration for-init, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_statement_extracts_class_typed_declaration_form() {
+        let mut types = TypeTable::with_primitives();
+        types.insert_class("BOSystem");
+        let (cst, diags) = parse_with_table(
+            "for (BOSystem sys = default; ; ) { }",
+            types,
+        );
+        assert!(diags.is_empty(), "expected 0 diagnostics, got {:?}", diags);
+        let fi = for_init_of(&cst);
+        match fi {
+            ForInit::Declaration(decl) => {
+                match &decl.decl_specs.ty.ty {
+                    Type::Class(name) => assert_eq!(name.node, "BOSystem"),
+                    other => panic!("expected Class type, got {:?}", other),
+                }
+                assert_eq!(decl.init_declarator_list.items.len(), 1);
+                let init = &decl.init_declarator_list.items[0];
+                match &init.declarator.direct {
+                    crate::ast::declaration::DirectDeclarator::IdentDeclarator(id) => {
+                        assert_eq!(id.name.node, "sys");
+                    }
+                    other => panic!("expected identifier declarator, got {:?}", other),
+                }
+            }
+            other => panic!("expected Declaration for-init, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_statement_extracts_expression_form() {
+        let (cst, diags) = parse_with_table(
+            "for (i = 0; i < 10; i = i + 1) { }",
+            TypeTable::with_primitives(),
+        );
+        assert!(diags.is_empty(), "expected 0 diagnostics, got {:?}", diags);
+        let fi = for_init_of(&cst);
+        assert!(
+            matches!(fi, ForInit::Expression(_)),
+            "expected Expression for-init, got {:?}",
+            fi
+        );
     }
 
     #[test]

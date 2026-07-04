@@ -527,13 +527,20 @@ parenthesized_expression: '(' expression ')' ;
 /// (`int i = 0`) or an expression (`i = 0`). Neither form includes
 /// the trailing `;` — that belongs to the `for` rule above.
 ///
-/// MIGRATION: Limitation 2A (the declaration form) requires the
-/// same grammar restructure as Limitation 1A. Both need
-/// ParserCallbacks predicates (Limitation 6's TypeTable) for
-/// clean LL(1) disambiguation; deferred to a follow-up PR.
-/// For now, the PoC's `for (i = 0; ...)` form is used; users
-/// must declare `int i;` before the loop.
-for_init: [expression] ;
+/// The declaration branch uses a `ParserCallbacks` predicate so
+/// `for (int i = 0; ...)` is recognized as a declaration instead of
+/// an expression. The predicate commits when the lookahead is a
+/// primitive type keyword, a declaration qualifier, or a class name
+/// registered in `TypeTable`; otherwise the parser falls through to
+/// the expression form.
+for_init: ?1 for_init_declaration | [expression] ;
+
+/// Helper rule for the declaration form of `for_init`. It is kept
+/// separate so the `@declaration` marker produces a `Declaration`
+/// child node inside the `ForInit` wrapper, preserving the existing
+/// AST extraction path. The trailing `;` is intentionally omitted —
+/// it is consumed by the parent `for` rule.
+for_init_declaration: declaration_specifiers init_declarator_list @declaration ;
 
 /// `{ block_item* }` — a compound statement, used as the body of
 /// functions, rules, if/while/for statements, switch cases, and

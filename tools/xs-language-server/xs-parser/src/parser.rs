@@ -18,27 +18,13 @@ pub type Diagnostic = codespan_reporting::diagnostic::Diagnostic<()>;
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
-impl<'a> ParserCallbacks<'a> for Parser<'a> {
-    type Diagnostic = Diagnostic;
-    type Context = TypeTable;
-
-    fn create_tokens(_context: &mut Self::Context, source: &'a str, diags: &mut Vec<Self::Diagnostic>) -> (Vec<Token>, Vec<Span>) {
-        tokenize(source, diags)
-    }
-    fn create_diagnostic(&self, span: Span, message: String) -> Self::Diagnostic {
-        Self::Diagnostic::error()
-            .with_message(message)
-            .with_label(Label::primary((), span))
-    }
-
-    /// Semantic predicate for the declaration branch of `block_item^`.
-    ///
+impl<'a> Parser<'a> {
     /// Returns `true` when the current token starts a declaration or
-    /// nested function definition. For identifiers we look the name up
-    /// in the parser's `TypeTable`; primitive type keywords are mapped
-    /// to their lexeme and checked the same way. Declaration qualifiers
-    /// always commit to the declaration branch.
-    fn predicate_block_item_1(&self) -> bool {
+    /// nested function definition. Used by both `block_item` and
+    /// `for_init` predicates to disambiguate declaration forms from
+    /// expression-statement/expression forms using the parser's
+    /// `TypeTable`.
+    fn current_starts_declaration(&self) -> bool {
         let text = match self.current {
             Token::Identifier => &self.cst.source()[self.span()],
             Token::Void => "void",
@@ -53,6 +39,34 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
             _ => return false,
         };
         self.context.is_type(text)
+    }
+}
+
+impl<'a> ParserCallbacks<'a> for Parser<'a> {
+    type Diagnostic = Diagnostic;
+    type Context = TypeTable;
+
+    fn create_tokens(_context: &mut Self::Context, source: &'a str, diags: &mut Vec<Self::Diagnostic>) -> (Vec<Token>, Vec<Span>) {
+        tokenize(source, diags)
+    }
+    fn create_diagnostic(&self, span: Span, message: String) -> Self::Diagnostic {
+        Self::Diagnostic::error()
+            .with_message(message)
+            .with_label(Label::primary((), span))
+    }
+
+    /// Semantic predicate for the declaration branch of `block_item^`.
+    fn predicate_block_item_1(&self) -> bool {
+        self.current_starts_declaration()
+    }
+
+    /// Semantic predicate for the declaration branch of `for_init`.
+    ///
+    /// Distinguishes `for (int i = 0; ...)` (declaration) from
+    /// `for (foo = 0; ...)` (expression) the same way `block_item`
+    /// resolves the type-vs-expression ambiguity.
+    fn predicate_for_init_1(&self) -> bool {
+        self.current_starts_declaration()
     }
 }
 
