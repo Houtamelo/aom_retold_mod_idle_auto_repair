@@ -1,0 +1,255 @@
+===================================================================
+ ORPHAN .xs FILES (not included by any other .xs file in the game)
+===================================================================
+
+  ai/aotg/s0l0p0c10m1_p3.xs
+  ai/campaign/fott/fott02_p2.xs
+  ai/campaign/fott/fott03_p2.xs
+  ai/campaign/fott/fott04_p2.xs
+  ai/campaign/fott/fott04_p3.xs
+  ai/campaign/fott/fott04_p4.xs
+  ai/campaign/fott/fott05_p2.xs
+  ai/campaign/fott/fott08_p2.xs
+  ai/campaign/fott/fott08_p5.xs
+  ai/campaign/fott/fott12_p3.xs
+  ai/campaign/fott/fott14_p2.xs
+  ai/campaign/fott/fott15_p2.xs
+  ai/campaign/fott/fott15_p3.xs
+  ai/campaign/fott/fott15_p5.xs
+  ai/campaign/fott/fott16B_p2.xs
+  ai/campaign/fott/fott17_p2.xs
+  ai/campaign/fott/fott18_p2.xs
+  ai/campaign/fott/fott19_p2.xs
+  ai/campaign/fott/fott20_p2.xs
+  ai/campaign/fott/fott21_p2.xs
+  ai/campaign/fott/fott22_p2.xs
+  ai/campaign/fott/fott22_p3.xs
+  ai/campaign/fott/fott22_p4.xs
+  ai/campaign/fott/fott22_p6.xs
+  ai/campaign/fott/fott23_p2.xs
+  ai/campaign/fott/fott24_p2.xs
+  ai/campaign/fott/fott24_p5.xs
+  ai/campaign/fott/fott25_p2.xs
+  ai/campaign/fott/fott25_p3.xs
+  ai/campaign/fott/fott25_p4.xs
+  ai/campaign/fott/fott26_p2.xs
+  ai/campaign/fott/fott26_p6.xs
+  ai/campaign/fott/fott27_p2.xs
+  ai/campaign/fott/fott28_p4.xs
+  ai/campaign/fott/fott29_p2.xs
+  ai/campaign/fott/fott30_p2.xs
+  ai/campaign/fott/fott30_p3.xs
+  ai/campaign/fott/fott30_p4.xs
+  ai/campaign/fott/fott31_p2.xs
+  ai/campaign/fott/fott31_p5.xs
+  ai/campaign/fott/fott32_p2.xs
+  ai/campaign/fott/fott32_p3.xs
+  ai/campaign/fott/fott32_p4.xs
+  ai/campaign/fott/fott32_p5.xs
+  ai/campaign/fott/fott32_p6.xs
+  ai/campaign/mythical_battles/dem01_p5.xs
+  ai/campaign/mythical_battles/dem01_p6.xs
+  ai/campaign/mythical_battles/fre01_p2.xs
+  ai/campaign/mythical_battles/fre01_p3.xs
+  ai/campaign/mythical_battles/fre01_p4.xs
+  ai/campaign/mythical_battles/fre01_p6.xs
+  ai/campaign/om/om01_p2.xs
+  ai/campaign/om/om01_p5.xs
+  ai/campaign/om/om02_p2.xs
+  ai/campaign/om/om04_p2.xs
+  ai/campaign/om/om05_p2.xs
+  ai/campaign/om/om07_p2.xs
+  ai/campaign/om/om07_p5.xs
+  ai/campaign/om/om08_p2.xs
+  ai/campaign/om/om08_p3.xs
+  ai/campaign/om/om10_p2.xs
+  ai/campaign/om/om10_p3.xs
+  ai/campaign/om/om10_p4.xs
+  ai/campaign/om/om10_p5.xs
+  ai/campaign/om/om11_p2.xs
+  ai/campaign/om/om11_p3.xs
+  ai/campaign/om/om11_p4.xs
+  ai/campaign/om/om11_p5.xs
+  ai/campaign/om/om12a_p3.xs
+  ai/campaign/om/om12a_p4.xs
+  ai/campaign/om/om12a_p6.xs
+  ai/campaign/om/om12a_p7.xs
+  ai/campaign/om/om12b_p3.xs
+  ai/campaign/om/om12b_p6.xs
+  ai/campaign/om/om12b_p7.xs
+  ai/campaign/potg/potg02_p2.xs
+  ai/campaign/potg/potg03_p2.xs
+  ai/campaign/potg/potg03_p3.xs
+  ai/campaign/potg/potg03_p4.xs
+  ai/campaign/potg/potg05_p2.xs
+  ai/campaign/potg/potg05_p4.xs
+  ai/campaign/potg/potg05_p5.xs
+  ai/campaign/potg/potg06_p3.xs
+  ai/campaign/potg/potg06_p4.xs
+  ai/campaign/potg/potg06_p5.xs
+  ai/campaign/potg/potg06_p6.xs
+  ai/campaign/potg/potg08_p2.xs
+  ai/campaign/potg/potg08_p3.xs
+  ai/campaign/potg/potg08_p4.xs
+  ai/campaign/potg/potg09_p2.xs
+  ai/campaign/tgg/tgg01_p2.xs
+  ai/campaign/tgg/tgg02_p2.xs
+  ai/campaign/tgg/tgg02_p3.xs
+  ai/campaign/tgg/tgg03_p2.xs
+  ai/campaign/tgg/tgg04_p2.xs
+  ai/campaign/tna/tna01_p2.xs
+  ai/campaign/tna/tna01_p3.xs
+  ai/campaign/tna/tna01_p4.xs
+  ai/campaign/tna/tna02_p2.xs
+  ai/campaign/tna/tna02_p3.xs
+  ai/campaign/tna/tna03_p2.xs
+  ai/campaign/tna/tna03_p4.xs
+  ai/campaign/tna/tna03_p7.xs
+  ai/campaign/tna/tna04_p2.xs
+  ai/campaign/tna/tna04_p3.xs
+  ai/campaign/tna/tna04_p4.xs
+  ai/campaign/tna/tna05_p2.xs
+  ai/campaign/tna/tna05_p3.xs
+  ai/campaign/tna/tna05_p4.xs
+  ai/campaign/tna/tna06_p2.xs
+  ai/campaign/tna/tna06_p7.xs
+  ai/campaign/tna/tna07_p2.xs
+  ai/campaign/tna/tna07_p3.xs
+  ai/campaign/tna/tna07_p4.xs
+  ai/campaign/tna/tna07_p6.xs
+  ai/campaign/tna/tna08_p3.xs
+  ai/campaign/tna/tna08_p5.xs
+  ai/campaign/tna/tna09_p2.xs
+  ai/campaign/tna/tna09_p5.xs
+  ai/campaign/tna/tna10_p2.xs
+  ai/campaign/tna/tna10_p4.xs
+  ai/campaign/tna/tna11_p7.xs
+  ai/campaign/tna/tna12_p2.xs
+  ai/campaign/yas/yas02_p2.xs
+  ai/campaign/yas/yas03_p2.xs
+  ai/campaign/yas/yas03_p3.xs
+  ai/campaign/yas/yas03_p4.xs
+  ai/campaign/yas/yas03_p5.xs
+  ai/campaign/yas/yas04_p2.xs
+  ai/campaign/yas/yas05_p2.xs
+  ai/campaign/yas/yas06_p2.xs
+  ai/campaign/yas/yas06_p3.xs
+  ai/campaign/yas/yas06_p4.xs
+  ai/campaign/yas/yas07_p2.xs
+  ai/campaign/yas/yas07_p3.xs
+  ai/campaign/yas/yas08_p2.xs
+  ai/campaign/yas/yas08_p3.xs
+  ai/campaign/yas/yas08_p4.xs
+  ai/campaign/yas/yas10_p2.xs
+  ai/campaign/yas/yas10_p3.xs
+  ai/campaign/yas/yas10_p4.xs
+  ai/campaign/yas/yas12_p4.xs
+  ai/chairon.xs
+  ai/demo/aomspe02_p2.xs
+  ai/demo/aomspe02_p3.xs
+  ai/demo/aomspe02_p4.xs
+  ai/demo/aomspe02_p5.xs
+  ai/human_assist/human_assist.xs
+  ai/inactive_ai.xs
+  random_maps/acropolis.xs
+  random_maps/air.xs
+  random_maps/alfheim.xs
+  random_maps/anatolia.xs
+  random_maps/archipelago.xs
+  random_maps/arena.xs
+  random_maps/aso_grasslands.xs
+  random_maps/bamboo_grove.xs
+  random_maps/black_sea.xs
+  random_maps/blood_river.xs
+  random_maps/blue_lagoon.xs
+  random_maps/cloud_forest.xs
+  random_maps/elysium.xs
+  random_maps/erebus.xs
+  random_maps/ghost_lake.xs
+  random_maps/giza.xs
+  random_maps/gold_rush.xs
+  random_maps/great_wall.xs
+  random_maps/highland.xs
+  random_maps/ironwood.xs
+  random_maps/islands.xs
+  random_maps/jaguar_moon.xs
+  random_maps/jotunheim.xs
+  random_maps/kerlaugar.xs
+  random_maps/kii.xs
+  random_maps/land_nomad.xs
+  random_maps/land_unknown.xs
+  random_maps/lib/rm_beautification.xs
+  random_maps/lib/rm_biomes.xs
+  random_maps/lib/rm_connections.xs
+  random_maps/lib/rm_forests.xs
+  random_maps/marsh.xs
+  random_maps/mediterranean.xs
+  random_maps/megalopolis.xs
+  random_maps/midgard.xs
+  random_maps/mirage.xs
+  random_maps/mirkwood.xs
+  random_maps/mount_olympus.xs
+  random_maps/muspellheim.xs
+  random_maps/nile_shallows.xs
+  random_maps/nomad.xs
+  random_maps/oasis.xs
+  random_maps/obsidian_ridge.xs
+  random_maps/okuchichibu.xs
+  random_maps/peach_blossom_land.xs
+  random_maps/qinghai_lake.xs
+  random_maps/river_nile.xs
+  random_maps/river_styx.xs
+  random_maps/savannah.xs
+  random_maps/sea_of_worms.xs
+  random_maps/senjogahara.xs
+  random_maps/setonaikai.xs
+  random_maps/silk_road.xs
+  random_maps/snake_dance.xs
+  random_maps/steppe.xs
+  random_maps/sun_serpent_valley.xs
+  random_maps/team_migration.xs
+  random_maps/tenochtitlans_heart.xs
+  random_maps/tiny.xs
+  random_maps/tundra.xs
+  random_maps/valley_of_kings.xs
+  random_maps/vinlandsaga.xs
+  random_maps/watering_hole.xs
+  random_maps/yellow_river.xs
+
+-------------------------------------------------------------------
+Summary
+-------------------------------------------------------------------
+  Total .xs files:        322
+  Files with includes:    211
+  Total include stmts:    468
+  Distinct targets:       109
+  Orphans (not included): 213
+
+===================================================================
+ DANGLING INCLUDES (target does not exist on disk)
+===================================================================
+
+  (none)
+
+  Dangling includes: 0
+
+===================================================================
+ MOST-INCLUDED FILES (top 15)
+===================================================================
+
+   147  ai/core/main.xs
+   145  ai/campaign/global_spc_modifiers.xs
+    41  random_maps/lib2/rm_core.xs
+    14  random_maps/lib2/rm_connections.xs
+     4  random_maps/lib/rm_util.xs
+     3  random_maps/lib/rm_locs.xs
+     3  random_maps/lib/rm_math.xs
+     3  random_maps/lib2/util/WeightedRandomizer.xs
+     3  random_maps/lib2/rm_math.xs
+     2  ai/core/scenario/scenario_library.xs
+     2  random_maps/lib/util/WeightedRandomizer.xs
+     2  random_maps/lib/rm_players.xs
+     2  random_maps/lib2/rm_util.xs
+     2  random_maps/lib2/rm_biomes.xs
+     1  ai/core/utilities/debug.xs
+
