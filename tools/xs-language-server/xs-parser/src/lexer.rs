@@ -59,6 +59,8 @@ pub enum Token {
     Break,
     #[token("continue")]
     Continue,
+    #[token("do")]
+    Do,
     #[token("switch")]
     Switch,
     #[token("case")]

@@ -125,6 +125,21 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
         }
         self.peek(1) == Token::LPar
     }
+
+    /// Semantic predicate for the `,` separator in `argument_list`'s
+    /// repetition. Returns `true` when the token after `,` can start
+    /// an `argument` (i.e. it is not `,` or `)`). For a trailing
+    /// comma `,)` the predicate returns false, so the iteration
+    /// ends and the outer optional `[',']?` matches the trailing
+    /// comma instead.
+    fn predicate_argument_list_1(&self) -> bool {
+        // We're at `,`. The `?1` predicate fires only when the next
+        // token (the one after the `,`) can start an argument. The
+        // argument rule starts with `expression`, so we accept any
+        // token that starts an expression.
+        let next = self.peek(1);
+        !matches!(next, Token::RPar | Token::Comma)
+    }
 }
 
 #[cfg(test)]

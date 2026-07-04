@@ -51,7 +51,7 @@ token Extern='extern' Static='static' Mutable='mutable' Const='const' Ref='ref';
 
 // --- Control flow ---
 token If='if' While='while' For='for' Return='return'
-      Break='break' Continue='continue'
+      Break='break' Continue='continue' Do='do'
       Switch='switch' Case='case' DefaultKw='default';
 
 // --- Rule-block keywords (XS-specific) ---
@@ -648,6 +648,7 @@ statement^:
 | 'return' [expression] ';' @return_statement
 | 'break' ';' @break_statement
 | 'continue' ';' @continue_statement
+| 'do' statement 'while' '(' expression ')' ';' @do_while_statement
 | statement_preproc_directive
 | compound_statement
 | expression_statement
@@ -857,8 +858,16 @@ primary_expr^:
 ;
 
 /// A comma-separated list of call arguments. Like parameter lists,
-/// arguments may include default values.
-argument_list: argument (',' argument)* ;
+/// arguments may include default values. A trailing comma is allowed
+/// (and used in retail XS, e.g. `createSimpleTrainPlan(a, b, c,);`).
+///
+/// The `?1` predicate on the iteration's leading `,` disambiguates
+/// the "separator that starts a new argument" case from the
+/// "trailing comma" case: the predicate returns true only when the
+/// token after `,` is one that can start an `argument`. For
+/// `,)` the predicate returns false so the iteration ends and the
+/// outer optional `[',']` consumes the trailing comma instead.
+argument_list: argument ( ?1 ',' argument )* [','] ;
 
 /// A single argument to a function call.
 argument: expression ;
