@@ -122,10 +122,10 @@ These are deviations from the original (Alphabetical-only, lazy) defaults, locke
 - NEW: `tools/xs-language-server/lsp/tests/merged_view_root_repro.rs` — TDD repro tests.
 
 **Tests (RED before, GREEN after)**:
-- `test_build_from_root_loads_root_chain`
-- `test_rebase_to_file_preserves_root_chain`
-- `test_rebased_view_exposes_sibling_symbol`
-- `test_rebased_view_keeps_own_table_for_current_file`
+- [x] `test_build_from_root_loads_root_chain`
+- [x] `test_rebase_to_file_preserves_root_chain`
+- [x] `test_rebased_view_exposes_sibling_symbol`
+- [x] `test_rebased_view_keeps_own_table_for_current_file`
 
 **Dependency**: PR-1, PR-2
 
@@ -241,7 +241,7 @@ These are deviations from the original (Alphabetical-only, lazy) defaults, locke
 
 - [x] PR-1 GREEN: `cargo test --test include_graph_repro`
 - [x] PR-2 GREEN: `cargo test --test per_root_cache_repro`
-- [ ] PR-3 GREEN: `cargo test --test merged_view_root_repro`
+- [x] PR-3 GREEN: `cargo test --test merged_view_root_repro`
 - [ ] PR-4 GREEN: `cargo test --test indirect_include_symbol_repro`
 - [ ] PR-5 GREEN: `cargo test --test root_aware_diagnostics_repro`
 - [ ] PR-6 GREEN: extended `cargo test --test root_aware_diagnostics_repro`

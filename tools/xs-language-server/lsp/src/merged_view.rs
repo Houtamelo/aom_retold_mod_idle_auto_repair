@@ -24,6 +24,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use tower_lsp_server::ls_types::Range;
@@ -383,6 +384,67 @@ impl MergedView {
         view
     }
 
+    /// Build a merged view for `root` using the per-root cache.
+    ///
+    /// On a cache hit the previously cached `Arc<MergedView>` is returned; on a
+    /// miss the root's source is read from disk, the closure is built, and the
+    /// result is stored in the cache. I/O errors while reading the root source
+    /// are surfaced as [`crate::cache::CacheError`].
+    pub fn build_from_root(
+        root: &Path,
+        workspace: &Workspace,
+        project: &VirtualProject,
+        cache: &crate::cache::PerRootMergedViewCache,
+    ) -> Result<Arc<MergedView>, crate::cache::CacheError> {
+        cache.get_or_build(root, workspace, project)
+    }
+
+    /// Rebase this merged view down to `file`, a file that is already part of
+    /// the include closure.
+    ///
+    /// The returned view keeps the same include graph, sources, symbol tables,
+    /// missing-include diagnostics, and merged symbols as `self`, but:
+    ///
+    /// * `current_file()` becomes `file`.
+    /// * `own_table()` becomes `own_table`.
+    /// * `sources[file]` and `tables[file]` are replaced with the supplied
+    ///   source and table.
+    /// * Any symbols that originate from `file` are removed and replaced by
+    ///   `own_table`'s symbols, tagged with [`VisibilityProvenance::OwnFile`].
+    ///   This makes the rebased view behave exactly as if `file` had been
+    ///   analysed directly while still seeing the root's full include chain.
+    ///
+    /// Time complexity is `O(|closure|)` because only the stored symbol list is
+    /// scanned and filtered; no workspace-wide scan is performed.
+    pub fn rebase_to_file(
+        &self,
+        file: &Path,
+        source: String,
+        own_table: SymbolTable,
+    ) -> MergedView {
+        let mut rebased = self.clone();
+        rebased.current_file = file.to_path_buf();
+        rebased.own_table = own_table.clone();
+        rebased.sources.insert(file.to_path_buf(), source);
+        rebased.tables.insert(file.to_path_buf(), own_table.clone());
+
+        // Replace any symbols that were introduced from the target file (they
+        // were direct/transitive includes in the root view) with the target's
+        // own symbols, tagged as OwnFile. This preserves shadowing order and
+        // makes effective_line semantics correct for the file being diagnosed.
+        rebased
+            .symbols
+            .retain(|ms| ms.provenance.origin() != Some(file));
+        for sym in &own_table.symbols {
+            rebased.symbols.push(MergedSymbol {
+                symbol: sym.clone(),
+                provenance: VisibilityProvenance::OwnFile,
+            });
+        }
+
+        rebased
+    }
+
     /// Find a merged symbol by exact name. Later declarations shadow earlier
     /// ones, matching `SymbolTable::find` semantics.
     pub fn find(&self, name: &str) -> Option<&MergedSymbol> {
@@ -435,11 +497,15 @@ impl MergedView {
     /// read or parsed, because a later change to such a file can still alter
     /// the merged view's diagnostics. Use this iterator for cache invalidation
     /// and closure-content hashing.
+    ///
+    /// The iterator is derived from the stored per-file symbol tables rather
+    /// than the include-graph edges so that a view rebased to a child file in
+    /// the chain still reports the whole closure (including the original root).
     pub fn closure_files(&self) -> impl Iterator<Item = &PathBuf> {
-        let mut files: Vec<&PathBuf> = Vec::with_capacity(self.graph.edges.len() + 1);
+        let mut files: Vec<&PathBuf> = Vec::with_capacity(self.tables.len() + 1);
         files.push(&self.current_file);
-        for edge in &self.graph.edges {
-            files.push(&edge.to);
+        for path in self.tables.keys() {
+            files.push(path);
         }
         files.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
         files.dedup();
