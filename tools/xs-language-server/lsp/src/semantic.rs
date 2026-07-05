@@ -740,6 +740,31 @@ fn forward_callable_merged(merged: &MergedView, project: &VirtualProject, callee
         }
     }
 
+    // Defined in another file of the same virtual project that is NOT already
+    // reachable through the current file's own include chain? Functions are
+    // visible across files regardless of `extern`. This fallback is the
+    // merged-view counterpart of `forward_callable`'s defined_elsewhere block
+    // (lines 814-824), scoped to avoid shadowing the include-order check for
+    // files that the merged view already knows about.
+    //
+    // V1 single-pass: this fallback is what turns the indirect-include anchor
+    // test GREEN. V2 (post-PR-5 multi-root iteration) will switch to a real
+    // root_view.find and drop the project.files scan.
+    let closure: std::collections::HashSet<&Path> = merged.files().collect();
+    let current_file = merged.current_file();
+    let defined_elsewhere = project.files.iter().any(|(path, file)| {
+        path != current_file
+            && !closure.contains(path.as_path())
+            && file
+                .table
+                .symbols
+                .iter()
+                .any(|s| s.kind == SymbolKind::Function && s.name == callee && !s.is_forward)
+    });
+    if defined_elsewhere {
+        return true;
+    }
+
     // Runtime-registered rules are callable even without a `rule` definition
     // in the merged scope.
     project.registered_rules.contains_key(callee)
