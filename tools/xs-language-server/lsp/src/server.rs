@@ -998,8 +998,44 @@ impl XsLanguageServer {
     /// published so clients clear stale diagnostics for that file.
     async fn publish_diagnostics(&self, uri: &Uri, text: &str, version: i32) {
         let current_file = uri.to_file_path();
-        let project = if current_file.is_some() { self.build_semantic_project(uri).await } else { None };
+
+        // Build the semantic project and keep the workspace project around so
+        // we can build a root-chain view for indirect-include resolution.
+        let (project, ws, workspace_project) = if let Some(_cf) = current_file.as_ref() {
+            let ws = self.workspace.lock().await;
+            match ws.lookup_mod(uri).cloned() {
+                Some(entry) => {
+                    let wp = ws.build_virtual_project(&entry);
+                    let cache_dir = crate::cache::state_cache_dir();
+                    let semantic = semantic::VirtualProject::load_from_workspace(&ws, &wp, &cache_dir);
+                    (Some(semantic), ws.clone(), Some(wp))
+                }
+                None => (None, ws.clone(), None),
+            }
+        } else {
+            (None, workspace::Workspace::new(self.game_path.clone()), None)
+        };
+
         let merged = self.get_or_build_merged_view(uri, text).await;
+
+        // Resolve the root chain that includes this file. If there are no
+        // includers, the file is its own root and root_view stays None (run_pass
+        // falls back to file_view).
+        let root_view: Option<merged_view::MergedView> = match (current_file.as_deref(), merged.as_ref(), workspace_project.as_ref()) {
+            (Some(cf), Some(mv), Some(wp)) => {
+                let graph = crate::include_graph::ReverseIncludeGraph::build(mv.graph());
+                graph
+                    .roots_that_include(cf)
+                    .into_iter()
+                    .next()
+                    .and_then(|root| {
+                        let cache_dir = crate::cache::state_cache_dir();
+                        let cache = crate::cache::PerRootMergedViewCache::new(&cache_dir);
+                        merged_view::MergedView::build_from_root(&root, &ws, wp, &cache).ok().map(|arc| (*arc).clone())
+                    })
+            }
+            _ => None,
+        };
 
         // Hold the symbol-tables lock briefly to look up the per-file table;
         // releasing before the heavier checks keeps the lock window minimal.
@@ -1007,16 +1043,20 @@ impl XsLanguageServer {
             let tables = self.symbol_tables.lock().await;
             tables.get(uri).cloned()
         };
-        let diagnostics_by_uri = match table {
-            Some(table) => diagnostics::collect_all(
-                text,
-                &self.engine,
-                &table,
-                project.as_ref(),
-                current_file.as_deref(),
-                merged.as_ref(),
-            ),
-            None => {
+        let diagnostics_by_uri = match (table, merged.as_ref()) {
+            (Some(table), Some(file_view)) => {
+                let ctx = diagnostics::DiagnosticContext {
+                    source: text,
+                    engine: &self.engine,
+                    table: &table,
+                    project: project.as_ref(),
+                    file: current_file.as_deref(),
+                    file_view,
+                    root_view: root_view.as_ref(),
+                };
+                diagnostics::collect_all(&ctx)
+            }
+            _ => {
                 let mut map = std::collections::HashMap::new();
                 map.insert(uri.clone(), diagnostics::collect_diagnostics(text));
                 map
@@ -1027,22 +1067,6 @@ impl XsLanguageServer {
         for (diag_uri, diags) in diagnostics_by_uri {
             self.client.publish_diagnostics(diag_uri, diags, Some(version)).await;
         }
-    }
-
-    /// Build a semantic virtual project for the mod that owns `uri`.
-    /// Returns `None` for unowned files. Loads every visible file in the
-    /// mod; files that fail to load (binary `.xs` random-map data, IO
-    /// errors, malformed UTF-8) are skipped with a warning log rather than
-    /// aborting the whole build.
-    async fn build_semantic_project(&self, uri: &Uri) -> Option<semantic::VirtualProject> {
-        let (ws_clone, project) = {
-            let ws = self.workspace.lock().await;
-            let entry = ws.lookup_mod(uri).cloned()?;
-            let project = ws.build_virtual_project(&entry);
-            (ws.clone(), project)
-        };
-        let cache_dir = crate::cache::state_cache_dir();
-        Some(semantic::VirtualProject::load_from_workspace(&ws_clone, &project, &cache_dir))
     }
 }
 

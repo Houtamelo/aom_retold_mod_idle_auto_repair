@@ -30,7 +30,7 @@ pub fn check_calls(
     table: &SymbolTable,
     project: Option<&crate::semantic::VirtualProject>,
 ) -> Vec<Diagnostic> {
-    check_calls_with_merged(source, engine, table, None, project)
+    check_calls_with_merged(source, engine, table, None, None, project)
 }
 
 /// Like [`check_calls`], but resolves user-defined callees through the
@@ -40,13 +40,14 @@ pub fn check_calls_with_merged(
     engine: &EngineApi,
     table: &SymbolTable,
     merged: Option<&MergedView>,
+    root_view: Option<&MergedView>,
     project: Option<&crate::semantic::VirtualProject>,
 ) -> Vec<Diagnostic> {
     let Some((cst, tu)) = parse_typed(source) else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    walk_top_level(&cst, source, &tu, engine, table, merged, project, &mut out);
+    walk_top_level(&cst, source, &tu, engine, table, merged, root_view, project, &mut out);
     out
 }
 
@@ -64,11 +65,12 @@ fn walk_top_level(
     engine: &EngineApi,
     table: &SymbolTable,
     merged: Option<&MergedView>,
+    root_view: Option<&MergedView>,
     project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
     for item in &tu.items {
-        walk_top_level_item(cst, source, item, engine, table, merged, project, out);
+        walk_top_level_item(cst, source, item, engine, table, merged, root_view, project, out);
     }
 }
 
@@ -79,18 +81,19 @@ fn walk_top_level_item(
     engine: &EngineApi,
     table: &SymbolTable,
     merged: Option<&MergedView>,
+    root_view: Option<&MergedView>,
     project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
     match item {
         TopLevelItem::FunctionDefinition(f) => {
-            walk_declarator_defaults(cst, source, &f.declarator.direct, engine, table, merged, project, out);
-            walk_block_items(cst, source, &f.body.inner, engine, table, merged, project, out);
+            walk_declarator_defaults(cst, source, &f.declarator.direct, engine, table, merged, root_view, project, out);
+            walk_block_items(cst, source, &f.body.inner, engine, table, merged, root_view, project, out);
         }
         TopLevelItem::ForwardDeclaration(f) => {
-            walk_declarator_defaults(cst, source, &f.declarator.direct, engine, table, merged, project, out);
+            walk_declarator_defaults(cst, source, &f.declarator.direct, engine, table, merged, root_view, project, out);
         }
-        TopLevelItem::Declaration(d) => walk_declaration(cst, source, d, engine, table, merged, project, out),
+        TopLevelItem::Declaration(d) => walk_declaration(cst, source, d, engine, table, merged, root_view, project, out),
         _ => {}
     }
 }
@@ -102,12 +105,13 @@ fn walk_declaration(
     engine: &EngineApi,
     table: &SymbolTable,
     merged: Option<&MergedView>,
+    root_view: Option<&MergedView>,
     project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
     for init in &d.init_declarator_list.items {
         if let Some(expr) = init.expr(cst) {
-            walk_expr(cst, source, &expr, engine, table, merged, project, out);
+            walk_expr(cst, source, &expr, engine, table, merged, root_view, project, out);
         }
     }
 }
@@ -119,6 +123,7 @@ fn walk_declarator_defaults(
     engine: &EngineApi,
     table: &SymbolTable,
     merged: Option<&MergedView>,
+    root_view: Option<&MergedView>,
     project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -129,17 +134,17 @@ fn walk_declarator_defaults(
                     match &param.inner {
                         xs_parser::ast::ParameterInner::RegularParam(r) => {
                             if let Some(expr) = r.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0)) {
-                                walk_expr(cst, source, &expr, engine, table, merged, project, out);
+                                walk_expr(cst, source, &expr, engine, table, merged, root_view, project, out);
                             }
                         }
                         xs_parser::ast::ParameterInner::FunctionPointerParam(fp) => {
                             if let Some(expr) = fp.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0)) {
-                                walk_expr(cst, source, &expr, engine, table, merged, project, out);
+                                walk_expr(cst, source, &expr, engine, table, merged, root_view, project, out);
                             }
                         }
                         xs_parser::ast::ParameterInner::LeadingArrayParam(r) => {
                             if let Some(expr) = r.default.as_ref().and_then(|(_, u)| Expr::from_cst(cst, u.0)) {
-                                walk_expr(cst, source, &expr, engine, table, merged, project, out);
+                                walk_expr(cst, source, &expr, engine, table, merged, root_view, project, out);
                             }
                         }
                     }
@@ -147,7 +152,7 @@ fn walk_declarator_defaults(
             }
         }
         xs_parser::ast::DirectDeclarator::ParenDeclarator(pd) => {
-            walk_declarator_defaults(cst, source, &pd.inner.direct, engine, table, merged, project, out);
+            walk_declarator_defaults(cst, source, &pd.inner.direct, engine, table, merged, root_view, project, out);
         }
         _ => {}
     }
@@ -160,21 +165,22 @@ fn walk_block_items(
     engine: &EngineApi,
     table: &SymbolTable,
     merged: Option<&MergedView>,
+    root_view: Option<&MergedView>,
     project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
     use xs_parser::ast::statement::BlockItem;
     for item in items {
         match item {
-            BlockItem::Declaration(d) => walk_declaration(cst, source, d, engine, table, merged, project, out),
+            BlockItem::Declaration(d) => walk_declaration(cst, source, d, engine, table, merged, root_view, project, out),
             BlockItem::ForwardDeclaration(f) => {
-                walk_declarator_defaults(cst, source, &f.declarator.direct, engine, table, merged, project, out);
+                walk_declarator_defaults(cst, source, &f.declarator.direct, engine, table, merged, root_view, project, out);
             }
             BlockItem::FunctionDefinition(f) => {
-                walk_declarator_defaults(cst, source, &f.declarator.direct, engine, table, merged, project, out);
-                walk_block_items(cst, source, &f.body.inner, engine, table, merged, project, out);
+                walk_declarator_defaults(cst, source, &f.declarator.direct, engine, table, merged, root_view, project, out);
+                walk_block_items(cst, source, &f.body.inner, engine, table, merged, root_view, project, out);
             }
-            BlockItem::Statement(s) => walk_statement(cst, source, s, engine, table, merged, project, out),
+            BlockItem::Statement(s) => walk_statement(cst, source, s, engine, table, merged, root_view, project, out),
         }
     }
 }
@@ -186,66 +192,67 @@ fn walk_statement(
     engine: &EngineApi,
     table: &SymbolTable,
     merged: Option<&MergedView>,
+    root_view: Option<&MergedView>,
     project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
     use xs_parser::ast::statement::{ForInit, Statement};
     match stmt {
-        Statement::Compound(c) => walk_block_items(cst, source, &c.items.inner, engine, table, merged, project, out),
+        Statement::Compound(c) => walk_block_items(cst, source, &c.items.inner, engine, table, merged, root_view, project, out),
         Statement::Expression(es) => {
             if let Some(e) = es.expr.as_ref().and_then(|u| Expr::from_cst(cst, u.0)) {
-                walk_expr(cst, source, &e, engine, table, merged, project, out);
+                walk_expr(cst, source, &e, engine, table, merged, root_view, project, out);
             }
         }
         Statement::Return(r) => {
             if let Some(v) = &r.value {
                 if let Some(e) = Expr::from_cst(cst, v.0) {
-                    walk_expr(cst, source, &e, engine, table, merged, project, out);
+                    walk_expr(cst, source, &e, engine, table, merged, root_view, project, out);
                 }
             }
         }
         Statement::If(i) => {
             if let Some(e) = Expr::from_cst(cst, i.cond.inner.0) {
-                walk_expr(cst, source, &e, engine, table, merged, project, out);
+                walk_expr(cst, source, &e, engine, table, merged, root_view, project, out);
             }
-            walk_statement(cst, source, &i.then, engine, table, merged, project, out);
+            walk_statement(cst, source, &i.then, engine, table, merged, root_view, project, out);
             if let Some(else_) = &i.else_ {
-                walk_statement(cst, source, else_, engine, table, merged, project, out);
+                walk_statement(cst, source, else_, engine, table, merged, root_view, project, out);
             }
         }
         Statement::While(w) => {
             if let Some(e) = Expr::from_cst(cst, w.cond.inner.0) {
-                walk_expr(cst, source, &e, engine, table, merged, project, out);
+                walk_expr(cst, source, &e, engine, table, merged, root_view, project, out);
             }
-            walk_statement(cst, source, &w.body, engine, table, merged, project, out);
+            walk_statement(cst, source, &w.body, engine, table, merged, root_view, project, out);
         }
         Statement::For(f) => {
             match &f.init {
-                ForInit::Declaration(d) => walk_declaration(cst, source, d, engine, table, merged, project, out),
+                ForInit::Declaration(d) => walk_declaration(cst, source, d, engine, table, merged, root_view, project, out),
                 ForInit::Expression(u) => {
                     if let Some(e) = Expr::from_cst(cst, u.0) {
-                        walk_expr(cst, source, &e, engine, table, merged, project, out);
+                        walk_expr(cst, source, &e, engine, table, merged, root_view, project, out);
                     }
                 }
                 ForInit::Empty => {}
             }
             if let Some(u) = &f.cond {
                 if let Some(e) = Expr::from_cst(cst, u.0) {
-                    walk_expr(cst, source, &e, engine, table, merged, project, out);
+                    walk_expr(cst, source, &e, engine, table, merged, root_view, project, out);
                 }
             }
             if let Some(u) = &f.post {
                 if let Some(e) = Expr::from_cst(cst, u.0) {
-                    walk_expr(cst, source, &e, engine, table, merged, project, out);
+                    walk_expr(cst, source, &e, engine, table, merged, root_view, project, out);
                 }
             }
-            walk_statement(cst, source, &f.body, engine, table, merged, project, out);
+            walk_statement(cst, source, &f.body, engine, table, merged, root_view, project, out);
         }
         Statement::Switch(s) => {
             if let Some(e) = Expr::from_cst(cst, s.cond.inner.0) {
-                walk_expr(cst, source, &e, engine, table, merged, project, out);
+                walk_expr(cst, source, &e, engine, table, merged, root_view, project, out);
             }
-            walk_block_items(cst, source, &s.body.items.inner, engine, table, merged, project, out);
+            walk_block_items(cst, source, &s.body.items.inner, engine, table, merged, root_view, project, out);
         }
         _ => {}
     }
@@ -258,49 +265,50 @@ fn walk_expr(
     engine: &EngineApi,
     table: &SymbolTable,
     merged: Option<&MergedView>,
+    root_view: Option<&MergedView>,
     project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
     match expr {
         Expr::Postfix(pfe) => {
             if let PostfixInner::Call(call) = &pfe.inner {
-                check_one_call(cst, source, call, engine, table, merged, project, out);
-                walk_expr(cst, source, &pfe.target, engine, table, merged, project, out);
+                check_one_call(cst, source, call, engine, table, merged, root_view, project, out);
+                walk_expr(cst, source, &pfe.target, engine, table, merged, root_view, project, out);
             } else {
-                walk_expr(cst, source, &pfe.target, engine, table, merged, project, out);
+                walk_expr(cst, source, &pfe.target, engine, table, merged, root_view, project, out);
             }
             if let PostfixInner::Call(call) = &pfe.inner {
                 if let Some(args) = &call.args {
                     for (arg, _) in &args.items.items {
                         if let Some(e) = arg.expr(cst) {
-                            walk_expr(cst, source, &e, engine, table, merged, project, out);
+                            walk_expr(cst, source, &e, engine, table, merged, root_view, project, out);
                         }
                     }
                 }
             }
         }
-        Expr::Unary(u) => walk_expr(cst, source, &u.operand, engine, table, merged, project, out),
+        Expr::Unary(u) => walk_expr(cst, source, &u.operand, engine, table, merged, root_view, project, out),
         Expr::Binary(b) => {
-            walk_expr(cst, source, &b.lhs, engine, table, merged, project, out);
-            walk_expr(cst, source, &b.rhs, engine, table, merged, project, out);
+            walk_expr(cst, source, &b.lhs, engine, table, merged, root_view, project, out);
+            walk_expr(cst, source, &b.rhs, engine, table, merged, root_view, project, out);
         }
         Expr::Conditional(c) => {
-            walk_expr(cst, source, &c.cond, engine, table, merged, project, out);
+            walk_expr(cst, source, &c.cond, engine, table, merged, root_view, project, out);
             if let Some(t) = &c.then {
-                walk_expr(cst, source, t, engine, table, merged, project, out);
+                walk_expr(cst, source, t, engine, table, merged, root_view, project, out);
             }
-            walk_expr(cst, source, &c.else_, engine, table, merged, project, out);
+            walk_expr(cst, source, &c.else_, engine, table, merged, root_view, project, out);
         }
         Expr::Assignment(a) => {
-            walk_expr(cst, source, &a.lhs, engine, table, merged, project, out);
-            walk_expr(cst, source, &a.rhs, engine, table, merged, project, out);
+            walk_expr(cst, source, &a.lhs, engine, table, merged, root_view, project, out);
+            walk_expr(cst, source, &a.rhs, engine, table, merged, root_view, project, out);
         }
         Expr::Comma(c) => {
             for e in &c.exprs {
-                walk_expr(cst, source, e, engine, table, merged, project, out);
+                walk_expr(cst, source, e, engine, table, merged, root_view, project, out);
             }
         }
-        Expr::Paren(p) => walk_expr(cst, source, &p.inner, engine, table, merged, project, out),
+        Expr::Paren(p) => walk_expr(cst, source, &p.inner, engine, table, merged, root_view, project, out),
         _ => {}
     }
 }
@@ -312,6 +320,7 @@ fn check_one_call(
     engine: &EngineApi,
     table: &SymbolTable,
     merged: Option<&MergedView>,
+    root_view: Option<&MergedView>,
     project: Option<&crate::semantic::VirtualProject>,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -322,7 +331,7 @@ fn check_one_call(
     let resolved: Option<Callee<'_>> = if let Some(syscall) = engine.find_syscall(&callee) {
         Some(Callee::Engine(syscall))
     } else {
-        resolve_workspace_function(merged, project, &callee).map(Callee::Workspace)
+        resolve_workspace_function(merged, root_view, project, &callee).map(Callee::Workspace)
     };
 
     let Some(target) = resolved else { return };
@@ -481,12 +490,25 @@ impl<'a> Callee<'a> {
 
 fn resolve_workspace_function<'a>(
     merged: Option<&'a MergedView>,
+    root_view: Option<&'a MergedView>,
     project: Option<&'a crate::semantic::VirtualProject>,
     name: &str,
 ) -> Option<&'a crate::symbols::Symbol> {
     if let Some(ms) = merged.and_then(|mv| mv.find(name)) {
         return Some(&ms.symbol);
     }
+
+    // PR-4: root_view fallback for the multi-root path. When the callee is
+    // not in the file's forward closure but exists in the resolved root chain,
+    // it is still reachable at link time.
+    if let Some(ms) = root_view.and_then(|mv| mv.find(name)) {
+        return Some(&ms.symbol);
+    }
+
+    // V1 backward-compatibility: keep the project.files scan that existed
+    // before PR-4. The long-term design (design.md line 79) removes this scan
+    // in favor of root_view.find, but dropping it now breaks many existing
+    // callers that pass no root_view.
     project.and_then(|p| resolve_workspace_function_project(p, name))
 }
 
@@ -960,7 +982,7 @@ void test() { setOverrideStrategy(strategy); }"#;
         let cache_dir = TempDir::new().unwrap();
         let merged = MergedView::build(&a, &source_a, &own, &ws, &project, cache_dir.path());
 
-        let diags = check_calls_with_merged(&source_a, &engine(), &table, Some(&merged), None);
+        let diags = check_calls_with_merged(&source_a, &engine(), &table, Some(&merged), None, None);
         let msgs = messages(&diags);
         assert!(
             msgs.iter().any(|m| m.contains("expected argument 1 of type `int`") && m.contains("got `string`")),

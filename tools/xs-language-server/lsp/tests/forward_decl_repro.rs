@@ -85,7 +85,7 @@ fn test_vanilla_main_xs_in_mod_overlay_produces_zero_false_positives() {
     );
 
     let diags =
-        check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
+        check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged, None);
     assert_eq!(
         before_declaration_count(&diags),
         0,
@@ -103,7 +103,7 @@ fn test_real_same_file_forward_decl_error_still_detected() {
     );
 
     let diags =
-        check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
+        check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged, None);
     assert_eq!(
         before_declaration_count(&diags),
         1,
@@ -131,7 +131,7 @@ fn test_mutable_function_called_before_redefinition_does_not_emit() {
     );
 
     let diags =
-        check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged);
+        check_forward_declarations_for_merged_view(&prj, &EngineApi::default(), &current, &merged, None);
     assert_eq!(
         before_declaration_count(&diags),
         0,

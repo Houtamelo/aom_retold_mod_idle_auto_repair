@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use tower_lsp_server::ls_types::{DiagnosticSeverity, Uri};
-use xs_language_server::diagnostics::{DiagnosticCategory, collect_all, collect_diagnostics_with_types};
+use xs_language_server::diagnostics::{DiagnosticCategory, DiagnosticContext, collect_all, collect_diagnostics_with_types};
 use xs_language_server::engine_api::EngineApi;
 use xs_language_server::merged_view::MergedView;
 use xs_language_server::semantic::VirtualProject as SemProject;
@@ -483,8 +483,16 @@ fn analyze_top_level_diagnostics() -> Option<DiagnosticReport> {
                 let table = symbols::build_symbol_table(&source);
                 let merged =
                     MergedView::build(path, &source, &table, &workspace, &ws_project, &cache_dir);
-                let diags_by_uri =
-                    collect_all(&source, &engine_api, &table, Some(&project), Some(path), Some(&merged));
+                let ctx = DiagnosticContext {
+                    source: &source,
+                    engine: &engine_api,
+                    table: &table,
+                    project: Some(&project),
+                    file: Some(path),
+                    file_view: &merged,
+                    root_view: Some(&merged),
+                };
+                let diags_by_uri = collect_all(&ctx);
 
                 for (uri, file_diags) in diags_by_uri {
                     let source_for_uri = source_by_uri.get(&uri).map(|s| s.as_str()).unwrap_or("");

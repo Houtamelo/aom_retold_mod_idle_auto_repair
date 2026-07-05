@@ -89,82 +89,84 @@ fn xs_diagnostic_to_lsp(source: &str, d: &xs_parser::parser::Diagnostic) -> Diag
     }
 }
 
+/// Bundle of inputs that drive a single diagnostic pass.
+///
+/// `file_view` is the forward include-paste view for the file being diagnosed.
+/// `root_view` is the full include chain of a root that includes the file; in
+/// the V1 single-pass path it is typically `None` (falls back to `file_view)
+/// and in the PR-5 multi-root path it is the resolved root chain.
+#[derive(Debug, Clone, Copy)]
+pub struct DiagnosticContext<'a> {
+    pub source: &'a str,
+    pub engine: &'a EngineApi,
+    pub table: &'a SymbolTable,
+    pub project: Option<&'a VirtualProject>,
+    pub file: Option<&'a Path>,
+    pub file_view: &'a MergedView,
+    pub root_view: Option<&'a MergedView>,
+}
+
 /// Full diagnostic pass for a file: parse errors + type-check + semantic.
 ///
-/// `project` and `current_file` are `None` for unowned files; in that case
-/// only engine-API-based checks run. When `merged` is provided, the
-/// include-paste scope drives cross-file resolution.
-pub fn collect_all(
-    source: &str,
-    engine: &EngineApi,
-    table: &SymbolTable,
-    project: Option<&VirtualProject>,
-    current_file: Option<&Path>,
-    merged: Option<&MergedView>,
-) -> DiagnosticsByUri {
+/// Primary callers should build a [`DiagnosticContext`] and call this
+/// function. The per-root loop in PR-5 will call [`run_pass`] directly.
+pub fn collect_all(ctx: &DiagnosticContext<'_>) -> DiagnosticsByUri { run_pass(ctx) }
+
+/// Inner single-root diagnostic pass used by [`collect_all`] and by the
+/// PR-5 per-root aggregation loop.
+pub fn run_pass(ctx: &DiagnosticContext<'_>) -> DiagnosticsByUri {
     let mut diags: DiagnosticsByUri = HashMap::new();
-    let current_uri = current_file.and_then(|p| Uri::from_file_path(p));
 
-    if let Some(uri) = &current_uri {
-        let types = type_table_with_project_classes(project);
-        let parse_diags = collect_diagnostics_with_types(source, types);
-        if !parse_diags.is_empty() {
-            diags.entry(uri.clone()).or_default().extend(parse_diags);
+    let Some(current_file) = ctx.file else {
+        return diags;
+    };
+    let Some(uri) = Uri::from_file_path(current_file) else {
+        return diags;
+    };
+
+    let types = type_table_with_project_classes(ctx.project);
+    let parse_diags = collect_diagnostics_with_types(ctx.source, types);
+    if !parse_diags.is_empty() {
+        diags.entry(uri.clone()).or_default().extend(parse_diags);
+    }
+
+    let definition_diags = definition_check::validate_definitions(ctx.source);
+    if !definition_diags.is_empty() {
+        diags.entry(uri.clone()).or_default().extend(definition_diags);
+    }
+
+    let typecheck_diags =
+        typecheck::check_calls_with_merged(ctx.source, ctx.engine, ctx.table, Some(ctx.file_view), ctx.root_view, ctx.project);
+    if !typecheck_diags.is_empty() {
+        diags.entry(uri.clone()).or_default().extend(typecheck_diags);
+    }
+
+    if let Some(p) = ctx.project {
+        let extern_diags = semantic::check_extern_collisions(p, current_file, Some(ctx.file_view), ctx.root_view);
+        merge_diagnostic_maps(&mut diags, extern_diags);
+
+        let fwd = semantic::check_forward_declarations_for_merged_view(
+            p,
+            ctx.engine,
+            current_file,
+            ctx.file_view,
+            ctx.root_view,
+        );
+        if !fwd.is_empty() {
+            diags.entry(uri.clone()).or_default().extend(fwd);
         }
 
-        let definition_diags = definition_check::validate_definitions(source);
-        if !definition_diags.is_empty() {
-            diags.entry(uri.clone()).or_default().extend(definition_diags);
-        }
-
-        let typecheck_diags = typecheck::check_calls_with_merged(source, engine, table, merged, project);
-        if !typecheck_diags.is_empty() {
-            diags.entry(uri.clone()).or_default().extend(typecheck_diags);
+        let mut_diags = semantic::check_mutable_redefinitions_for_merged_view(ctx.file_view, ctx.root_view);
+        if !mut_diags.is_empty() {
+            diags.entry(uri.clone()).or_default().extend(mut_diags);
         }
     }
 
-    if let Some(p) = project {
-        if let Some(cf) = current_file {
-            let extern_diags = semantic::check_extern_collisions(p, cf, merged);
-            merge_diagnostic_maps(&mut diags, extern_diags);
-
-            if let Some(uri) = &current_uri {
-                let fwd = if let Some(mv) = merged {
-                    semantic::check_forward_declarations_for_merged_view(p, engine, cf, mv)
-                } else {
-                    semantic::check_forward_declarations(p, engine, cf)
-                };
-                if !fwd.is_empty() {
-                    diags.entry(uri.clone()).or_default().extend(fwd);
-                }
-
-                let mut_diags = if let Some(mv) = merged {
-                    semantic::check_mutable_redefinitions_for_merged_view(mv)
-                } else {
-                    semantic::check_mutable_redefinitions(p)
-                };
-                if !mut_diags.is_empty() {
-                    diags.entry(uri.clone()).or_default().extend(mut_diags);
-                }
-            }
-        }
+    for inc in ctx.file_view.missing_includes() {
+        diags.entry(uri.clone()).or_default().push(include_diagnostic_to_lsp(inc));
     }
 
-    if let Some(mv) = merged {
-        if let Some(uri) = &current_uri {
-            for inc in mv.missing_includes() {
-                diags
-                    .entry(uri.clone())
-                    .or_default()
-                    .push(include_diagnostic_to_lsp(inc));
-            }
-        }
-    }
-
-    if let Some(uri) = &current_uri {
-        diags.entry(uri.clone()).or_default();
-    }
-
+    diags.entry(uri.clone()).or_default();
     diags
 }
 

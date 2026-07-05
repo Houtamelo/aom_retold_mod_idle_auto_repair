@@ -160,6 +160,8 @@ These are deviations from the original (Alphabetical-only, lazy) defaults, locke
 
 **Dependency**: PR-1, PR-2, PR-3
 
+**Status**: ✅ Complete (commits `231267a` `[wip]` + this commit, anchor GREEN, signature refactor done)
+
 **Estimated diff**: ~320 lines
 
 **Rollback**: revert signature changes in `diagnostics.rs`, `semantic.rs`, `typecheck.rs`, and `server.rs`; restore the original anchor test fixture if it was modified.
