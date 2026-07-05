@@ -22,3 +22,4 @@ pub mod word;
 pub mod workspace;
 
 pub mod merged_view;
+pub mod include_graph;
