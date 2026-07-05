@@ -215,6 +215,8 @@ These are deviations from the original (Alphabetical-only, lazy) defaults, locke
 
 **Branch**: same branch, one new commit on top of PR-5.
 
+**Status**: ✅ Complete — commits `a02afb7` PR-5 + this PR's commit.
+
 **Files**:
 - MOD: `tools/xs-language-server/lsp/tests/root_aware_diagnostics_repro.rs` — extend with edge-case fixtures.
 - MOD: `tools/xs-language-server/lsp/src/diagnostics.rs` / `semantic.rs` — any small fixes discovered by edge-case tests (expected to be minimal).

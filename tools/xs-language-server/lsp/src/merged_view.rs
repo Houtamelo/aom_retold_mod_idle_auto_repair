@@ -298,25 +298,37 @@ impl MergedView {
         for (target, range) in directives {
             let line = range.start.line;
             match workspace.resolve_include_edge(project, &current_rel, &target, file, line) {
-                Ok((to_path, edge)) => {
-                    if visited.contains(&to_path) {
-                        view.graph.edges.push(edge);
-                        view.graph.cyclic = true;
-                        continue;
-                    }
+            Ok((to_path, edge)) => {
+                // Unreadable include targets (binary .xs random-map data,
+                // permission errors, etc.) must not enter the include graph;
+                // they are reported via IncludeDiagnostic::Unreadable and
+                // skipped. This keeps the reverse-include graph free of files
+                // that contribute no symbols.
+                if !crate::workspace::is_readable_xs_file(&to_path) {
+                    tracing::warn!(
+                        target: "merged_view",
+                        include = %to_path.display(),
+                        "skipping unreadable include target"
+                    );
+                    view.missing.push(IncludeDiagnostic::unreadable(
+                        target,
+                        file.to_path_buf(),
+                        edge.root,
+                        range,
+                    ));
+                    continue;
+                }
 
-                    visited.insert(to_path.clone());
-                    view.graph.edges.push(edge.clone());
+                if visited.contains(&to_path) {
+                    view.graph.edges.push(edge);
+                    view.graph.cyclic = true;
+                    continue;
+                }
 
-                    // Defensive: even though resolve_file now rejects non-.xs
-                    // targets, a future regression shouldn't cascade into a
-                    // UTF-8 decode failure here. Skip the merge for anything
-                    // that isn't an XS source file.
-                    if !crate::workspace::is_xs_file(&to_path) {
-                        continue;
-                    }
+                visited.insert(to_path.clone());
+                view.graph.edges.push(edge.clone());
 
-                    let rel = relative_path_for(project, workspace, &to_path);
+                let rel = relative_path_for(project, workspace, &to_path);
                     let table = match cache::load_or_parse_symbols(&to_path, &rel, cache_dir) {
                         Ok(t) => t,
                         Err(e) => {
@@ -549,6 +561,19 @@ fn walk_includes(
         let line = range.start.line;
         match workspace.resolve_include_edge(project, &rel, &target, file, line) {
             Ok((to_path, edge)) => {
+                // See the matching check in MergedView::build: unreadable
+                // targets must not become graph edges.
+                if !crate::workspace::is_readable_xs_file(&to_path) {
+                    tracing::warn!(
+                        target: "merged_view",
+                        include = %to_path.display(),
+                        "skipping unreadable include target"
+                    );
+                    view.missing
+                        .push(IncludeDiagnostic::unreadable(target, file.to_path_buf(), edge.root, range));
+                    continue;
+                }
+
                 if visited.contains(&to_path) {
                     view.graph.edges.push(edge);
                     view.graph.cyclic = true;
@@ -557,10 +582,6 @@ fn walk_includes(
 
                 visited.insert(to_path.clone());
                 view.graph.edges.push(edge.clone());
-
-                if !crate::workspace::is_xs_file(&to_path) {
-                    continue;
-                }
 
                 let rel = relative_path_for(project, workspace, &to_path);
                 let table = match cache::load_or_parse_symbols(&to_path, &rel, cache_dir) {
