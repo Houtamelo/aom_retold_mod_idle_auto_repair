@@ -14,9 +14,11 @@
 //! bumped from `v2/` to `v3/` when class member symbols were added to the
 //! `SymbolTable`; existing `game_parse/v2/` caches are ignored and rebuilt.
 
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -24,6 +26,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::merged_view::MergedView;
 use crate::symbols;
 
 /// Returns the user-level cache root directory for this LSP.
@@ -311,6 +314,228 @@ where
 
     write_json(&path, &value).with_context(|| format!("writing engine cache file {path:?}"))?;
     Ok(value)
+}
+
+// ---------------------------------------------------------------------------
+// Per-root MergedView cache (session-only, in-memory)
+// ---------------------------------------------------------------------------
+
+/// Error returned by the per-root merged-view cache.
+///
+/// A cache miss or eviction is a normal path and is **not** represented here;
+/// these errors are limited to unexpected I/O failures when reading source
+/// files that the cache needs in order to build or hash a view.
+#[derive(Debug)]
+pub enum CacheError {
+    /// An I/O operation failed while reading a source file.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for CacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CacheError::Io(e) => write!(f, "I/O error in per-root cache: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for CacheError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CacheError::Io(e) => Some(e),
+        }
+    }
+}
+
+impl From<std::io::Error> for CacheError {
+    fn from(e: std::io::Error) -> Self {
+        CacheError::Io(e)
+    }
+}
+
+/// Key for one cached root-chain merged view.
+///
+/// A root's merged view depends on the source of the root file and on the
+/// source of every file in its include closure, so the cache key is the pair
+/// `(root_path, closure_content_hash)`. Any change to any closure file
+/// produces a different `closure_hash` and therefore a different key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PerRootCacheKey {
+    pub root: PathBuf,
+    pub closure_hash: String,
+}
+
+/// One entry in the per-root merged-view cache.
+#[derive(Debug, Clone)]
+pub struct CachedRootView {
+    view: Arc<MergedView>,
+    closure_files: Vec<PathBuf>,
+    closure_hash: String,
+}
+
+impl CachedRootView {
+    /// The cached merged view for this root.
+    pub fn view(&self) -> Arc<MergedView> {
+        self.view.clone()
+    }
+
+    /// The set of files that contributed to this cached view, in the same
+    /// stable sorted order used to compute [`Self::closure_hash`].
+    pub fn closure_files(&self) -> &[PathBuf] {
+        &self.closure_files
+    }
+
+    /// The closure-content hash that was used as part of the cache key.
+    pub fn closure_hash(&self) -> &str {
+        &self.closure_hash
+    }
+}
+
+/// Session-only, in-memory cache of merged views, keyed per root.
+///
+/// # Invariants
+///
+/// * At most one entry exists per root path. A new build for a root evicts
+///   any older entry for the same root.
+/// * The cache key includes a deterministic hash over the file contents of
+///   the root's full include closure, so any file change yields a cache miss.
+/// * `invalidate_for_paths` eagerly drops every entry whose stored closure
+///   file list intersects the changed-path set. PR-5's watched-file handler
+///   will call this with coalesced batches of changed paths.
+/// * Cache misses and evictions are normal; I/O errors while reading root
+///   source are surfaced as [`CacheError`]. If an included file disappears
+///   or becomes unreadable between builds, the cache logs a warning and
+///   continues with an empty hash for that file, which naturally triggers a
+///   rebuild.
+/// * Concurrent `get_or_build` calls for the same key may build redundant
+///   views under the write lock; callers deduplicate by comparing the
+///   returned `Arc<MergedView>` pointer if they care.
+#[derive(Debug, Clone)]
+pub struct PerRootMergedViewCache {
+    cache_dir: PathBuf,
+    entries: Arc<RwLock<HashMap<PerRootCacheKey, Arc<CachedRootView>>>>,
+}
+
+impl PerRootMergedViewCache {
+    /// Create a new empty cache that uses `cache_dir` for the per-file parse
+    /// cache when building merged views.
+    pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            cache_dir: cache_dir.into(),
+            entries: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Return the cached merged view for `root` if its closure has not
+    /// changed, otherwise build a fresh view, store it, and return it.
+    ///
+    /// This call reads the root source from disk and may parse every file in
+    /// the root's include closure; PR-5 will call it once per root during
+    /// diagnostic publishing.
+    pub fn get_or_build(
+        &self,
+        root: &Path,
+        workspace: &crate::workspace::Workspace,
+        project: &crate::workspace::VirtualProject,
+    ) -> Result<Arc<MergedView>, CacheError> {
+        let source = fs::read_to_string(root)?;
+        let own_table = symbols::build_symbol_table(&source);
+        let view = MergedView::build(root, &source, &own_table, workspace, project, &self.cache_dir);
+
+        let closure_files: Vec<PathBuf> = view.closure_files().cloned().collect();
+        let closure_hash = closure_content_hash(&closure_files);
+
+        let key = PerRootCacheKey {
+            root: root.to_path_buf(),
+            closure_hash,
+        };
+
+        // Fast path: exact key already cached.
+        {
+            let entries = self.entries.read().unwrap();
+            if let Some(entry) = entries.get(&key) {
+                return Ok(entry.view.clone());
+            }
+        }
+
+        // Slow path: store the newly built view and evict any stale entry for
+        // the same root. A second check under the write lock catches races
+        // where another thread inserted the same key while we were building.
+        let view_arc = Arc::new(view);
+        let cached = Arc::new(CachedRootView {
+            view: view_arc.clone(),
+            closure_files,
+            closure_hash: key.closure_hash.clone(),
+        });
+        {
+            let mut entries = self.entries.write().unwrap();
+            if let Some(entry) = entries.get(&key) {
+                return Ok(entry.view.clone());
+            }
+            entries.retain(|k, _| k.root != key.root);
+            entries.insert(key, cached);
+        }
+        Ok(view_arc)
+    }
+
+    /// Eagerly drop every cached root view whose closure contains any of the
+    /// changed paths.
+    ///
+    /// `paths` is the coalesced set of files that the LSP watcher reports as
+    /// changed. The implementation is O(N × M) where N is the number of
+    /// changed paths and M is the number of cached entries, and per-entry
+    /// closure file lists are typically very small.
+    pub fn invalidate_for_paths(&self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        let changed: BTreeSet<PathBuf> = paths.iter().cloned().collect();
+        let mut entries = self.entries.write().unwrap();
+        entries.retain(|_, entry| !entry.closure_files.iter().any(|f| changed.contains(f)));
+    }
+
+    /// Return the cached entry for `root`, if any.
+    ///
+    /// Because at most one entry per root is kept, this scans the key set by
+    /// root path. The clone is cheap: it increments one `Arc` and copies the
+    /// stored closure-file list.
+    pub fn entry(&self, root: &Path) -> Option<CachedRootView> {
+        let entries = self.entries.read().unwrap();
+        entries
+            .iter()
+            .find(|(k, _)| k.root == root)
+            .map(|(_, v)| v.as_ref().clone())
+    }
+}
+
+/// Compute a deterministic SHA-256 over the contents of `paths`.
+///
+/// `paths` must already be in the desired order; callers typically pass the
+/// output of [`MergedView::closure_files`], which is sorted. Each file is
+/// hashed with [`sha256_file`]; if a file disappears or becomes unreadable
+/// mid-flight, a warning is logged and an empty hash is used for that file,
+/// which naturally produces a different combined hash and triggers a rebuild.
+fn closure_content_hash(paths: &[PathBuf]) -> String {
+    let mut buffer: Vec<u8> = Vec::with_capacity(paths.len() * 96);
+    for path in paths {
+        let file_hash = match sha256_file(path) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(
+                    target: "per_root_cache",
+                    path = %path.display(),
+                    error = %e,
+                    "could not hash closure file; using empty hash for cache key"
+                );
+                String::new()
+            }
+        };
+        buffer.extend_from_slice(path.as_os_str().as_encoded_bytes());
+        buffer.push(b'\0');
+        buffer.extend_from_slice(file_hash.as_bytes());
+        buffer.push(b'\n');
+    }
+    sha256_bytes(&buffer)
 }
 
 #[cfg(test)]

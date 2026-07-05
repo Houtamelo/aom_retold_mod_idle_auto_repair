@@ -5,27 +5,40 @@
 | Field | Value |
 |-------|-------|
 | Estimated changed lines | 1,300 – 1,600 |
-| 400-line budget risk | High |
+| 400-line budget risk | High (chained strategy reduces per-PR risk) |
 | Chained PRs recommended | Yes |
 | Suggested split | PR-1 → PR-2 → PR-3 → PR-4 → PR-5 → PR-6 |
 | Delivery strategy | auto-forecast (C4 — chain) |
-| Chain strategy | feature-branch-chain with tracker `lsp-include-graph-aware-diagnostics` |
+| Chain strategy | **stacked-to-main** on existing branch `xs-lsp-roundtrip-followup` (user-confirmed 2026-07-05). Each PR merges directly to main in order. |
 
 Decision needed before apply: No
 Chained PRs recommended: Yes
-Chain strategy: feature-branch-chain
+Chain strategy: stacked-to-main (existing branch)
 400-line budget risk: High
+Review budget: **no enforcement** (user explicitly OK'd unlimited line count; "small deviations" expected, audit later).
 
 ### Suggested Work Units
 
-| Unit | Goal | PR | Branch | Base | Tests |
-|------|------|----|--------|------|-------|
-| 1 | Reverse-include graph + query API | PR-1 | `lsp-include-graph-pr-1` | `lsp-include-graph-aware-diagnostics` | `include_graph_repro.rs` |
-| 2 | Per-root merged-view cache | PR-2 | `lsp-include-graph-pr-2` | PR-1 | `per_root_cache_repro.rs` |
-| 3 | Root-based merged view + rebase | PR-3 | `lsp-include-graph-pr-3` | PR-2 | `merged_view_root_repro.rs` |
-| 4 | Diagnostic context + root-scoped semantic/typecheck | PR-4 | `lsp-include-graph-pr-4` | PR-3 | `indirect_include_symbol_repro.rs` anchor |
-| 5 | Aggregation + publish_diagnostics orchestration | PR-5 | `lsp-include-graph-pr-5` | PR-4 | `root_aware_diagnostics_repro.rs` |
-| 6 | Edge-case coverage (dead code, forward-decl across chain, overlays) | PR-6 | `lsp-include-graph-pr-6` | PR-5 | extended `root_aware_diagnostics_repro.rs` |
+| Unit | Goal | PR | Branch / commit strategy | Tests |
+|------|------|----|--------------------------|-------|
+| 1 | Reverse-include graph + query API | PR-1 | committed directly on `xs-lsp-roundtrip-followup` (no new branch) | `include_graph_repro.rs` |
+| 2 | Per-root merged-view cache | PR-2 | same branch, new commit on top of PR-1 | `per_root_cache_repro.rs` |
+| 3 | Root-based merged view + rebase | PR-3 | same branch, on top of PR-2 | `merged_view_root_repro.rs` |
+| 4 | Diagnostic context + root-scoped semantic/typecheck | PR-4 | same branch, on top of PR-3 | `indirect_include_symbol_repro.rs` anchor |
+| 5 | Aggregation + publish_diagnostics + watched-files orchestration | PR-5 | same branch, on top of PR-4 | `root_aware_diagnostics_repro.rs` |
+| 6 | Edge-case coverage (dead code, forward-decl across chain, overlays) | PR-6 | same branch, on top of PR-5 | extended `root_aware_diagnostics_repro.rs` |
+
+---
+
+## User-confirmed choices (locked 2026-07-05)
+
+These are deviations from the original (Alphabetical-only, lazy) defaults, locked via question-and-answer at apply-start. Apply agents MUST honour them.
+
+1. **Aggregation producing-roots order** = `currently-open → mod-overlay → alphabetical`.
+   - Affects PR-5 only. See design §6.
+2. **Cache invalidation strategy** = **eager via `did_change_watched_files`**.
+   - Server registers `**/*.xs` watcher on `on_initialized`; coalesces notifications within a 50ms window; invalidates affected per-root cache entries eagerly.
+   - Affects PR-2 (invalidation hooks must accept path sets, not just single URIs) and PR-5 (server registers + handles watcher).
 
 ---
 
@@ -35,7 +48,7 @@ Chain strategy: feature-branch-chain
 
 **Branch**: `lsp-include-graph-pr-1`
 
-**Status**: ✅ Complete (commit `9ef9378`)
+**Status**: ✅ Complete (commit `b313f2a`)
 
 **Files**:
 - NEW: `tools/xs-language-server/lsp/src/include_graph.rs` — `ReverseIncludeGraph` struct; `build(forward: &IncludeGraph)`; `dependents` map; `roots_that_include(file) -> Vec<PathBuf>`; `direct_includers(file)`; `len()`; cycle handling via visited guard.
@@ -70,7 +83,7 @@ Chain strategy: feature-branch-chain
 
 **Goal**: Add a `PerRootMergedViewCache` keyed by `(root_path, closure_content_hash)` with up-front invalidation-by-path hooks.
 
-**Branch**: `lsp-include-graph-pr-2` (base: PR-1)
+**Branch**: same branch (`xs-lsp-roundtrip-followup`), one new commit on top of PR-1 (`b313f2a`).
 
 **Files**:
 - MOD: `tools/xs-language-server/lsp/src/cache.rs` — add `PerRootCacheKey`, `CachedRootView`, `PerRootMergedViewCache::new`, `get_or_build`, `invalidate_for_paths`, `closure_content_hash` helper.
@@ -78,11 +91,11 @@ Chain strategy: feature-branch-chain
 - NEW: `tools/xs-language-server/lsp/tests/per_root_cache_repro.rs` — TDD repro tests.
 
 **Tests (RED before, GREEN after)**:
-- `test_cache_returns_same_arc_on_identical_closure_hash`
-- `test_cache_rebuilds_after_closure_change`
-- `test_cache_invalidates_entry_containing_changed_path`
-- `test_unchanged_root_view_reused_while_changed_root_rebuilds`
-- `test_cache_stores_closure_file_list`
+- [x] `test_cache_returns_same_arc_on_identical_closure_hash`
+- [x] `test_cache_rebuilds_after_closure_change`
+- [x] `test_cache_invalidates_entry_containing_changed_path`
+- [x] `test_unchanged_root_view_reused_while_changed_root_rebuilds`
+- [x] `test_cache_stores_closure_file_list`
 
 **Dependency**: PR-1 (graph module gives the root concept, but cache mechanics are independent; ordered second by design)
 
@@ -102,7 +115,7 @@ Chain strategy: feature-branch-chain
 
 **Goal**: Allow the server to build a `MergedView` from any root and rebase it to the currently diagnosed file.
 
-**Branch**: `lsp-include-graph-pr-3` (base: PR-2)
+**Branch**: same branch, one new commit on top of PR-2.
 
 **Files**:
 - MOD: `tools/xs-language-server/lsp/src/merged_view.rs` — add `MergedView::build_from_root(root, workspace, project, cache_dir)`; `MergedView::rebase_to_file(&self, file, source, own_table) -> MergedView`; strengthen `closure_files()` return lifetime if needed.
@@ -132,7 +145,7 @@ Chain strategy: feature-branch-chain
 
 **Goal**: Refactor the diagnostic pass to accept both a file view and a root view, scope semantic/typecheck fallback to the root chain, and turn the existing anchor RED test GREEN.
 
-**Branch**: `lsp-include-graph-pr-4` (base: PR-3)
+**Branch**: same branch, one new commit on top of PR-3.
 
 **Files**:
 - MOD: `tools/xs-language-server/lsp/src/diagnostics.rs` — introduce `DiagnosticContext`; refactor `collect_all` to take `&DiagnosticContext`; add `run_pass(ctx)` wrapper; keep current single-root behavior as the default path.
@@ -159,11 +172,11 @@ Chain strategy: feature-branch-chain
 
 ---
 
-## PR-5: Aggregation utility + publish_diagnostics orchestration
+## PR-5: Aggregation utility + publish_diagnostics orchestration + watched-files wiring
 
-**Goal**: Wire the server to run a local pass, optionally run per-root passes, aggregate equivalent diagnostics, and publish universal/partial/truncated messages.
+**Goal**: Wire the server to run a local pass, optionally run per-root passes, aggregate equivalent diagnostics (using the user-confirmed currently-open → mod-overlay → alphabetical ordering), publish universal/partial/truncated messages, and register the eager `did_change_watched_files` handler.
 
-**Branch**: `lsp-include-graph-pr-5` (base: PR-4)
+**Branch**: same branch, one new commit on top of PR-4.
 
 **Files**:
 - MOD: `tools/xs-language-server/lsp/src/diagnostics.rs` — add `DiagnosticCategory`/`categorize`, `PerRootDiagnostic`, `AggregatedDiagnostic`, `DiagnosticKey`, `aggregate_results`, `format_root_suffix`, `strip_root_suffix`.
@@ -196,7 +209,7 @@ Chain strategy: feature-branch-chain
 
 **Goal**: Close the spec coverage gap for dead-code orphans, forward-declaration-across-chain, mod-overlay paths, binary `.xs` exclusions, and include cycles.
 
-**Branch**: `lsp-include-graph-pr-6` (base: PR-5)
+**Branch**: same branch, one new commit on top of PR-5.
 
 **Files**:
 - MOD: `tools/xs-language-server/lsp/tests/root_aware_diagnostics_repro.rs` — extend with edge-case fixtures.
@@ -226,8 +239,8 @@ Chain strategy: feature-branch-chain
 
 ## Final integration checklist
 
-- [ ] PR-1 GREEN: `cargo test --test include_graph_repro`
-- [ ] PR-2 GREEN: `cargo test --test per_root_cache_repro`
+- [x] PR-1 GREEN: `cargo test --test include_graph_repro`
+- [x] PR-2 GREEN: `cargo test --test per_root_cache_repro`
 - [ ] PR-3 GREEN: `cargo test --test merged_view_root_repro`
 - [ ] PR-4 GREEN: `cargo test --test indirect_include_symbol_repro`
 - [ ] PR-5 GREEN: `cargo test --test root_aware_diagnostics_repro`

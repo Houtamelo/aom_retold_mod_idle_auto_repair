@@ -428,6 +428,24 @@ impl MergedView {
         std::iter::once(self.current_file.as_path()).chain(self.tables.keys().map(|p| p.as_path()))
     }
 
+    /// All files that participate in this merged view (the analysed file plus
+    /// every resolved include target), returned in deterministic sorted order.
+    ///
+    /// The set includes files that resolved as include targets but could not be
+    /// read or parsed, because a later change to such a file can still alter
+    /// the merged view's diagnostics. Use this iterator for cache invalidation
+    /// and closure-content hashing.
+    pub fn closure_files(&self) -> impl Iterator<Item = &PathBuf> {
+        let mut files: Vec<&PathBuf> = Vec::with_capacity(self.graph.edges.len() + 1);
+        files.push(&self.current_file);
+        for edge in &self.graph.edges {
+            files.push(&edge.to);
+        }
+        files.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+        files.dedup();
+        files.into_iter()
+    }
+
     /// Per-file symbol tables for every file in the include closure.
     pub fn tables(&self) -> &std::collections::HashMap<PathBuf, SymbolTable> { &self.tables }
 
