@@ -4,10 +4,10 @@
 //! LSP severity/ranges. `collect_all` layers definition-time and type-check
 //! diagnostics on top.
 
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, path::PathBuf};
 
 use codespan_reporting::diagnostic::Severity;
-use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, Uri};
+use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Range, Uri};
 
 use crate::{
     definition_check,
@@ -235,6 +235,266 @@ pub fn is_unresolved_symbol(d: &Diagnostic) -> bool { categorize(d) == Diagnosti
 
 /// True if `d` is a wrong-argument-count diagnostic.
 pub fn is_argument_mismatch(d: &Diagnostic) -> bool { categorize(d) == DiagnosticCategory::WrongArgCount }
+
+// -----------------------------------------------------------------------------
+// PR-5: multi-root aggregation
+// -----------------------------------------------------------------------------
+
+/// One diagnostic produced by a single root during the multi-root pass.
+///
+/// The `base_message` is the diagnostic's message with any previous root-suffix
+/// stripped, so two `PerRootDiagnostic`s from different roots can be compared
+/// for equality under the aggregation key.
+#[derive(Debug, Clone)]
+pub struct PerRootDiagnostic {
+    pub uri: Uri,
+    pub range: Range,
+    pub severity: DiagnosticSeverity,
+    pub code: Option<NumberOrString>,
+    pub category: DiagnosticCategory,
+    pub base_message: String,
+    pub producing_root: PathBuf,
+}
+
+/// Equality key for the aggregation step.
+pub type DiagnosticKey = (Uri, Range, DiagnosticCategory, String);
+
+/// True when the supplied diagnostic set contains no cross-file issue.
+///
+/// "Cross-file issue" = any diagnostic whose [`categorize`] falls under a
+/// cross-file-dependent category (unresolved symbol, wrong argument
+/// count/type, extern collision). Local parse errors and definition-shape
+/// errors are not cross-file, so the multi-root loop is unnecessary for them.
+pub fn should_skip_multi_root_pass(by_uri: &DiagnosticsByUri) -> bool {
+    for diags in by_uri.values() {
+        for d in diags {
+            let cat = categorize(d);
+            match cat {
+                DiagnosticCategory::UnresolvedSymbol
+                | DiagnosticCategory::WrongArgCount
+                | DiagnosticCategory::WrongArgType
+                | DiagnosticCategory::ExternCollision => return false,
+                DiagnosticCategory::Other
+                | DiagnosticCategory::DefinitionError
+                | DiagnosticCategory::WrongRangeUri => {}
+            }
+        }
+    }
+    true
+}
+
+/// Display name of a producing root: the file path's last component.
+fn root_name(path: &Path) -> String {
+    path.file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+/// Order the producing roots by the user-confirmed priority:
+///   1. currently-open (in the order supplied)
+///   2. mod-overlay (paths under any registered mod root, alphabetically)
+///   3. alphabetical remainder
+fn order_producing_roots(
+    producing_roots: &[PathBuf],
+    currently_open: &[PathBuf],
+    mod_overlay_paths: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut open_in_producing: Vec<PathBuf> = currently_open
+        .iter()
+        .filter(|p| producing_roots.iter().any(|pr| pr == *p))
+        .cloned()
+        .collect();
+    open_in_producing.sort();
+
+    let mut mod_overlay_in_producing: Vec<PathBuf> = producing_roots
+        .iter()
+        .filter(|p| {
+            mod_overlay_paths.iter().any(|m| is_under(p, m))
+                && !open_in_producing.iter().any(|o| o == *p)
+        })
+        .cloned()
+        .collect();
+    mod_overlay_in_producing.sort();
+    mod_overlay_in_producing.dedup();
+
+    let mut alphabetical: Vec<PathBuf> = producing_roots
+        .iter()
+        .filter(|p| {
+            !open_in_producing.iter().any(|o| o == *p)
+                && !mod_overlay_in_producing.iter().any(|m| m == *p)
+        })
+        .cloned()
+        .collect();
+    alphabetical.sort();
+    alphabetical.dedup();
+
+    open_in_producing
+        .into_iter()
+        .chain(mod_overlay_in_producing)
+        .chain(alphabetical)
+        .collect()
+}
+
+/// True if `path` is under `dir` (the path starts with the dir prefix).
+fn is_under(path: &Path, dir: &Path) -> bool {
+    if path == dir {
+        return false;
+    }
+    let path_str = path.to_string_lossy();
+    let dir_str = dir.to_string_lossy();
+    let dir_with_sep = if dir_str.ends_with('/') {
+        dir_str.into_owned()
+    } else {
+        format!("{}/", dir_str)
+    };
+    path_str.starts_with(&dir_with_sep)
+}
+
+/// Format the trailing root-suffix according to the locked aggregation rules.
+/// To be called from [`aggregate_results`] which supplies context.
+///
+/// Behavior:
+/// - No producing roots: empty.
+/// - Total == 1 AND producing root is the diagnosed file itself (orphan): empty.
+/// - Total == 1 AND producing root differs from the diagnosed file: list it.
+/// - Total > 1, all producing (= total): universal, empty.
+/// - Total > 1, partial (<= 100): list every producing root in priority order.
+/// - Total > 1, truncated: top 3 + "...and N more".
+pub fn format_root_suffix(
+    current_uri: &Uri,
+    producing_roots: &[PathBuf],
+    total_root_count: usize,
+    mod_overlay_paths: &[PathBuf],
+    currently_open: &[PathBuf],
+) -> String {
+    if producing_roots.is_empty() {
+        return String::new();
+    }
+
+    let current_file_name = std::path::Path::new(current_uri.path().as_str())
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    if total_root_count <= 1 {
+        // Single root: orphan (self-root) -> no suffix; reachable root -> list it.
+        let first_name = root_name(&producing_roots[0]);
+        if first_name == current_file_name {
+            return String::new();
+        }
+        return format!("\n  as seen from: {}", first_name);
+    }
+
+    // Universal coverage: every root produces AND total > 1 -> no suffix.
+    if producing_roots.len() == total_root_count && total_root_count <= 100 {
+        return String::new();
+    }
+
+    let ordered = order_producing_roots(producing_roots, currently_open, mod_overlay_paths);
+    let names: Vec<String> = ordered.iter().map(|p| root_name(p)).collect();
+
+    if total_root_count <= 100 || names.len() <= 3 {
+        format!("\n  as seen from: {}", names.join(", "))
+    } else {
+        let shown: Vec<String> = names.iter().take(3).cloned().collect();
+        let rest = names.len() - 3;
+        format!("\n  as seen from: {} ...and {} more", shown.join(", "), rest)
+    }
+}
+
+/// Strip any existing trailing root-suffix from a diagnostic message.
+///
+/// The inverse of [`format_root_suffix`]. Used by [`PerRootDiagnostic`]
+/// extraction to recover the base message before comparison.
+pub fn strip_root_suffix(message: &str) -> &str {
+    const MARKER: &str = "\n  as seen from:";
+    match message.find(MARKER) {
+        Some(idx) => &message[..idx],
+        None => message,
+    }
+}
+
+/// Aggregate equivalent [`PerRootDiagnostic`]s across roots into LSP
+/// [`Diagnostic`]s grouped by URI.
+///
+/// Two inputs are equivalent iff their (uri, range, category, base_message)
+/// match. Aggregation is deterministic: producing-roots are sorted in priority
+/// order (currently-open -> mod-overlay -> alphabetical) before the suffix
+/// is computed.
+///
+/// `total_root_count` is the total number of roots in the multi-root pass
+/// (including the diagnosed file's own self-root). `mod_overlay_paths` and
+/// `currently_open` drive the producing-roots priority ordering.
+pub fn aggregate_results(
+    inputs: Vec<PerRootDiagnostic>,
+    total_root_count: usize,
+    mod_overlay_paths: &[PathBuf],
+    currently_open: &[PathBuf],
+) -> DiagnosticsByUri {
+    let mut groups: HashMap<
+        DiagnosticKey,
+        (DiagnosticSeverity, Option<NumberOrString>, Vec<PathBuf>),
+    > = HashMap::new();
+    for prd in inputs {
+        let key: DiagnosticKey = (
+            prd.uri.clone(),
+            prd.range,
+            prd.category,
+            prd.base_message.clone(),
+        );
+        let entry = groups.entry(key).or_insert_with(|| {
+            (prd.severity, prd.code.clone(), Vec::new())
+        });
+        entry.2.push(prd.producing_root);
+    }
+
+    let mut out: DiagnosticsByUri = HashMap::new();
+    for (key, (severity, code, mut roots)) in groups {
+        roots.sort();
+        roots.dedup();
+        let suffix = format_root_suffix(
+            &key.0,
+            &roots,
+            total_root_count,
+            mod_overlay_paths,
+            currently_open,
+        );
+        let diag = Diagnostic {
+            range: key.1,
+            severity: Some(severity),
+            code,
+            code_description: None,
+            source: Some("xs-language-server".to_string()),
+            message: format!("{}{}", key.3, suffix),
+            related_information: None,
+            tags: None,
+            data: None,
+        };
+        out.entry(key.0).or_default().push(diag);
+    }
+    out
+}
+
+impl PerRootDiagnostic {
+    /// Extract a [`PerRootDiagnostic`] from a published [`Diagnostic`], with
+    /// any prior root-suffix stripped from the message.
+    pub fn from_diagnostic(
+        diag: &Diagnostic,
+        uri: Uri,
+        category: DiagnosticCategory,
+        producing_root: PathBuf,
+    ) -> Self {
+        Self {
+            uri,
+            range: diag.range,
+            severity: diag.severity.unwrap_or(DiagnosticSeverity::ERROR),
+            code: diag.code.clone(),
+            category,
+            base_message: strip_root_suffix(&diag.message).to_string(),
+            producing_root,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

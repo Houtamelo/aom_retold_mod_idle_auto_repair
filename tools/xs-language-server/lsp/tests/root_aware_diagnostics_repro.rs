@@ -19,7 +19,11 @@ fn file_uri(name: &str) -> Uri {
 }
 
 fn root_path(name: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/{name}"))
+    if name.starts_with('/') {
+        PathBuf::from(name)
+    } else {
+        PathBuf::from(format!("/tmp/{name}"))
+    }
 }
 
 fn dummy_range() -> Range {
@@ -191,7 +195,8 @@ fn test_producing_roots_priority_order_currently_open_first() {
         per_root(uri.clone(), "msg", "open.xs", DiagnosticCategory::UnresolvedSymbol),
     ];
 
-    let agg = aggregate_results(inputs, 2, &[], &[open_root.clone()]);
+    // Three total roots, but only two produced this diagnostic -> partial coverage.
+    let agg = aggregate_results(inputs, 3, &[], &[open_root.clone()]);
     let msg = &agg.get(&uri).unwrap()[0].message;
     assert!(
         msg.contains("as seen from: open.xs, alphabetical.xs"),
@@ -208,7 +213,8 @@ fn test_producing_roots_priority_order_mod_overlay_second() {
         per_root(uri.clone(), "msg", "/mod/mod.xs", DiagnosticCategory::UnresolvedSymbol),
     ];
 
-    let agg = aggregate_results(inputs, 2, &[mod_dir], &[]);
+    // Three total roots, but only two produced this diagnostic -> partial coverage.
+    let agg = aggregate_results(inputs, 3, &[mod_dir], &[]);
     let msg = &agg.get(&uri).unwrap()[0].message;
     assert!(
         msg.contains("as seen from: mod.xs, alpha.xs"),

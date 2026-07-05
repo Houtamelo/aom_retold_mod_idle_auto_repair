@@ -8,6 +8,10 @@ pub mod cache;
 pub mod completion;
 pub mod definition_check;
 pub mod diagnostics;
+pub use self::diagnostics::{
+    aggregate_results, format_root_suffix, strip_root_suffix, DiagnosticKey, PerRootDiagnostic,
+    should_skip_multi_root_pass,
+};
 pub mod doxygen;
 pub mod engine_api;
 pub mod parser;

@@ -180,6 +180,8 @@ These are deviations from the original (Alphabetical-only, lazy) defaults, locke
 
 **Branch**: same branch, one new commit on top of PR-4.
 
+**Status**: ✅ Complete (commit `c375e84` [wip tests] + this commit's full impl)
+
 **Files**:
 - MOD: `tools/xs-language-server/lsp/src/diagnostics.rs` — add `DiagnosticCategory`/`categorize`, `PerRootDiagnostic`, `AggregatedDiagnostic`, `DiagnosticKey`, `aggregate_results`, `format_root_suffix`, `strip_root_suffix`.
 - MOD: `tools/xs-language-server/lsp/src/server.rs` — add `reverse_include_graph` and `per_root_merged_views` fields; implement `get_or_build_reverse_graph`, `get_or_build_root_merged_view`; rewrite `publish_diagnostics` with local short-circuit, per-root loop, and aggregation; extend `invalidate_merged_views_for` to also drop affected per-root cache entries.
@@ -245,7 +247,7 @@ These are deviations from the original (Alphabetical-only, lazy) defaults, locke
 - [x] PR-2 GREEN: `cargo test --test per_root_cache_repro`
 - [x] PR-3 GREEN: `cargo test --test merged_view_root_repro`
 - [ ] PR-4 GREEN: `cargo test --test indirect_include_symbol_repro`
-- [ ] PR-5 GREEN: `cargo test --test root_aware_diagnostics_repro`
+- [x] PR-5 GREEN: `cargo test --test root_aware_diagnostics_repro`
 - [ ] PR-6 GREEN: extended `cargo test --test root_aware_diagnostics_repro`
 - [ ] Full workspace baseline green: `cargo test --manifest-path tools/xs-language-server/Cargo.toml`
 - [ ] Linter / formatting clean: `cargo fmt --manifest-path tools/xs-language-server/Cargo.toml --check`

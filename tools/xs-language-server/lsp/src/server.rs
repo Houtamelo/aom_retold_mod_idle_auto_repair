@@ -12,6 +12,7 @@ use crate::{
     completion,
     diagnostics,
     engine_api,
+    include_graph,
     merged_view,
     parser,
     references,
@@ -119,6 +120,9 @@ pub struct XsLanguageServer {
     pub game_path: PathBuf,
     /// Registered workspace folders, each representing one mod.
     pub workspace: Arc<Mutex<workspace::Workspace>>,
+    /// Session-only cache of merged views built from root files, invalidated
+    /// by `did_change_watched_files`.
+    pub per_root_cache: crate::cache::PerRootMergedViewCache,
     /// Most recently touched document, used to scope `workspace/symbol`.
     pub last_active_uri: Arc<Mutex<Option<Uri>>>,
     /// Capabilities advertised by the client on initialize.
@@ -128,6 +132,8 @@ pub struct XsLanguageServer {
 impl XsLanguageServer {
     pub fn new(client: Client, engine: engine_api::SharedEngineApi, game_path: PathBuf) -> Self {
         let workspace = workspace::Workspace::new(game_path.clone());
+        let cache_dir = crate::cache::state_cache_dir();
+        let per_root_cache = crate::cache::PerRootMergedViewCache::new(&cache_dir);
         Self {
             client,
             documents: Arc::new(Mutex::new(DocumentStore::default())),
@@ -136,6 +142,7 @@ impl XsLanguageServer {
             engine,
             game_path,
             workspace: Arc::new(Mutex::new(workspace)),
+            per_root_cache,
             last_active_uri: Arc::new(Mutex::new(None)),
             client_capabilities: Arc::new(Mutex::new(ClientCapabilities::default())),
         }
@@ -332,36 +339,54 @@ impl LanguageServer for XsLanguageServer {
     async fn initialized(&self, _: InitializedParams) {
         info!("initialized: client confirmed init");
 
-        let (dynamic_supported, game_path) = {
+        let dynamic_supported = {
             let caps = self.client_capabilities.lock().await;
-            let supported = caps
-                .workspace
+            caps.workspace
                 .as_ref()
                 .and_then(|w| w.did_change_watched_files.as_ref())
                 .and_then(|d| d.dynamic_registration)
-                .unwrap_or(false);
-            (supported, self.game_path.clone())
+                .unwrap_or(false)
         };
 
         if dynamic_supported {
-            let pattern = format!("{}/game/**/*.xs", game_path.to_string_lossy().replace('\\', "/"));
+            // Register one `**/*.xs` watcher per workspace root (the game
+            // install folder plus every registered mod). Using the same
+            // registration id makes re-registration idempotent.
+            let patterns = {
+                let ws = self.workspace.lock().await;
+                let mut patterns = Vec::new();
+                patterns.push(format!(
+                    "{}/game/**/*.xs",
+                    self.game_path.to_string_lossy().replace('\\', "/")
+                ));
+                for m in ws.mods() {
+                    patterns.push(format!(
+                        "{}/game/**/*.xs",
+                        m.mod_path.to_string_lossy().replace('\\', "/")
+                    ));
+                }
+                patterns
+            };
+
             let client = self.client.clone();
             tokio::spawn(async move {
-                let options = DidChangeWatchedFilesRegistrationOptions {
-                    watchers: vec![FileSystemWatcher {
+                let watchers = patterns
+                    .into_iter()
+                    .map(|pattern| FileSystemWatcher {
                         glob_pattern: GlobPattern::String(pattern),
                         kind: None,
-                    }],
-                };
+                    })
+                    .collect();
+                let options = DidChangeWatchedFilesRegistrationOptions { watchers };
                 let registration = Registration {
-                    id: "xs-game-folder-watcher".to_string(),
+                    id: "xs-watched-files".to_string(),
                     method: "workspace/didChangeWatchedFiles".to_string(),
                     register_options: Some(serde_json::to_value(options).unwrap_or(serde_json::Value::Null)),
                 };
                 if let Err(e) = client.register_capability(vec![registration]).await {
                     warn!("failed to register didChangeWatchedFiles watcher: {}", e);
                 } else {
-                    info!("registered didChangeWatchedFiles watcher for game folder");
+                    info!("registered didChangeWatchedFiles watcher for workspace folders");
                 }
             });
         } else {
@@ -500,6 +525,11 @@ impl LanguageServer for XsLanguageServer {
                 }
             }
         }
+
+        // Drop cached root-chain views that contain any changed file. PR-6 will
+        // add a dependent-URI lookup to re-publish diagnostics for files that
+        // include the changed file.
+        self.per_root_cache.invalidate_for_paths(&changed_paths);
 
         // Drop any cached merged view whose include closure contains a
         // changed file, then re-diagnose those open files.
@@ -996,11 +1026,19 @@ impl XsLanguageServer {
     /// Parse `text` as XS and publish parse, type-check, and semantic
     /// diagnostics per URI. An empty entry for a URI (clean file) is also
     /// published so clients clear stale diagnostics for that file.
+    ///
+    /// PR-5 orchestration:
+    ///   1. Run a local pass with the file treated as its own root.
+    ///   2. Compute the reverse-include roots of the current file.
+    ///   3. If there are no roots, or if the local pass has no cross-file
+    ///      symbol issues, publish the local pass directly.
+    ///   4. Otherwise, run one diagnostic pass per root, rebase each root view
+    ///      to the current file, and aggregate equivalent diagnostics.
     async fn publish_diagnostics(&self, uri: &Uri, text: &str, version: i32) {
         let current_file = uri.to_file_path();
 
         // Build the semantic project and keep the workspace project around so
-        // we can build a root-chain view for indirect-include resolution.
+        // we can build root-chain views for indirect-include resolution.
         let (project, ws, workspace_project) = if let Some(_cf) = current_file.as_ref() {
             let ws = self.workspace.lock().await;
             match ws.lookup_mod(uri).cloned() {
@@ -1018,53 +1056,127 @@ impl XsLanguageServer {
 
         let merged = self.get_or_build_merged_view(uri, text).await;
 
-        // Resolve the root chain that includes this file. If there are no
-        // includers, the file is its own root and root_view stays None (run_pass
-        // falls back to file_view).
-        let root_view: Option<merged_view::MergedView> = match (current_file.as_deref(), merged.as_ref(), workspace_project.as_ref()) {
-            (Some(cf), Some(mv), Some(wp)) => {
-                let graph = crate::include_graph::ReverseIncludeGraph::build(mv.graph());
-                graph
-                    .roots_that_include(cf)
-                    .into_iter()
-                    .next()
-                    .and_then(|root| {
-                        let cache_dir = crate::cache::state_cache_dir();
-                        let cache = crate::cache::PerRootMergedViewCache::new(&cache_dir);
-                        merged_view::MergedView::build_from_root(&root, &ws, wp, &cache).ok().map(|arc| (*arc).clone())
-                    })
-            }
-            _ => None,
-        };
-
         // Hold the symbol-tables lock briefly to look up the per-file table;
         // releasing before the heavier checks keeps the lock window minimal.
         let table = {
             let tables = self.symbol_tables.lock().await;
             tables.get(uri).cloned()
         };
-        let diagnostics_by_uri = match (table, merged.as_ref()) {
-            (Some(table), Some(file_view)) => {
-                let ctx = diagnostics::DiagnosticContext {
-                    source: text,
-                    engine: &self.engine,
-                    table: &table,
-                    project: project.as_ref(),
-                    file: current_file.as_deref(),
-                    file_view,
-                    root_view: root_view.as_ref(),
-                };
-                diagnostics::collect_all(&ctx)
+
+        let Some(file_view) = merged.as_ref() else {
+            // No merged view available: fall back to parser diagnostics only.
+            let mut map = HashMap::new();
+            map.insert(uri.clone(), diagnostics::collect_diagnostics(text));
+            for (diag_uri, diags) in map {
+                self.client.publish_diagnostics(diag_uri, diags, Some(version)).await;
             }
-            _ => {
-                let mut map = std::collections::HashMap::new();
-                map.insert(uri.clone(), diagnostics::collect_diagnostics(text));
-                map
-            }
+            return;
         };
-        let total: usize = diagnostics_by_uri.values().map(|v| v.len()).sum();
-        debug!("publish_diagnostics: {:?} ({} issue(s) across {} URI(s))", uri, total, diagnostics_by_uri.len());
-        for (diag_uri, diags) in diagnostics_by_uri {
+        let Some(table) = table else {
+            let mut map = HashMap::new();
+            map.insert(uri.clone(), diagnostics::collect_diagnostics(text));
+            for (diag_uri, diags) in map {
+                self.client.publish_diagnostics(diag_uri, diags, Some(version)).await;
+            }
+            return;
+        };
+
+        // Local pass: the file is analysed as its own root. This is the
+        // fallback path for orphan files and the short-circuit path when no
+        // cross-file issues are present.
+        let local_ctx = diagnostics::DiagnosticContext {
+            source: text,
+            engine: &self.engine,
+            table: &table,
+            project: project.as_ref(),
+            file: current_file.as_deref(),
+            file_view,
+            root_view: Some(file_view),
+        };
+        let local_diags = diagnostics::collect_all(&local_ctx);
+
+        // Reverse-include graph built from the file's forward closure. In PR-5
+        // this is intentionally local to the file; the project-wide graph is
+        // scheduled for PR-6.
+        let roots: Vec<PathBuf> = current_file
+            .as_deref()
+            .map(|cf| {
+                let graph = include_graph::ReverseIncludeGraph::build(file_view.graph());
+                graph.roots_that_include(cf)
+            })
+            .unwrap_or_default();
+
+        // Orphan files, or files whose local diagnostics are already complete,
+        // publish the local pass directly and skip the expensive per-root loop.
+        if roots.is_empty() || diagnostics::should_skip_multi_root_pass(&local_diags) {
+            let total: usize = local_diags.values().map(|v| v.len()).sum();
+            debug!("publish_diagnostics: {:?} ({} issue(s) local pass)", uri, total);
+            for (diag_uri, diags) in local_diags {
+                self.client.publish_diagnostics(diag_uri, diags, Some(version)).await;
+            }
+            return;
+        }
+
+        // Multi-root pass: diagnose the file through each root's include chain.
+        let fallback_project = workspace::VirtualProject::default();
+        let wp = workspace_project.as_ref().unwrap_or(&fallback_project);
+        let mut per_root: Vec<diagnostics::PerRootDiagnostic> = Vec::new();
+        for root in &roots {
+            let root_view = match merged_view::MergedView::build_from_root(root, &ws, wp, &self.per_root_cache) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("failed to build root view for {}: {}; skipping root", root.display(), e);
+                    continue;
+                }
+            };
+            let Some(cf) = current_file.as_deref() else { continue };
+            let rebased = root_view.rebase_to_file(cf, text.to_string(), table.clone());
+            let ctx = diagnostics::DiagnosticContext {
+                source: text,
+                engine: &self.engine,
+                table: &table,
+                project: project.as_ref(),
+                file: Some(cf),
+                file_view,
+                root_view: Some(&rebased),
+            };
+            let root_diags = diagnostics::run_pass(&ctx);
+            for (diag_uri, diags) in root_diags {
+                for d in &diags {
+                    per_root.push(diagnostics::PerRootDiagnostic::from_diagnostic(
+                        d,
+                        diag_uri.clone(),
+                        diagnostics::categorize(d),
+                        root.clone(),
+                    ));
+                }
+            }
+        }
+
+        // Priority-order inputs for the aggregation suffix formatter.
+        let currently_open: Vec<PathBuf> = {
+            let docs = self.documents.lock().await;
+            docs.uris()
+                .into_iter()
+                .filter(|u| u != uri)
+                .filter_map(|u| u.to_file_path().map(|p| p.into_owned()))
+                .collect()
+        };
+        let mod_overlay_paths: Vec<PathBuf> = {
+            let ws_lock = self.workspace.lock().await;
+            ws_lock.mods().iter().map(|m| m.mod_path.clone()).collect()
+        };
+
+        let aggregated =
+            diagnostics::aggregate_results(per_root, roots.len(), &mod_overlay_paths, &currently_open);
+        let total: usize = aggregated.values().map(|v| v.len()).sum();
+        debug!(
+            "publish_diagnostics: {:?} ({} issue(s) across {} root(s))",
+            uri,
+            total,
+            roots.len()
+        );
+        for (diag_uri, diags) in aggregated {
             self.client.publish_diagnostics(diag_uri, diags, Some(version)).await;
         }
     }
