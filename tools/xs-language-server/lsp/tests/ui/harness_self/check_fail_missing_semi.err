@@ -1,0 +1,6 @@
+error: missing ';'
+  ┌─ harness_self/check_fail_missing_semi.xs:3:11
+  │
+3 │    return 5 //~ ERROR missing ';'
+  │           ^
+

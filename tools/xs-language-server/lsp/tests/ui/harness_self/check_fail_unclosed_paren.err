@@ -1,0 +1,6 @@
+error: unclosed parenthesis '('
+  ┌─ harness_self/check_fail_unclosed_paren.xs:3:12
+  │
+3 │    int x = (1 + 2; //~ ERROR unclosed parenthesis '('
+  │            ^
+
