@@ -24,11 +24,10 @@ Five deployable mod packages live under `mod/`:
 
 ## Tooling under `tools/`
 
-- `tools/xs-language-server/` — Rust LSP workspace (now `tower-lsp` + **lelwel typed AST**; tree-sitter fully dropped on 2026-07-03). Three members:
+- `tools/xs-language-server/` — Rust LSP workspace (now `tower-lsp` + **lelwel typed AST**). The tree-sitter grammar crate was dropped on 2026-07-03 (PR-C) and the orphan crate deleted on 2026-07-05. Two members:
   - `tools/xs-language-server/xs-parser/` — typed AST crate (`xs_parser`). Grammar is `src/xs.llw` (lelwel). Output: 18-variant `Expr`, `Statement`, `Declaration`, `TopLevelItem` hierarchies plus `TranslationUnit::from_cst`. 176 unit tests.
   - `tools/xs-language-server/lsp/` — LSP server crate. Handlers walk the typed AST via `xs_parser` (path dep). 157 unit tests passing + 35 environmental failures.
-  - `tools/xs-language-server/tree-sitter-xs/` — **legacy** tree-sitter grammar. Orphaned after Phase 4 PR-C; can be deleted in a separate cleanup commit. New work targets `xs-parser/`.
-  
+
   The LSP server diagnoses mod scripts using a 3-source workspace: engine API extracted from `doxygen_retail.7z`, the vanilla AoM:R `game/` folder, and per-mod `game/` overlays. See `openspec/changes/archive/2026-07-02-rich-typed-ast-layer/` for the typed AST layer change and `openspec/changes/archive/2026-07-03-2026-07-04-phase4-lsp-typed-ast-wiring/` for the LSP-wiring change.
 - `tools/intellij-xs-plugin/` — IntelliJ Platform plugin (Kotlin/Gradle) for XS. Now a thin LSP client that provides file-type registration, TextMate syntax highlighting, brace matching, and editor helpers. It also provides a settings page for the LSP server connection and can auto-detect mod roots.
 
@@ -127,7 +126,7 @@ The plugin's `build.gradle.kts:12` picks up the version via `providers.gradlePro
    - `tools/xs-language-server/lsp/src/` — LSP handlers (symbols, semantic_tokens, references, definition_check, typecheck, diagnostics, server). Public crate name `xs_language_server`.
    - `tools/xs-language-server/xs-parser/src/` — typed AST + grammar. Public crate name `xs_parser`.
 2. `cargo build --manifest-path tools/xs-language-server/Cargo.toml` to build
-3. `cargo test --manifest-path tools/xs-language-server/Cargo.toml` for the workspace suite. As of 2026-07-03 (post-Phase 4, after follow-up commits 9c05a8e, 4bc2248, and 09f69aa): **252 passed / 1 failed** in the LSP crate + **176 passed** in the xs-parser crate. The single failure (`test_mod_overlay_resolves_to_mod_file`) is a pre-existing flaky test that passes in isolation but flakes under parallel test execution (it copies `doxygen_retail.7z` into a `TempDir` and races with sibling tests). Not a Phase 4 regression.
+3. `cargo test --manifest-path tools/xs-language-server/Cargo.toml` for the workspace suite. As of 2026-07-05 (post-archive of `lsp-include-graph-aware-diagnostics`, after PR-1..PR-6 on branch `xs-lsp-roundtrip-followup`): **369 passed / 1 failed** workspace-wide. The single failure (`test_mod_overlay_resolves_to_mod_file`) is a pre-existing flaky test that passes in isolation but flakes under parallel test execution (it copies `doxygen_retail.7z` into a `TempDir` and races with sibling tests). Not a regression.
 4. `cargo run --manifest-path tools/xs-language-server/Cargo.toml --bin lsp_roundtrip_test` for the end-to-end LSP message sequence (`initialize` / `initialized` / `didOpen` / `shutdown` / `exit`). Requires `AOMR_GAME_PATH` to be set to the install root.
 5. **Game folder integration test** (optional, requires the game installed):
    ```bash

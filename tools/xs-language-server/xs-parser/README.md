@@ -1,16 +1,15 @@
-# lelwel-xs — Proof-of-Concept Lelwel Grammar for XS
+# xs-parser — Lelwel Grammar for XS
 
-This directory contains a proof-of-concept [lelwel](https://github.com/0x2a-42/lelwel) grammar
-for the XS scripting language used by Age of Mythology: Retold's modding engine.
+This directory holds the [lelwel](https://github.com/0x2a-42/lelwel) grammar for the XS
+scripting language used by Age of Mythology: Retold's modding engine.
 
-The grammar lives at [`src/xs.llw`](src/xs.llw). It is a translation of the existing
-[tree-sitter XS grammar](../tree-sitter-xs/src/grammar.json) into lelwel's
-LL(1) + extensions format, with the goal of answering the question:
+The grammar lives at [`src/xs.llw`](src/xs.llw). It began life as a proof-of-concept
+translation of the now-removed tree-sitter XS grammar (see `git log --all -- 'tree-sitter-xs/**'`
+for the historical `src/grammar.json`); the migration completed on 2026-07-03 and the
+tree-sitter grammar crate was deleted on 2026-07-05.
 
-> *What would it look like to migrate the LSP from tree-sitter to lelwel?*
-
-The answer is: **feasible for the language surface, painful for the disambiguations.**
-See the "Known limitations" section below for the details.
+The comparison tables below retain "tree-sitter XS" as a column to make the divergence
+explicit; they refer to the grammar that previously lived at `tree-sitter-xs/`.
 
 ## How to try it
 
