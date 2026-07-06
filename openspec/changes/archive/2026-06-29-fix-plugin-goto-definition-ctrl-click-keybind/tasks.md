@@ -62,21 +62,21 @@ Chain strategy: pending
 
 ## Phase 5: VERIFY
 
-- [ ] 5.1 Final `:test` (10m/M/4.3/all green)
-- [ ] 5.2 Final `:buildPlugin` (5m/L/5.1/`.zip` regenerated)
-- [ ] 5.3 Note warnings (5m/L/5.2/record in `verify-report.md`)
-- [ ] 5.4 Write `verify-report.md` (10m/L/5.3/created in change dir)
+- [x] 5.1 Final `:test` (10m/M/4.3/all green)
+- [x] 5.2 Final `:buildPlugin` (5m/L/5.1/`.zip` regenerated)
+- [x] 5.3 Note warnings (5m/L/5.2/record in `verify-report.md`)
+- [x] 5.4 Write `verify-report.md` (10m/L/5.3/created in change dir)
 
 ## Phase 6: DOCUMENT
 
-- [ ] 6.1 Mark Issue 1 resolved (5m/L/5.4/`docs/issues/2026-06-29-runtime-issues.md` updated)
-- [ ] 6.2 Update `AGENTS.md` if convention emerges (5m/L/6.1/N/A or note)
+- [x] 6.1 Mark Issue 1 resolved (5m/L/5.4/`docs/issues/2026-06-29-runtime-issues.md` updated)
+- [x] 6.2 Update `AGENTS.md` if convention emerges (5m/L/6.1/added plugin test fixture gotcha)
 
 ## Phase 7: COMMIT
 
-- [ ] 7.1 Bump `pluginVersion` (2m/L/5.4/version `0.2.3`)
-- [ ] 7.2 Stage intended files (5m/M/7.1/source, test, `.zip`, docs, SDD artifacts staged)
-- [ ] 7.3 Prepare commit message (2m/L/7.2/`fix(xs-plugin): wire GotoDeclarationHandler ...`)
+- [x] 7.1 Bump `pluginVersion` (2m/L/5.4/version `0.2.3`)
+- [x] 7.2 Stage intended files (5m/M/7.1/source, test, docs, SDD artifacts staged — `.zip` is gitignored)
+- [x] 7.3 Prepare commit message (2m/L/7.2/`fix(xs-plugin): wire GotoDeclarationHandler for Ctrl+Click/Ctrl+B goto-definition`) — files staged, commit left for orchestrator
 
 ## Review Workload Forecast
 
