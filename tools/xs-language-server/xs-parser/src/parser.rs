@@ -2,7 +2,7 @@ use super::lexer::{Token, tokenize};
 use crate::ast::type_table::TypeTable;
 
 // TODO: change if codespan_reporting is not used
-use codespan_reporting::diagnostic::{Label, Severity};
+use codespan_reporting::diagnostic::{Label, LabelStyle, Severity};
 pub type Diagnostic = codespan_reporting::diagnostic::Diagnostic<()>;
 
 //==============================================================================
@@ -200,10 +200,22 @@ pub fn compact_recovery_messages(source: &str, diagnostics: &mut Vec<Diagnostic>
         )
     }
 
-    let has_generic = diagnostics.iter().any(|d| {
+    fn prev_significant(tokens: &[Token], idx: usize) -> Option<usize> {
+        tokens[..idx]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, token)| !is_skipped(**token))
+            .map(|(idx, _)| idx)
+    }
+
+    let has_generic_syntax = diagnostics.iter().any(|d| {
         d.severity == Severity::Error && d.message.starts_with("invalid syntax")
     });
-    if !has_generic {
+    let has_invalid_token = diagnostics.iter().any(|d| {
+        d.severity == Severity::Error && d.message == "invalid token"
+    });
+    if !has_generic_syntax && !has_invalid_token {
         return;
     }
 
@@ -217,12 +229,7 @@ pub fn compact_recovery_messages(source: &str, diagnostics: &mut Vec<Diagnostic>
         if *token != Token::RBrace {
             continue;
         }
-        if let Some((prev_idx, _)) = tokens[..idx]
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, token)| !is_skipped(**token))
-        {
+        if let Some(prev_idx) = prev_significant(&tokens, idx) {
             if tokens[prev_idx] != Token::Semi {
                 missing_semi_span = Some(spans[prev_idx].clone());
                 break;
@@ -240,6 +247,114 @@ pub fn compact_recovery_messages(source: &str, diagnostics: &mut Vec<Diagnostic>
                 .with_label(Label::primary((), prev_span)),
         );
         return;
+    }
+
+    if has_generic_syntax {
+        // Missing closing brace `}`: a `{` was opened but never closed.  Label
+        // the diagnostic on the function header (the `)` before the unclosed
+        // `{`) when possible.
+        {
+            let mut balance = 0i32;
+            let mut unmatched_brace: Option<usize> = None;
+            for (idx, token) in tokens.iter().enumerate().rev() {
+                if *token == Token::RBrace {
+                    balance += 1;
+                } else if *token == Token::LBrace {
+                    if balance == 0 {
+                        unmatched_brace = Some(idx);
+                        break;
+                    }
+                    balance -= 1;
+                }
+            }
+            if let Some(lbrace_idx) = unmatched_brace {
+                let label_span = if let Some(prev_idx) = prev_significant(&tokens, lbrace_idx) {
+                    if tokens[prev_idx] == Token::RPar {
+                        spans[prev_idx].clone()
+                    } else {
+                        spans[lbrace_idx].clone()
+                    }
+                } else {
+                    spans[lbrace_idx].clone()
+                };
+                diagnostics.retain(|d| {
+                    !(d.severity == Severity::Error && d.message.starts_with("invalid syntax"))
+                });
+                diagnostics.push(
+                    Diagnostic::error()
+                        .with_message("missing closing brace '}'")
+                        .with_label(Label::primary((), label_span)),
+                );
+                return;
+            }
+        }
+
+        // Missing opening brace `{`: a function header (`...()`) is directly
+        // followed by a statement or expression instead of `{` or `;`.
+        for (idx, token) in tokens.iter().enumerate() {
+            if *token != Token::RPar {
+                continue;
+            }
+            if let Some(next_idx) = tokens[idx + 1..]
+                .iter()
+                .enumerate()
+                .find(|(_, token)| !is_skipped(**token))
+                .map(|(i, _)| idx + 1 + i)
+            {
+                let next = tokens[next_idx];
+                if next != Token::LBrace && next != Token::Semi {
+                    diagnostics.retain(|d| {
+                        !(d.severity == Severity::Error && d.message.starts_with("invalid syntax"))
+                    });
+                    diagnostics.push(
+                        Diagnostic::error()
+                            .with_message("missing opening brace '{'")
+                            .with_label(Label::primary((), spans[idx].clone())),
+                    );
+                    return;
+                }
+            }
+        }
+
+        // Unclosed parenthesis `(`: a `(` was opened but a statement
+        // terminator or closing brace is encountered before `)`.
+        let mut paren_stack: Vec<usize> = Vec::new();
+        for (idx, token) in tokens.iter().enumerate() {
+            if *token == Token::LPar {
+                paren_stack.push(idx);
+            } else if *token == Token::RPar {
+                paren_stack.pop();
+            } else if (*token == Token::Semi || *token == Token::RBrace) && !paren_stack.is_empty() {
+                let lpar_idx = paren_stack[0];
+                diagnostics.retain(|d| {
+                    !(d.severity == Severity::Error && d.message.starts_with("invalid syntax"))
+                });
+                diagnostics.push(
+                    Diagnostic::error()
+                        .with_message("unclosed parenthesis '('")
+                        .with_label(Label::primary((), spans[lpar_idx].clone())),
+                );
+                return;
+            }
+        }
+    }
+
+    // Unclosed string literal at EOF: the lexer emitted an invalid token
+    // whose span starts with a double quote.
+    for diag in diagnostics.iter_mut() {
+        if diag.severity != Severity::Error || diag.message != "invalid token" {
+            continue;
+        }
+        let Some(primary) = diag.labels.iter().find(|l| l.style == LabelStyle::Primary) else {
+            continue;
+        };
+        if source[primary.range.start..].starts_with('"') {
+            diag.message = String::from("unclosed string literal");
+            diagnostics.retain(|d| {
+                !(d.severity == Severity::Error && d.message.starts_with("invalid syntax"))
+            });
+            return;
+        }
     }
 }
 

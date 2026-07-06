@@ -27,20 +27,93 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_semicolon_message() {
-        let source = "void f()\n{\n   return 5\n}";
+    fn test_missing_semicolon_message_expression_statement() {
+        let source = "void g() { xsSetPointerPrice(1) }";
         let diags = parse_with_recovery(source);
 
-        let errors: Vec<_> = diags
-            .iter()
-            .filter(|d| d.severity == Severity::Error)
-            .collect();
+        let errors: Vec<_> = diags.iter().filter(|d| d.severity == Severity::Error).collect();
         let matching = errors.iter().find(|d| {
-            d.message == "missing ';'" && primary_start_line(source, d) == 3
+            d.message == "missing ';'" && primary_start_line(source, d) == 1
         });
         assert!(
             matching.is_some(),
-            "expected an error 'missing \";\"' on line 3, got {:?}",
+            "expected an error 'missing \";\"' on line 1 for expression statement, got {:?}",
+            errors
+                .iter()
+                .map(|d| (&d.message, primary_start_line(source, d)))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_closing_brace_message() {
+        let source = "void f()\n{\n   return;\n";
+        let diags = parse_with_recovery(source);
+
+        let errors: Vec<_> = diags.iter().filter(|d| d.severity == Severity::Error).collect();
+        let matching = errors.iter().find(|d| {
+            d.message == "missing closing brace '}'" && primary_start_line(source, d) == 1
+        });
+        assert!(
+            matching.is_some(),
+            "expected a 'missing closing brace' error on line 1, got {:?}",
+            errors
+                .iter()
+                .map(|d| (&d.message, primary_start_line(source, d)))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_opening_brace_message() {
+        let source = "void f()\n   return 5;\n";
+        let diags = parse_with_recovery(source);
+
+        let errors: Vec<_> = diags.iter().filter(|d| d.severity == Severity::Error).collect();
+        let matching = errors.iter().find(|d| {
+            d.message == "missing opening brace '{'" && primary_start_line(source, d) == 1
+        });
+        assert!(
+            matching.is_some(),
+            "expected a 'missing opening brace' error on line 1, got {:?}",
+            errors
+                .iter()
+                .map(|d| (&d.message, primary_start_line(source, d)))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_unclosed_string_message() {
+        let source = "string s = \"hello\n";
+        let diags = parse_with_recovery(source);
+
+        let errors: Vec<_> = diags.iter().filter(|d| d.severity == Severity::Error).collect();
+        let matching = errors.iter().find(|d| {
+            d.message == "unclosed string literal" && primary_start_line(source, d) == 1
+        });
+        assert!(
+            matching.is_some(),
+            "expected an 'unclosed string literal' error on line 1, got {:?}",
+            errors
+                .iter()
+                .map(|d| (&d.message, primary_start_line(source, d)))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_unclosed_paren_message() {
+        let source = "void f() {\n   int x = (1 + 2;\n}\n";
+        let diags = parse_with_recovery(source);
+
+        let errors: Vec<_> = diags.iter().filter(|d| d.severity == Severity::Error).collect();
+        let matching = errors.iter().find(|d| {
+            d.message == "unclosed parenthesis '('" && primary_start_line(source, d) == 2
+        });
+        assert!(
+            matching.is_some(),
+            "expected an 'unclosed parenthesis' error on line 2, got {:?}",
             errors
                 .iter()
                 .map(|d| (&d.message, primary_start_line(source, d)))
