@@ -1,0 +1,6 @@
+error: missing ';'
+  ┌─ syntax/statement_missing_semi.xs:4:11
+  │
+4 │    return 5 //~ ERROR missing ';'
+  │           ^
+
