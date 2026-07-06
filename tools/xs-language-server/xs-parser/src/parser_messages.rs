@@ -103,6 +103,26 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_semicolon_single_error() {
+        let source = "int buildingGetNumberAliveAndPlanned(int puid = -1)\n{\n   return 5 //~ ERROR missing `;`\n}\n";
+        let diags = parse_with_recovery(source);
+
+        let errors: Vec<_> = diags.iter().filter(|d| d.severity == Severity::Error).collect();
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error diagnostic, got {:?}",
+            errors
+                .iter()
+                .map(|d| (&d.message, primary_start_line(source, d)))
+                .collect::<Vec<_>>()
+        );
+        let diag = errors[0];
+        assert_eq!(diag.message, "missing ';'");
+        assert_eq!(primary_start_line(source, diag), 3);
+    }
+
+    #[test]
     fn test_unclosed_paren_message() {
         let source = "void f() {\n   int x = (1 + 2;\n}\n";
         let diags = parse_with_recovery(source);
