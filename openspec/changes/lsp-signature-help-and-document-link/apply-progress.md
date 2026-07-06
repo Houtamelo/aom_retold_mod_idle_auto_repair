@@ -123,3 +123,60 @@ openspec/changes/lsp-signature-help-and-document-link/
 
 - **PR slicing**: `tasks.md` reserved capability advertisement for PR-3. In practice, the apply agent advertised `documentLinkProvider` alongside the Phase 2 commit (the `signatureHelpProvider` was advertised with PR-1). This is a minor deviation — the net end state matches the design — but the slice boundaries are not as clean as the plan called for. Logged for awareness.
 - **Tasks not completed via delegation**: as noted at top, the first apply delegation completed Phases 1 + 2 source work but did not write `apply-progress.md`, did not save to engram, and did not produce return-envelope output. The orchestrator is completing Phases 2.5 (commit), 3, 4, 5 inline under strict-TDD.
+
+## Fix Cycle (post-verify)
+
+**Triggered by**: `verify-report.md` Gate 4 (roundtrip harness race) and Gate 2 (3 missing test scenarios).
+
+**Status**: COMPLETE.
+
+### Issue 1 — Roundtrip harness race
+
+- Root cause: `run_signature_help_probe` and `run_document_link_probe` did not wait for the `initialize` response before sending `didOpen`/feature request.
+- Fix: option (b) — read the `initialize` response before sending the remaining messages, then mirror the existing inter-message `50 ms` sleep pattern.
+  ```rust
+  let init_id: i64 = 1301; // or 1311 for documentLink
+  stdin.write_all(frame(&init).as_bytes()).unwrap();
+  stdin.flush().unwrap();
+  let _init_resp = read_response_with_id(&mut stdout, init_id);
+  for msg in &[initialized, did_open, feature_req] {
+      stdin.write_all(frame(msg).as_bytes()).unwrap();
+      stdin.flush().unwrap();
+      std::thread::sleep(std::time::Duration::from_millis(50));
+  }
+  ```
+- Live verification: ran `AOMR_GAME_PATH=... /home/houtamelo/Documents/projects/aom_retold_mod/tools/xs-language-server/target/debug/lsp_roundtrip_test 2>&1 | tail -60`. Both probes now print PASS:
+  ```text
+  PASS (signature_help_probe): signatures=1 label="void aiEcho(string text = "Warning: Provide message.")" activeParameter=0 | label_ok=true active_ok=true sigs_ok=true
+  PASS (document_link_probe): links=1 first_target="file:///tmp/.../game/ai/util.xs" target_matches_util=true
+  ```
+
+### Issue 2 — Three missing scenarios
+
+All added under strict TDD (RED → GREEN → TRIANGULATE → REFACTOR). Production code already implemented the behavior; the cycle added coverage.
+
+- New test: `engine_syscall_signature_exposes_default_value` (`tests/signature_help_repro.rs`) — asserts `aiSetHandler` ParameterInformation labels contain `=` and the signature label contains `handlerName = ""` and `eventType = -1`.
+- New test: `active_parameter_clamped_to_last_index` — asserts cursor past the last comma on a two-parameter syscall clamps `activeParameter` to `1`.
+- New test: `three_resolvable_includes_yield_three_links` (`tests/document_link_repro.rs`) — three separate include files → exactly three DocumentLinks.
+- Triangulation: added `engine_syscall_signature_exposes_bool_default` (different syscall/type), `active_parameter_clamped_for_single_param_function` (one-param function with extra commas), and `four_resolvable_includes_yield_four_links` (more includes).
+- Refactor: extracted no new helpers; existing `parameter_label`/`parameter_signature` and `document_links` already satisfy the contracts. Minor import of `ParameterLabel` in the test file to assert labels directly.
+
+### TDD Cycle Evidence
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| SIG-01 defaults | `tests/signature_help_repro.rs` | Integration | ✅ 11/11 | ✅ Written | ✅ Passed | ✅ bool default | ➖ None needed |
+| SIG-05 clamp | `tests/signature_help_repro.rs` | Integration | ✅ 11/11 | ✅ Written | ✅ Passed | ✅ single-param | ➖ None needed |
+| DLK-04 three links | `tests/document_link_repro.rs` | Integration | ✅ 7/7 | ✅ Written | ✅ Passed | ✅ four links | ➖ None needed |
+| Gate 4 race | `lsp/src/bin/lsp_roundtrip_test.rs` | E2E | ✅ full suite | ✅ Repro'd fail | ✅ PASS lines | ➖ N/A (deterministic fix) | ➖ None needed |
+
+### Final state
+
+- Workspace test count: **387 passed / 0 failed / 0 ignored** (was 381; +6 new tests, 0 regressions).
+- Live roundtrip binary run: PASS (`signature_help_probe` and `document_link_probe` both PASS).
+- All Gates now PASS.
+
+### Commits added by this fix cycle
+
+- `3e24758` test(xs-lsp): add coverage for signatureHelp defaults + active-param cap + 3-include documentLink; fix roundtrip harness race
+- `<this artifact commit>` chore(openspec): update apply-progress for fix-cycle
