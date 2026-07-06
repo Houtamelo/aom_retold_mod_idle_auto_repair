@@ -1,0 +1,43 @@
+<tactics>
+    <action>
+        <name stringid="STR_ACTION_THROW">Throw</name>
+        <type>Throw</type>
+        <rate type="MythUnit">0.0</rate>
+        <rate type="LogicalTypeVillagerNotHero">1.0</rate>
+        <rate type="HumanSoldier">1.0</rate>
+        <rate type="TradeUnit">1.0</rate>
+        <minrate type="Building">1.0</minrate>
+        <attackaction>1</attackaction>
+        <handlogic>1</handlogic>
+        <forceareaattacktarget>1</forceareaattacktarget>
+        <impacteffect>effects\impacts\crush</impacteffect>
+        <chargeaction>1</chargeaction>
+    </action>
+    <action>
+        <name stringid="STR_ACTION_HAND">HandAttack</name>
+        <type>Attack</type>
+        <rate type="All">1.0</rate>
+        <attackaction>1</attackaction>
+        <handlogic>1</handlogic>
+        <forceareaattacktarget>1</forceareaattacktarget>
+        <anim>HandAttack</anim>
+        <onhiteffect type="Snare" duration="2" rate="0.85"/>
+        <impacteffect>effects\impacts\crush</impacteffect>
+    </action>
+    <tactic>
+Default
+        <action priority="100">Throw</action>
+        <action priority="90">HandAttack</action>
+        <attacktype>LogicalTypeHandUnitsAttack</attacktype>
+        <autoattacktype>LogicalTypeHandUnitsAutoAttack</autoattacktype>
+        <attackresponsetype>LogicalTypeHandUnitsAttack</attackresponsetype>
+        <attackmovetype>AbstractWall</attackmovetype>
+        <!-- NEW: bonus toward AbstractVillager (the only villager abstract tag
+             the engine recognizes; "LogicalTypeVillagersAttack" does NOT exist).
+             Try a range of values: 50 (vanilla guess), 200 (high), -200 (penalty).
+             If AttackPriorityType is honored, large positive values should outweigh
+             the MythUnitSiege siege bonus and make Cyclops target villagers. -->
+        <AttackPriorityType bonusFactor="200">AbstractVillager</AttackPriorityType>
+        <AttackPriorityType bonusFactor="-200">AbstractTownCenter</AttackPriorityType>
+    </tactic>
+</tactics>

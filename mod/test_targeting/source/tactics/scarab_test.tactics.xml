@@ -1,0 +1,34 @@
+<tactics>
+    <action>
+        <name stringid="STR_ACTION_HAND">HandAttack</name>
+        <type>Attack</type>
+        <rate type="All">1.0</rate>
+        <attackaction>1</attackaction>
+        <handlogic>1</handlogic>
+        <forceareaattacktarget>1</forceareaattacktarget>
+        <anim>HandAttack</anim>
+        <onhiteffect type="Snare" duration="2" rate="0.85"/>
+        <impacteffect>effects\impacts\hack</impacteffect>
+    </action>
+    <action>
+        <name>SelfDestructAttack</name>
+        <type>Attack</type>
+        <anim>HandAttack</anim>
+        <rate type="All">1.0</rate>
+        <attackaction>1</attackaction>
+        <areasortmode>Radial</areasortmode>
+        <impacteffect>effects\impacts\pierce</impacteffect>
+    </action>
+    <tactic>
+Default
+        <action priority="100">HandAttack</action>
+        <autoattacktype>LogicalTypeHandUnitsAutoAttack</autoattacktype>
+        <attackresponsetype>LogicalTypeHandUnitsAttack</attackresponsetype>
+        <attackmovetype>AbstractWall</attackmovetype>
+        <!-- NEW: bonus toward AbstractTownCenter (a real Abstract tag the
+             engine recognizes; "Building" does NOT exist as a unit-type).
+             Combined with the removed MythUnitSiege tag, this tests whether
+             AttackPriorityType alone can drive building focus without the tag. -->
+        <AttackPriorityType bonusFactor="200">AbstractTownCenter</AttackPriorityType>
+    </tactic>
+</tactics>

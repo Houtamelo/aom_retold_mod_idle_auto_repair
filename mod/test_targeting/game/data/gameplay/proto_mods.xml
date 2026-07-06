@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protomods>
+    <!--
+        TEST 1: Cyclops with MythUnitSiege KEPT, plus a custom tactics that
+        adds AttackPriorityType bonusFactor=50 on Villager.
+
+        Expected if AttackPriorityType is honored:
+            Cyclops should prefer villagers over buildings — i.e. NOT hard-focus.
+
+        Expected if AttackPriorityType is ignored:
+            Cyclops keeps its MythUnitSiege hard-focus on buildings (current vanilla).
+    -->
+    <unit name="Cyclops">
+        <tactics mergeMode="replace">cyclops_test.tactics</tactics>
+    </unit>
+
+    <!--
+        TEST 2: Scarab with MythUnitSiege REMOVED, plus a custom tactics that
+        adds AttackPriorityType bonusFactor=50 on Building.
+
+        Expected if AttackPriorityType is honored AND is the actual mechanism:
+            Scarab should still focus buildings (because the +50 bonus outweighs distance).
+
+        Expected if MythUnitSiege is the actual mechanism:
+            Scarab should lose building focus entirely (default minotaur-like behavior).
+    -->
+    <unit name="Scarab">
+        <unittype mergeMode="remove">MythUnitSiege</unittype>
+        <tactics mergeMode="replace">scarab_test.tactics</tactics>
+    </unit>
+
+    <!--
+        TEST 3: Quinametzin with MythUnitRanged REMOVED. No custom tactics —
+        vanilla rangedattack_antiwall.tactics is used.
+
+        This is a baseline. If Quinametzin still hard-focuses buildings without
+        MythUnitRanged, then there's a hidden mechanism we haven't found yet.
+        If it loses building focus entirely, MythUnitRanged is the sole trigger.
+    -->
+    <unit name="Quinametzin">
+        <unittype mergeMode="remove">MythUnitRanged</unittype>
+    </unit>
+</protomods>
