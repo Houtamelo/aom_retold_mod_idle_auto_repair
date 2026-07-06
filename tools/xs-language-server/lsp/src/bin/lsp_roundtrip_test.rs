@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tower_lsp_server::ls_types::Uri;
 
 mod wire_helpers {
@@ -1590,6 +1590,255 @@ fn run_definition_across_include() -> bool {
     )
 }
 
+/// Spawn a server, send `textDocument/signatureHelp`, parse the typed response,
+/// and assert the engine-syscall signature is returned with the expected
+/// `activeParameter`. Per audit R5-F-01/02/03 fix: structured JSON walk, not
+/// substring matching across stdout.
+fn run_signature_help_probe() -> bool {
+    // Two-line file: cursor on the second char of `aiEcho(` (the open paren of
+    // a known engine syscall that takes exactly one `string` argument).
+    let main = "void caller()\n{\n    aiEcho(\"hi\");\n}\n";
+    let (game_root, mod_root, main_uri, _util_uri) =
+        setup_include_mod("signature_help_probe", main, "");
+
+    let server_path = locate_server_binary();
+    let mod_uri = Uri::from_file_path(&mod_root).unwrap();
+    let request_id: i64 = 1300;
+
+    let mut child = Command::new(&server_path)
+        .arg("--game-path")
+        .arg(&game_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn xs-language-server for signatureHelp probe");
+
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut stdout = child.stdout.take().expect("child stdout");
+
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1301,
+        "method": "initialize",
+        "params": {
+            "processId": null,
+            "capabilities": {},
+            "trace": "off",
+            "rootUri": null,
+            "workspaceFolders": [{ "uri": mod_uri, "name": "sig_help_probe" }]
+        }
+    })
+    .to_string();
+    let initialized = json!({"jsonrpc":"2.0","method":"initialized","params":{}}).to_string();
+    let did_open = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": main_uri,
+                "languageId": "xs",
+                "version": 1,
+                "text": main
+            }
+        }
+    })
+    .to_string();
+    // Cursor at line 2 (the `aiEcho("hi");` line), character 11 — inside the
+    // argument list, between `(` and `"hi"`.
+    let sig_help_req = json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "textDocument/signatureHelp",
+        "params": {
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 2, "character": 11 }
+        }
+    })
+    .to_string();
+    let shutdown = json!({"jsonrpc":"2.0","id":1302,"method":"shutdown"}).to_string();
+    let exit = json!({"jsonrpc":"2.0","method":"exit"}).to_string();
+
+    for msg in &[init, initialized, did_open, sig_help_req] {
+        stdin.write_all(frame(msg).as_bytes()).unwrap();
+        stdin.flush().unwrap();
+    }
+
+    let resp = read_response_with_id(&mut stdout, request_id);
+    let outcome = match resp {
+        Ok(msg) => {
+            // Walk the response tree (structured, NOT substring).
+            let result = msg.get("result").cloned().unwrap_or(Value::Null);
+            let signatures = result
+                .get("signatures")
+                .and_then(|s| s.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let label = result
+                .get("signatures")
+                .and_then(|s| s.as_array())
+                .and_then(|a| a.first())
+                .and_then(|s| s.get("label"))
+                .and_then(|l| l.as_str())
+                .unwrap_or("")
+                .to_string();
+            let active = result
+                .get("activeParameter")
+                .and_then(|a| a.as_u64())
+                .unwrap_or(99);
+            let label_ok = label.contains("aiEcho") && label.contains("string");
+            let active_ok = active == 0;
+            let signatures_ok = signatures >= 1;
+            format!(
+                "signatures={signatures} label=\"{label}\" activeParameter={active} \
+                 | label_ok={label_ok} active_ok={active_ok} sigs_ok={signatures_ok}"
+            )
+        }
+        Err(e) => format!("read error: {e}"),
+    };
+
+    // Cleanly shut the server down.
+    for msg in &[shutdown, exit] {
+        stdin.write_all(frame(msg).as_bytes()).unwrap();
+        stdin.flush().unwrap();
+    }
+    drop(stdin);
+    let _ = child.wait();
+
+    let passed = outcome.contains("label_ok=true")
+        && outcome.contains("active_ok=true")
+        && outcome.contains("sigs_ok=true");
+
+    cleanup_include_mod(&game_root, &mod_root);
+
+    if passed {
+        println!("PASS (signature_help_probe): {outcome}");
+        true
+    } else {
+        println!("FAIL (signature_help_probe): {outcome}");
+        false
+    }
+}
+
+/// Spawn a server, send `textDocument/documentLink`, parse the typed response,
+/// and assert at least one link points at the include target's URI. Per
+/// R5-F-01/02/03 fix: structured JSON walk, not substring matching.
+fn run_document_link_probe() -> bool {
+    // Two-file mod: the main file includes util.xs.
+    let main = "include \"util.xs\";\n\nvoid caller() {}\n";
+    let util = "void utility() {}\n";
+    let (game_root, mod_root, main_uri, util_uri) =
+        setup_include_mod("document_link_probe", main, util);
+
+    let server_path = locate_server_binary();
+    let mod_uri = Uri::from_file_path(&mod_root).unwrap();
+    let request_id: i64 = 1310;
+
+    let mut child = Command::new(&server_path)
+        .arg("--game-path")
+        .arg(&game_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn xs-language-server for documentLink probe");
+
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut stdout = child.stdout.take().expect("child stdout");
+
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1311,
+        "method": "initialize",
+        "params": {
+            "processId": null,
+            "capabilities": {},
+            "trace": "off",
+            "rootUri": null,
+            "workspaceFolders": [{ "uri": mod_uri, "name": "doc_link_probe" }]
+        }
+    })
+    .to_string();
+    let initialized = json!({"jsonrpc":"2.0","method":"initialized","params":{}}).to_string();
+    let did_open = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": main_uri,
+                "languageId": "xs",
+                "version": 1,
+                "text": main
+            }
+        }
+    })
+    .to_string();
+    let doc_link_req = json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "textDocument/documentLink",
+        "params": {
+            "textDocument": { "uri": main_uri }
+        }
+    })
+    .to_string();
+    let shutdown = json!({"jsonrpc":"2.0","id":1312,"method":"shutdown"}).to_string();
+    let exit = json!({"jsonrpc":"2.0","method":"exit"}).to_string();
+
+    for msg in &[init, initialized, did_open, doc_link_req] {
+        stdin.write_all(frame(msg).as_bytes()).unwrap();
+        stdin.flush().unwrap();
+    }
+
+    let resp = read_response_with_id(&mut stdout, request_id);
+    let outcome = match resp {
+        Ok(msg) => {
+            let result = msg.get("result").cloned().unwrap_or(Value::Null);
+            let links = result
+                .as_array()
+                .map(|a| {
+                    let count = a.len();
+                    let first_target = a
+                        .first()
+                        .and_then(|l| l.get("target"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let target_match = first_target.contains("util.xs")
+                        || first_target == util_uri.to_string();
+                    (count, first_target, target_match)
+                })
+                .unwrap_or((0, String::new(), false));
+            format!(
+                "links={} first_target=\"{}\" target_matches_util={}",
+                links.0, links.1, links.2
+            )
+        }
+        Err(e) => format!("read error: {e}"),
+    };
+
+    for msg in &[shutdown, exit] {
+        stdin.write_all(frame(msg).as_bytes()).unwrap();
+        stdin.flush().unwrap();
+    }
+    drop(stdin);
+    let _ = child.wait();
+
+    let passed = outcome.contains("links=1 ") || outcome.starts_with("links=1\n");
+    let target_ok = outcome.contains("target_matches_util=true");
+    let final_ok = passed && target_ok;
+
+    cleanup_include_mod(&game_root, &mod_root);
+
+    if final_ok {
+        println!("PASS (document_link_probe): {outcome}");
+        true
+    } else {
+        println!("FAIL (document_link_probe): {outcome}");
+        false
+    }
+}
+
 // The cycle test intentionally detaches from stdout and reaps the child via
 // `try_wait()` / `kill()` within a bounded timeout; the zombie-process lint
 // does not fit this scenario.
@@ -1886,9 +2135,18 @@ fn main() {
     let workspace_ok = run_workspace_tests();
     let semantic_ok = run_semantic_tests();
     let include_ok = run_include_tests();
+    let signature_help_ok = run_signature_help_probe();
+    let document_link_ok = run_document_link_probe();
     let engine_refs_ok = run_engine_references_test();
 
-    if baseline_ok && workspace_ok && semantic_ok && include_ok && engine_refs_ok {
+    if baseline_ok
+        && workspace_ok
+        && semantic_ok
+        && include_ok
+        && signature_help_ok
+        && document_link_ok
+        && engine_refs_ok
+    {
         std::process::exit(0);
     } else {
         std::process::exit(1);
