@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use tempfile::TempDir;
-use tower_lsp_server::ls_types::{Position, Uri};
+use tower_lsp_server::ls_types::{ParameterLabel, Position, Uri};
 use xs_language_server::engine_api::EngineApi;
 use xs_language_server::merged_view::MergedView;
 use xs_language_server::signature_help::signature_help;
@@ -152,4 +152,87 @@ fn included_workspace_function_signature_via_merged_view() {
         label.contains("includedFn") && label.contains("int a") && label.contains("string b"),
         "expected included function signature, got: {label}"
     );
+}
+
+#[test]
+fn engine_syscall_signature_exposes_default_value() {
+    // aiSetHandler documents defaults for both parameters (handlerName = "",
+    // eventType = -1). REQ-SIG-01 says ParameterInformation items MUST expose
+    // the documented default values.
+    let source = "void test() {\n   aiSetHandler(\"handler\", 0);\n}\n";
+    // Cursor just after the opening `(` of `aiSetHandler(`.
+    let pos = Position::new(1, 16);
+    let result = signature_help(source, pos, engine_api(), None, None);
+    let help = result.expect("expected SignatureHelp for aiSetHandler");
+
+    let params = help.signatures[0]
+        .parameters
+        .as_ref()
+        .expect("expected parameters");
+    assert_eq!(params.len(), 2, "expected two parameters");
+    let label_strings: Vec<String> = params
+        .iter()
+        .map(|p| match &p.label {
+            ParameterLabel::Simple(s) => s.clone(),
+            ParameterLabel::LabelOffsets(_) => unreachable!(),
+        })
+        .collect();
+    assert!(
+        label_strings.iter().all(|s| s.contains('=')),
+        "every parameter label should expose its default value, got: {:?}",
+        label_strings
+    );
+    assert!(
+        help.signatures[0].label.contains("handlerName = \"\""),
+        "signature label should include the string default, got: {}",
+        help.signatures[0].label
+    );
+    assert!(
+        help.signatures[0].label.contains("eventType = -1"),
+        "signature label should include the int default, got: {}",
+        help.signatures[0].label
+    );
+}
+
+#[test]
+fn active_parameter_clamped_to_last_index() {
+    // aiSetHandler has exactly two parameters. With three commas before the
+    // cursor, the raw comma count is past the last parameter; REQ-SIG-05 says
+    // activeParameter MUST be clamped to paramCount - 1.
+    let source = "void test() {\n   aiSetHandler(\"a\", 0, 1,\n}\n";
+    let pos = Position::new(1, 25);
+    let result = signature_help(source, pos, engine_api(), None, None);
+    let help = result.expect("expected SignatureHelp for clamped active param");
+    assert_eq!(
+        help.active_parameter,
+        Some(1),
+        "activeParameter should be clamped to paramCount - 1"
+    );
+}
+
+#[test]
+fn engine_syscall_signature_exposes_bool_default() {
+    // kbUnitGetPower documents defaults for both parameters, including a bool
+    // false. Triangulates the defaults-exposure path with a different type.
+    let source = "void test() {\n   kbUnitGetPower(-1, true);\n}\n";
+    // Cursor just after the opening `(` of `kbUnitGetPower(`.
+    let pos = Position::new(1, 18);
+    let result = signature_help(source, pos, engine_api(), None, None);
+    let help = result.expect("expected SignatureHelp for kbUnitGetPower");
+    assert!(
+        help.signatures[0].label.contains("ignoreCurrentHealth = false"),
+        "expected bool default in signature label, got: {}",
+        help.signatures[0].label
+    );
+}
+
+#[test]
+fn active_parameter_clamped_for_single_param_function() {
+    // aiEcho takes a single string argument. Extra commas should still clamp
+    // activeParameter to 0.
+    let source = "void test() {\n   aiEcho(\"a\", \"b\", \"c\",\n}\n";
+    let pos = Position::new(1, 23);
+    let result = signature_help(source, pos, engine_api(), None, None);
+    let help = result.expect("expected SignatureHelp for single-param clamp");
+    assert_eq!(help.active_parameter, Some(0));
 }

@@ -131,3 +131,52 @@ fn mod_overlay_is_preferred_over_vanilla() {
     assert_eq!(target, overlay, "document link should target the mod overlay copy");
     assert_ne!(target, vanilla, "document link should not target the vanilla file");
 }
+
+#[test]
+fn three_resolvable_includes_yield_three_links() {
+    let (_tmp, root, ws, project) = ai_fixture();
+    let main = root.join("game").join("ai").join("main.xs");
+    let ai_dir = main.parent().unwrap();
+    std::fs::write(ai_dir.join("a.xs"), "void a() {}\n").unwrap();
+    std::fs::write(ai_dir.join("b.xs"), "void b() {}\n").unwrap();
+    std::fs::write(ai_dir.join("c.xs"), "void c() {}\n").unwrap();
+    std::fs::write(
+        &main,
+        "include \"a.xs\";\ninclude \"b.xs\";\ninclude \"c.xs\";\n",
+    )
+    .unwrap();
+
+    let source = std::fs::read_to_string(&main).unwrap();
+    let links = document_links(&source, &main, &ws, &project);
+    assert_eq!(
+        links.len(),
+        3,
+        "expected exactly three document links, got {:?}",
+        links
+    );
+}
+
+#[test]
+fn four_resolvable_includes_yield_four_links() {
+    let (_tmp, root, ws, project) = ai_fixture();
+    let main = root.join("game").join("ai").join("main.xs");
+    let ai_dir = main.parent().unwrap();
+    std::fs::write(ai_dir.join("a.xs"), "void a() {}\n").unwrap();
+    std::fs::write(ai_dir.join("b.xs"), "void b() {}\n").unwrap();
+    std::fs::write(ai_dir.join("c.xs"), "void c() {}\n").unwrap();
+    std::fs::write(ai_dir.join("d.xs"), "void d() {}\n").unwrap();
+    std::fs::write(
+        &main,
+        "include \"a.xs\";\ninclude \"b.xs\";\ninclude \"c.xs\";\ninclude \"d.xs\";\n",
+    )
+    .unwrap();
+
+    let source = std::fs::read_to_string(&main).unwrap();
+    let links = document_links(&source, &main, &ws, &project);
+    assert_eq!(
+        links.len(),
+        4,
+        "expected exactly four document links, got {:?}",
+        links
+    );
+}

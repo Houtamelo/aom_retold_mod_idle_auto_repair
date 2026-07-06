@@ -1659,9 +1659,17 @@ fn run_signature_help_probe() -> bool {
     let shutdown = json!({"jsonrpc":"2.0","id":1302,"method":"shutdown"}).to_string();
     let exit = json!({"jsonrpc":"2.0","method":"exit"}).to_string();
 
-    for msg in &[init, initialized, did_open, sig_help_req] {
+    let init_id: i64 = 1301;
+    stdin.write_all(frame(&init).as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    // Wait for the initialize response before sending further messages. This
+    // keeps the server from rejecting the feature request with "Server not
+    // initialized" (R5-F-02 deterministic wait instead of a fixed sleep).
+    let _init_resp = read_response_with_id(&mut stdout, init_id);
+    for msg in &[initialized, did_open, sig_help_req] {
         stdin.write_all(frame(msg).as_bytes()).unwrap();
         stdin.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
     let resp = read_response_with_id(&mut stdout, request_id);
@@ -1785,9 +1793,16 @@ fn run_document_link_probe() -> bool {
     let shutdown = json!({"jsonrpc":"2.0","id":1312,"method":"shutdown"}).to_string();
     let exit = json!({"jsonrpc":"2.0","method":"exit"}).to_string();
 
-    for msg in &[init, initialized, did_open, doc_link_req] {
+    let init_id: i64 = 1311;
+    stdin.write_all(frame(&init).as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    // Wait for the initialize response before sending further messages so the
+    // server is out of the uninitialized state (Gate 4 fix).
+    let _init_resp = read_response_with_id(&mut stdout, init_id);
+    for msg in &[initialized, did_open, doc_link_req] {
         stdin.write_all(frame(msg).as_bytes()).unwrap();
         stdin.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
     let resp = read_response_with_id(&mut stdout, request_id);
