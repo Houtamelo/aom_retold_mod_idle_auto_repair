@@ -30,3 +30,4 @@ tools/intellij-xs-plugin/src/main/resources/bin/
 
 # Exploratory lelwel grammar (proof-of-concept, not the active LSP implementation).
 # See tools/xs-language-server/lelwel-xs/README.md.
+.submodules-cache/
