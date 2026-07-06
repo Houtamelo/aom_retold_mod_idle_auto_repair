@@ -2,7 +2,7 @@ use super::lexer::{Token, tokenize};
 use crate::ast::type_table::TypeTable;
 
 // TODO: change if codespan_reporting is not used
-use codespan_reporting::diagnostic::Label;
+use codespan_reporting::diagnostic::{Label, Severity};
 pub type Diagnostic = codespan_reporting::diagnostic::Diagnostic<()>;
 
 //==============================================================================
@@ -65,6 +65,48 @@ impl<'a> Parser<'a> {
         };
         self.context.is_type(text)
     }
+
+    /// Returns the span of the nearest non-skipped token before the
+    /// current position, if one exists.
+    fn previous_significant_token_span(&self) -> Option<Span> {
+        self.tokens[..self.pos]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, token)| !Self::is_skipped(**token))
+            .map(|(idx, _)| self.cst.data.spans[idx].clone())
+    }
+
+    /// Returns the kind of the nearest non-skipped token before the
+    /// current position, if one exists.
+    fn previous_significant_token(&self) -> Option<Token> {
+        self.tokens[..self.pos]
+            .iter()
+            .rev()
+            .find(|token| !Self::is_skipped(**token))
+            .copied()
+    }
+
+    /// Intercepts generic recovery diagnostics and rewrites them to
+    /// human-readable, span-precise messages.
+    fn diagnostic_for_recovery(&self, raw: Diagnostic) -> Diagnostic {
+        if !raw.message.starts_with("invalid syntax") {
+            return raw;
+        }
+        match self.current {
+            Token::RBrace => {
+                if let Some(prev_span) = self.previous_significant_token_span() {
+                    if self.previous_significant_token() != Some(Token::Semi) {
+                        return Diagnostic::error()
+                            .with_message("missing ';'")
+                            .with_label(Label::primary((), prev_span));
+                    }
+                }
+            }
+            _ => {}
+        }
+        raw
+    }
 }
 
 impl<'a> ParserCallbacks<'a> for Parser<'a> {
@@ -75,9 +117,10 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
         tokenize(source, diags)
     }
     fn create_diagnostic(&self, span: Span, message: String) -> Self::Diagnostic {
-        Self::Diagnostic::error()
+        let raw = Self::Diagnostic::error()
             .with_message(message)
-            .with_label(Label::primary((), span))
+            .with_label(Label::primary((), span));
+        self.diagnostic_for_recovery(raw)
     }
 
     /// Semantic predicate for the declaration branch of `block_item^`.
@@ -139,6 +182,64 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
         // token that starts an expression.
         let next = self.peek(1);
         !matches!(next, Token::RPar | Token::Comma)
+    }
+}
+
+/// Compacts parser recovery cascades into a single, span-precise error.
+///
+/// Generated parser recovery commonly emits many generic
+/// `"invalid syntax"` diagnostics for a single syntax mistake.  This
+/// pass post-processes the diagnostic vector and, when it recognises a
+/// known pattern, removes the cascade and emits one human-readable
+/// diagnostic instead.
+pub fn compact_recovery_messages(source: &str, diagnostics: &mut Vec<Diagnostic>) {
+    fn is_skipped(token: Token) -> bool {
+        matches!(
+            token,
+            Token::Error | Token::LineComment | Token::BlockComment | Token::Whitespace
+        )
+    }
+
+    let has_generic = diagnostics.iter().any(|d| {
+        d.severity == Severity::Error && d.message.starts_with("invalid syntax")
+    });
+    if !has_generic {
+        return;
+    }
+
+    let (tokens, spans) = tokenize(source, &mut Vec::new());
+
+    // Missing statement terminator: any closing brace `}` whose preceding
+    // significant token is not a semicolon indicates a missing `;` on the
+    // previous statement.
+    let mut missing_semi_span: Option<Span> = None;
+    for (idx, token) in tokens.iter().enumerate() {
+        if *token != Token::RBrace {
+            continue;
+        }
+        if let Some((prev_idx, _)) = tokens[..idx]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, token)| !is_skipped(**token))
+        {
+            if tokens[prev_idx] != Token::Semi {
+                missing_semi_span = Some(spans[prev_idx].clone());
+                break;
+            }
+        }
+    }
+
+    if let Some(prev_span) = missing_semi_span {
+        diagnostics.retain(|d| {
+            !(d.severity == Severity::Error && d.message.starts_with("invalid syntax"))
+        });
+        diagnostics.push(
+            Diagnostic::error()
+                .with_message("missing ';'")
+                .with_label(Label::primary((), prev_span)),
+        );
+        return;
     }
 }
 
