@@ -1,0 +1,3 @@
+[submodule "mod/spire_ai"]
+	path = mod/spire_ai
+	url = ../spire_ai

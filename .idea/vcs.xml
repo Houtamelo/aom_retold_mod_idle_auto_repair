@@ -3,5 +3,6 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/extracted/aom_depot_ai_diffs" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/mod/spire_ai" vcs="Git" />
   </component>
 </project>
