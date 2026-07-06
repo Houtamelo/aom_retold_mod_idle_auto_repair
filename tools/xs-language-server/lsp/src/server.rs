@@ -18,6 +18,7 @@ use crate::{
     references,
     semantic,
     semantic_tokens,
+    signature_help,
     symbols,
     word,
     workspace,
@@ -329,6 +330,11 @@ impl LanguageServer for XsLanguageServer {
                     workspace_diagnostics: false,
                     work_done_progress_options: Default::default(),
                 })),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: Default::default(),
+                }),
                 semantic_tokens_provider: Some(semantic_tokens::server_capabilities()),
                 ..Default::default()
             },
@@ -603,6 +609,26 @@ impl LanguageServer for XsLanguageServer {
             }),
             range: None,
         }))
+    }
+
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let merged = self.get_or_build_merged_view(uri, &text).await;
+        let own_table = {
+            let tables = self.symbol_tables.lock().await;
+            tables.get(uri).cloned()
+        };
+
+        let help =
+            signature_help::signature_help(&text, pos, &self.engine, merged.as_ref(), own_table.as_ref());
+        debug!("signature_help: {:?} -> {}", pos, help.is_some());
+        Ok(help)
     }
 
     async fn goto_definition(&self, params: GotoDefinitionParams) -> Result<Option<GotoDefinitionResponse>> {
