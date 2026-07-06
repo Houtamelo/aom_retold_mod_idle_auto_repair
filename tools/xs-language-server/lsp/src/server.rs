@@ -11,6 +11,7 @@ use tracing::{debug, info, warn};
 use crate::{
     completion,
     diagnostics,
+    document_link,
     engine_api,
     include_graph,
     merged_view,
@@ -335,6 +336,10 @@ impl LanguageServer for XsLanguageServer {
                     retrigger_characters: None,
                     work_done_progress_options: Default::default(),
                 }),
+                document_link_provider: Some(DocumentLinkOptions {
+                    resolve_provider: Some(false),
+                    work_done_progress_options: Default::default(),
+                }),
                 semantic_tokens_provider: Some(semantic_tokens::server_capabilities()),
                 ..Default::default()
             },
@@ -629,6 +634,32 @@ impl LanguageServer for XsLanguageServer {
             signature_help::signature_help(&text, pos, &self.engine, merged.as_ref(), own_table.as_ref());
         debug!("signature_help: {:?} -> {}", pos, help.is_some());
         Ok(help)
+    }
+
+    async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
+        let uri = &params.text_document.uri;
+        let text = {
+            let docs = self.documents.lock().await;
+            docs.get(uri).unwrap_or("").to_string()
+        };
+
+        let Some(current_file) = uri.to_file_path() else {
+            return Ok(None);
+        };
+
+        let (ws_clone, project) = {
+            let ws = self.workspace.lock().await;
+            let entry = ws.lookup_mod(uri);
+            let project = match entry {
+                Some(e) => ws.build_virtual_project(e),
+                None => workspace::VirtualProject::default(),
+            };
+            (ws.clone(), project)
+        };
+
+        let links = document_link::document_links(&text, &current_file, &ws_clone, &project);
+        debug!("document_link: {:?} -> {} link(s)", uri, links.len());
+        Ok(Some(links))
     }
 
     async fn goto_definition(&self, params: GotoDefinitionParams) -> Result<Option<GotoDefinitionResponse>> {
